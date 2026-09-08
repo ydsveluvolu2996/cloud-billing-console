@@ -71,6 +71,30 @@ class BillingTests(TestCase):
         self.customer.role_arn = 'arn:aws:iam::999999999999:role/Admin'
         with self.assertRaises(ValidationError): self.customer.full_clean()
 
+    def test_overlapping_account_import_is_rejected(self):
+        other=Customer.objects.create(name='Existing payer',account_id='222222222222')
+        old=self.existing(date(2026,9,1))
+        old.customer=other
+        old.save()
+        ce=Mock()
+        ce.get_cost_and_usage.side_effect=[{},self.response()]
+        run=sync_customer(self.customer,ce,today=date(2026,9,8))
+        self.assertEqual(run.status,'failed')
+        self.assertIn('already assigned',run.error)
+        self.assertEqual(Cost.objects.count(),1)
+
+    def test_budget_uses_whole_customer_despite_service_filter(self):
+        today=timezone.now().date()
+        self.existing(today,amount='10')
+        Cost.objects.create(customer=self.customer,day=today,account_id='123456789012',service='Amazon S3',
+            currency='USD',unblended=Decimal('20'),amortized=Decimal('20'))
+        self.customer.budget=Decimal('25')
+        self.customer.save()
+        result=report({'service':'Amazon EC2'})
+        self.assertEqual(result['total'],10)
+        self.assertEqual(result['rows'][0]['mtd'],30)
+        self.assertTrue(result['rows'][0]['over_budget'])
+
     def test_mixed_currencies_are_not_summed(self):
         today=timezone.now().date()
         self.existing(today, 'USD', '10')

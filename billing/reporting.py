@@ -51,7 +51,7 @@ def report(params):
         item['share'] = max(0, min(100, float(item['amount'] / total * 100))) if total > 0 else 0
     rows = []
     # Portfolio budgets and forecasts always refer to the current calendar month.
-    current = base.filter(day__gte=today.replace(day=1), day__lte=today)
+    current = Cost.objects.filter(customer__in=customers, currency=currency, day__gte=today.replace(day=1), day__lte=today)
     mtd = {x['customer_id']: x['amount'] for x in current.values('customer_id').annotate(amount=Sum(metric))}
     completed = {x['customer_id']: x['amount'] for x in current.filter(day__lt=today).values('customer_id').annotate(amount=Sum(metric))}
     period = {x['customer_id']: x['amount'] for x in selected.values('customer_id').annotate(amount=Sum(metric))}

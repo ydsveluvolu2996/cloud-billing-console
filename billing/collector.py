@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 AWS_CONFIG = Config(retries={'mode': 'standard', 'max_attempts': 5}, connect_timeout=10, read_timeout=60)
 
 
+class OverlappingBillingScope(Exception):
+    pass
+
+
 def cost_client(customer):
     customer.full_clean()
     sts = boto3.client('sts', region_name=settings.AWS_REGION, config=AWS_CONFIG)
@@ -26,6 +30,8 @@ def cost_client(customer):
 
 
 def safe_error(exc):
+    if isinstance(exc, OverlappingBillingScope):
+        return 'An imported account is already assigned to another customer for this period. Resolve the overlapping payer/account connection before retrying.'
     if isinstance(exc, ClientError):
         code = exc.response.get('Error', {}).get('Code', 'AWS error')
         explanations = {
@@ -105,6 +111,9 @@ def sync_customer(customer, client=None, today=None, full=False):
             locked = Customer.objects.select_for_update().get(pk=customer.pk)
             if not locked.enabled or locked.role_arn != customer.role_arn:
                 raise ValueError('Customer connection changed during collection')
+            accounts = {record.account_id for record in records}
+            if Cost.objects.exclude(customer=customer).filter(account_id__in=accounts, day__gte=start, day__lt=end).exists():
+                raise OverlappingBillingScope()
             Cost.objects.filter(customer=customer, day__gte=start, day__lt=end).delete()
             Cost.objects.bulk_create(records, batch_size=1000)
             Customer.objects.filter(pk=customer.pk).update(last_success=timezone.now(), last_error='', verified_at=timezone.now())
