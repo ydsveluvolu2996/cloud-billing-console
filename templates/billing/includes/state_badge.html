@@ -1,0 +1,1 @@
+<span class="badge {% if state == 'Connected' %}good{% elif state == 'Permission problem' or state == 'Partial data' or state == 'Stale data' %}warn{% elif state == 'Paused' or state == 'Offboarded' %}muted-badge{% else %}pending-badge{% endif %}">{{ state }}</span>

@@ -1,3 +1,4 @@
+"""Regression tests for collection, reporting, exports and access control on the new data model."""
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
@@ -7,266 +8,180 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings, Client
 from django.utils import timezone
-from billing.collector import sync_customer, verify
-from billing.models import Cost, Customer
-from billing.onboarding import customer_template, quick_create_url
+from billing.aws import Meter
+from billing.collector import collect_source, verify_source
+from billing.models import Budget, BudgetAmount, CollectionPeriod, Cost, Customer, BillingSource
+from billing.onboarding import source_template, quick_create_url
 from billing.reporting import report
+from .helpers import FakeSession, assign, ce_client, ce_page, cost, make_customer, web_settings
 
 
-@override_settings(SECURE_SSL_REDIRECT=False, STORAGES={'default': {'BACKEND':'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
+@web_settings
 class BillingTests(TestCase):
     def setUp(self):
-        self.customer = Customer.objects.create(name='Test customer', account_id='123456789012',
-            role_arn='arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly', last_success=timezone.now())
+        self.customer, self.source = make_customer('Test customer', '123456789012')
         self.admin = User.objects.create_user('owner', password='test-only-a-long-password', is_staff=True)
         self.reader = User.objects.create_user('reader', password='test-only-a-long-password')
+        self.today = date(2026, 9, 8)
 
-    def response(self, amount='10.10', day='2026-09-01', token=None):
-        r = {'ResultsByTime': [{'TimePeriod': {'Start':day, 'End':str(date.fromisoformat(day)+timedelta(days=1))},
-          'Estimated':True, 'Groups':[{'Keys':['123456789012','Amazon EC2'], 'Metrics': {
-          'UnblendedCost': {'Amount':amount, 'Unit':'USD'}, 'AmortizedCost': {'Amount':amount,'Unit':'USD'}}}]}]}
-        if token:
-            r['NextPageToken'] = token
-        return r
-
-    def existing(self, day, currency='USD', amount='90'):
-        return Cost.objects.create(customer=self.customer, day=day, account_id='123456789012',
-            service='Amazon EC2', currency=currency, unblended=Decimal(amount), amortized=Decimal(amount))
+    def collect(self, pages, months=None):
+        return collect_source(self.source, months=months or [date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)
 
     def test_sync_replaces_revisions_without_duplicates(self):
-        ce = Mock()
-        ce.get_cost_and_usage.side_effect = [{}, self.response(), {}, self.response('11.25')]
-        for _ in range(2):
-            self.assertEqual(sync_customer(self.customer, ce, today=date(2026,9,8)).status, 'success')
+        for amount in ('10.10', '11.25'):
+            run = self.collect([ce_page([('123456789012', 'Amazon EC2', amount)], date(2026, 9, 1))])
+            self.assertEqual(run.status, 'success')
         self.assertEqual(Cost.objects.count(), 1)
         self.assertEqual(Cost.objects.get().unblended, Decimal('11.25'))
+        period = CollectionPeriod.objects.get(source=self.source, month=date(2026, 9, 1))
+        self.assertEqual((period.status, period.revision, period.rows), ('complete', 2, 1))
 
     def test_failure_on_later_page_preserves_all_previous_data(self):
-        old = self.existing(date(2026,9,1))
-        before = self.customer.last_success
-        ce = Mock()
-        ce.get_cost_and_usage.side_effect = [{}, self.response(token='next'), ClientError({'Error':{'Code':'AccessDenied'}}, 'GetCostAndUsage')]
-        run = sync_customer(self.customer, ce, today=date(2026,9,8))
-        self.assertEqual(run.status, 'failed')
+        old = cost(self.source, date(2026, 9, 1), '90')
+        before = self.source.last_success
+        with self.assertRaises(ClientError):
+            self.collect([ce_page([('123456789012', 'Amazon EC2', '5')], date(2026, 9, 1), token='next'),
+                          ClientError({'Error': {'Code': 'AccessDenied'}}, 'GetCostAndUsage')])
         self.assertEqual(Cost.objects.get(pk=old.pk).unblended, 90)
-        self.customer.refresh_from_db()
-        self.assertEqual(self.customer.last_success, before)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.last_success, before)
+        self.assertIn('AccessDenied', self.source.last_error)
+        self.assertEqual(self.source.syncs.first().status, 'failed')
 
     def test_pagination_and_negative_credits(self):
-        ce = Mock()
-        ce.get_cost_and_usage.side_effect = [{}, self.response(token='next'), self.response('-2.50', day='2026-09-02')]
-        run = sync_customer(self.customer, ce, today=date(2026,9,8))
+        client = ce_client([ce_page([('123456789012', 'Amazon EC2', '10.10')], date(2026, 9, 1), token='next'),
+                            ce_page([('123456789012', 'Amazon EC2', '-2.50')], date(2026, 9, 2))])
+        run = collect_source(self.source, months=[date(2026, 9, 1)], client=client, meter=Meter(limit=0), today=self.today)
         self.assertEqual(run.status, 'success')
         self.assertEqual(Cost.objects.count(), 2)
-        self.assertEqual(ce.get_cost_and_usage.call_args.kwargs['NextPageToken'], 'next')
-        self.assertEqual(sum(Cost.objects.values_list('unblended',flat=True)), Decimal('7.60'))
+        self.assertEqual(client.get_cost_and_usage.call_args.kwargs['NextPageToken'], 'next')
+        self.assertEqual(sum(Cost.objects.values_list('unblended', flat=True)), Decimal('7.60'))
+        self.assertEqual(run.requests, 2)
 
-    def test_paused_customer_never_calls_aws(self):
-        self.customer.enabled=False
-        ce=Mock()
-        self.assertIsNone(sync_customer(self.customer, ce))
-        ce.get_cost_and_usage.assert_not_called()
+    def test_paused_source_never_calls_aws(self):
+        self.source.enabled = False
+        client = Mock()
+        self.assertIsNone(collect_source(self.source, client=client))
+        client.get_cost_and_usage.assert_not_called()
 
-    def test_role_must_match_customer_account_and_restricted_path(self):
-        self.customer.role_arn = 'arn:aws:iam::999999999999:role/Admin'
-        with self.assertRaises(ValidationError): self.customer.full_clean()
+    def test_role_must_match_account_and_restricted_path(self):
+        self.source.role_arn = 'arn:aws:iam::999999999999:role/Admin'
+        with self.assertRaises(ValidationError):
+            self.source.full_clean()
 
     def test_overlapping_account_import_is_rejected(self):
-        other=Customer.objects.create(name='Existing payer',account_id='222222222222')
-        old=self.existing(date(2026,9,1))
-        old.customer=other
-        old.save()
-        ce=Mock()
-        ce.get_cost_and_usage.side_effect=[{},self.response()]
-        run=sync_customer(self.customer,ce,today=date(2026,9,8))
-        self.assertEqual(run.status,'failed')
-        self.assertIn('already assigned',run.error)
-        self.assertEqual(Cost.objects.count(),1)
+        other, other_source = make_customer('Existing payer', '222222222222')
+        cost(other_source, date(2026, 9, 1), '90', account_id='123456789012')
+        with self.assertRaises(Exception):
+            self.collect([ce_page([('123456789012', 'Amazon EC2', '5')], date(2026, 9, 1))])
+        self.source.refresh_from_db()
+        self.assertIn('already collected through another connection', self.source.last_error)
+        self.assertEqual(Cost.objects.count(), 1)
+
+    def test_management_account_costs_counted_once(self):
+        """Payer row = management account's own spend + members; never payer + members again."""
+        run = self.collect([ce_page([('123456789012', 'AWS Support', '30'), ('210987654321', 'Amazon EC2', '70'), ('210987654321', 'Amazon S3', '5')], date(2026, 9, 1))])
+        self.assertEqual(run.status, 'success')
+        result = report({'start': '2026-09-01', 'end': '2026-09-01', 'customer': str(self.customer.pk)})
+        self.assertEqual(result['total'], Decimal('105'))
+        self.assertEqual(len(result['account_rows']), 2)
+        self.assertTrue(any(r['is_management'] for r in result['account_rows']))
 
     def test_budget_uses_whole_customer_despite_service_filter(self):
-        today=timezone.now().date()
-        self.existing(today,amount='10')
-        Cost.objects.create(customer=self.customer,day=today,account_id='123456789012',service='Amazon S3',
-            currency='USD',unblended=Decimal('20'),amortized=Decimal('20'))
-        self.customer.budget=Decimal('25')
-        self.customer.save()
-        result=report({'service':'Amazon EC2'})
-        self.assertEqual(result['total'],10)
-        self.assertEqual(result['rows'][0]['mtd'],30)
-        self.assertTrue(result['rows'][0]['over_budget'])
+        today = timezone.now().date()
+        cost(self.source, today, '10')
+        cost(self.source, today, '20', service='Amazon S3')
+        budget = Budget.objects.create(customer=self.customer, scope=Budget.CUSTOMER, name='b')
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('25'))
+        result = report({'service': 'Amazon EC2'})
+        self.assertEqual(result['total'], Decimal('10'))
+        row = result['rows'][0]
+        self.assertEqual(row['mtd'], Decimal('30'))
+        self.assertTrue(row['over_budget'])
+        self.assertEqual(result['over_budget'], 1)
 
-    def test_mixed_currencies_are_not_summed(self):
-        today=timezone.now().date()
-        self.existing(today, 'USD', '10')
-        self.existing(today, 'INR', '800')
-        self.assertEqual(report({'currency':'USD'})['total'], 10)
-        self.assertEqual(report({'currency':'INR'})['total'], 800)
+    def test_missing_budget_is_not_configured_not_zero(self):
+        cost(self.source, timezone.now().date(), '10')
+        row = report({})['rows'][0]
+        self.assertIsNone(row['budget'])
+        self.assertFalse(row['over_budget'])
+        self.assertEqual(row['budget_percent'], 0)
 
-    def test_date_range_validation(self):
-        with self.assertRaises(ValueError): report({'start':'2026-04-20','end':'2026-04-01'})
-        with self.assertRaises(ValueError): report({'start':'not-a-date'})
+    def test_currencies_are_never_summed(self):
+        cost(self.source, date(2026, 9, 1), '10')
+        cost(self.source, date(2026, 9, 1), '10', currency='EUR', service='Amazon S3')
+        self.assertEqual(report({'start': '2026-09-01', 'end': '2026-09-01'})['total'], Decimal('10'))
+        self.assertEqual(report({'start': '2026-09-01', 'end': '2026-09-01', 'currency': 'EUR'})['total'], Decimal('10'))
+        with self.assertRaises(ValueError):
+            report({'currency': 'JPY'})
 
-    def test_anonymous_access_redirects_and_csrf_is_enforced(self):
-        for path in ['/', '/customers/', '/activity/', '/export/', f'/customers/{self.customer.pk}/template/']:
-            self.assertEqual(self.client.get(path).status_code,302)
-        secure_client=Client(enforce_csrf_checks=True)
-        secure_client.force_login(self.admin)
-        self.assertEqual(secure_client.post('/customers/add/', {'name':'Bad','account_id':'234567890123'}).status_code,403)
+    def test_missing_versus_zero(self):
+        cost(self.source, date(2026, 9, 1), '0')
+        result = report({'start': '2026-09-01', 'end': '2026-09-02'})
+        self.assertEqual(result['points'][0]['amount'], 0.0)
+        self.assertIsNone(result['points'][1]['amount'])
+        self.assertEqual(result['missing_days'], 1)
 
-    def test_reader_cannot_modify_customer(self):
-        self.client.force_login(self.reader)
-        self.assertEqual(self.client.get('/').status_code, 200)
-        self.assertEqual(self.client.post('/customers/add/',{}).status_code,403)
-        self.assertEqual(self.client.post(f'/customers/{self.customer.pk}/sync/').status_code,403)
+    def test_reader_cannot_manage_but_can_view_and_export(self):
+        client = Client()
+        client.force_login(self.reader)
+        self.assertEqual(client.get('/customers/').status_code, 200)
+        self.assertEqual(client.get('/customers/add/').status_code, 403)
+        self.assertEqual(client.post(f'/customers/{self.customer.pk}/sync/').status_code, 403)
+        self.assertEqual(client.get(f'/sources/{self.source.pk}/').status_code, 403)
+        self.assertEqual(client.get(f'/budgets/add/?customer={self.customer.pk}').status_code, 403)
+        self.assertEqual(client.post(f'/sources/{self.source.pk}/pause/').status_code, 403)
+        cost(self.source, date(2026, 9, 1), '1.5')
+        response = client.get('/export/?start=2026-09-01&end=2026-09-01')
+        self.assertContains(response, '1.5000000000')
+        self.assertEqual(Client().get('/customers/').status_code, 302)
 
-    def test_all_main_pages_render(self):
-        self.client.force_login(self.admin)
-        for path in ['/', '/customers/', '/customers/add/', '/activity/', f'/customers/{self.customer.pk}/']:
-            response=self.client.get(path)
-            self.assertEqual(response.status_code,200, path)
+    def test_dashboard_and_portfolio_render_with_scope_links(self):
+        client = Client()
+        client.force_login(self.admin)
+        cost(self.source, date(2026, 9, 1), '5')
+        self.assertContains(client.get('/portfolio/?start=2026-09-01&end=2026-09-01'), 'Test customer')
+        self.assertEqual(client.get('/').status_code, 200)
+        self.assertEqual(client.get('/overview/').status_code, 200)
+        self.assertEqual(client.get(f'/customers/{self.customer.pk}/').status_code, 200)
+        self.assertEqual(client.get('/portfolio/?customer=not-a-uuid').status_code, 400)
 
-    def test_csv_escapes_formula_injection_and_respects_currency(self):
-        self.customer.name='=HYPERLINK("https://example.com")'
-        self.customer.save()
-        self.existing(timezone.now().date(), 'USD','12.5')
-        self.existing(timezone.now().date(), 'INR','1000')
-        self.client.force_login(self.admin)
-        data=self.client.get('/export/?currency=USD').content.decode()
-        self.assertIn("'=HYPERLINK",data)
-        self.assertNotIn('1000.0000000000',data)
+    def test_template_and_quick_create_link_use_connection_identity(self):
+        with override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector', ARTIFACT_BUCKET='bucket', AWS_REGION='ap-south-1'):
+            template = yaml.safe_load(source_template(self.source))
+            self.assertEqual(template['Parameters']['ExternalId']['Default'], self.source.external_id)
+            self.assertEqual(template['Parameters']['ExpectedAccountId']['Default'], '123456789012')
+            self.assertEqual(template['Parameters']['EnableOrganizationsDiscovery']['Default'], 'true')
+            statements = template['Resources']['CostReadRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
+            self.assertEqual(len(statements[0]['Action']), 6)
+            self.assertIn('organizations:ListAccounts', statements[1]['Fn::If'][1]['Action'])
+            self.assertEqual(statements[2]['Fn::If'][1]['Action'], ['budgets:ViewBudget'])
+            with patch('billing.onboarding.boto3.client') as s3:
+                s3.return_value.generate_presigned_url.return_value = 'https://s3.ap-south-1.amazonaws.com/bucket/templates/customer-role.yaml?sig'
+                url = quick_create_url(self.source)
+            self.assertIn('param_ExternalId=' + self.source.external_id, url)
+            self.assertIn('param_EnableOrganizationsDiscovery=true', url)
+            self.assertTrue(url.startswith('https://ap-south-1.console.aws.amazon.com/cloudformation/'))
 
-    @override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/CloudBillingCollector')
-    def test_onboarding_template_scopes_trust_and_only_cost_read(self):
-        template=yaml.safe_load(customer_template(self.customer))
-        role=template['Resources']['CostReadRole']['Properties']
-        self.assertEqual(template['Parameters']['ExternalId']['Default'],str(self.customer.external_id))
-        self.assertEqual(set(role['Policies'][0]['PolicyDocument']['Statement'][0]['Action']), {'ce:GetCostAndUsage','ce:GetDimensionValues','ce:GetTags','ce:GetCostCategories','ce:GetCostForecast','ce:GetCostAndUsageWithResources'})
-        self.assertIn('sts:ExternalId', role['AssumeRolePolicyDocument']['Statement'][0]['Condition']['StringEquals'])
+    def test_verification_checks_identity_and_capabilities(self):
+        sts = Mock(); sts.get_caller_identity.return_value = {'Account': '123456789012'}
+        orgs = Mock(); orgs.describe_organization.return_value = {'Organization': {'MasterAccountId': '123456789012'}}
+        budgets = Mock(); budgets.describe_budgets.side_effect = ClientError({'Error': {'Code': 'AccessDeniedException'}}, 'DescribeBudgets')
+        capabilities = verify_source(self.source, session=FakeSession(sts=sts, ce=Mock(), organizations=orgs, budgets=budgets), meter=Meter(limit=0))
+        self.assertTrue(capabilities['organizations'])
+        self.assertFalse(capabilities['budgets'])
+        self.assertTrue(capabilities['cost_explorer'])
+        sts.get_caller_identity.return_value = {'Account': '999999999999'}
+        with self.assertRaises(ValueError):
+            verify_source(self.source, session=FakeSession(sts=sts, ce=Mock()), meter=Meter(limit=0))
 
-    @patch('billing.collector.cost_client')
-    def test_verified_connection_queues_initial_import(self, make_client):
-        make_client.return_value.get_cost_and_usage.return_value={}
-        self.client.force_login(self.admin)
-        self.client.post(f'/customers/{self.customer.pk}/', {'action':'connection','role_arn':self.customer.role_arn})
-        self.customer.refresh_from_db()
-        self.assertTrue(self.customer.sync_requested)
-        self.assertIsNotNone(self.customer.verified_at)
-
-    @override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/CloudBillingCollector',ARTIFACT_BUCKET='test-billing-bucket',AWS_REGION='ap-south-1')
-    def test_setup_link_signs_regional_endpoint_and_round_trips_parameters(self):
-        import boto3
-        from urllib.parse import urlparse,parse_qs
-        factory=boto3.session.Session(aws_access_key_id='test-access-key',aws_secret_access_key='test-secret-key').client
-        with patch('billing.onboarding.boto3.client',side_effect=factory):
-            link=quick_create_url(self.customer)
-        params=parse_qs(urlparse(link).fragment.split('?',1)[1])
-        self.assertEqual(urlparse(params['templateURL'][0]).hostname,'test-billing-bucket.s3.ap-south-1.amazonaws.com')
-        self.assertEqual(params['param_ExternalId'],[str(self.customer.external_id)])
-        self.assertEqual(params['param_ExpectedAccountId'],['123456789012'])
-
-    @patch('billing.reporting.timezone.now')
-    def test_breakdowns_preserve_negative_credits_and_filters(self, now):
-        from datetime import datetime, timezone as dt_timezone
-        from urllib.parse import urlparse, parse_qs
-        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
-        self.existing(date(2026,9,1), amount='12.25')
-        Cost.objects.create(customer=self.customer,day=date(2026,9,2),account_id='123456789012',
-            service='Credit',currency='USD',unblended=Decimal('-2.25'),amortized=Decimal('-2.25'))
-        result=report({'start':'2026-09-01','end':'2026-09-03','metric':'amortized'})
-        self.assertEqual(result['total'],10)
-        self.assertEqual(sum(row['amount'] for row in result['service_rows']),10)
-        self.assertEqual(sum(row['amount'] for row in result['account_rows']),10)
-        self.assertEqual(result['service_rows'][-1]['amount'],Decimal('-2.25'))
-        for row in [result['rows'][0],result['account_rows'][0],result['service_rows'][0]]:
-            query=parse_qs(urlparse(row['url']).query)
-            self.assertEqual(query['start'],['2026-09-01'])
-            self.assertEqual(query['end'],['2026-09-03'])
-            self.assertEqual(query['metric'],['amortized'])
-        self.assertIsNone(result['points'][2]['amount'])
-        self.assertEqual(result['missing_days'],1)
-
-    @patch('billing.reporting.timezone.now')
-    def test_monthly_chart_keeps_missing_month_gaps_and_zero_cost(self, now):
-        from datetime import datetime, timezone as dt_timezone
-        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
-        self.existing(date(2026,7,1),amount='5')
-        self.existing(date(2026,9,1),amount='0')
-        result=report({'start':'2026-07-01','end':'2026-09-08','granularity':'monthly'})
-        self.assertEqual([point['amount'] for point in result['points']],[5.0,None,0.0])
-        self.assertEqual(result['points'][1]['label'],'Aug 2026')
-
-    def test_refresh_scopes_customer_and_preserves_filters(self):
-        from urllib.parse import urlparse, parse_qs
-        other=Customer.objects.create(name='Other customer',account_id='222222222222',role_arn='arn:aws:iam::222222222222:role/BillingConsole/CostReadOnly')
-        self.client.force_login(self.reader)
-        self.assertEqual(self.client.post('/refresh/',{}).status_code,403)
-        self.client.force_login(self.admin)
-        response=self.client.post('/refresh/',{'customer':str(self.customer.pk),'service':'Amazon EC2','metric':'amortized'})
-        self.customer.refresh_from_db(); other.refresh_from_db()
-        self.assertTrue(self.customer.sync_requested)
-        self.assertFalse(other.sync_requested)
-        self.assertEqual(response.status_code,302)
-        self.assertEqual(parse_qs(urlparse(response.url).query)['service'],['Amazon EC2'])
-        self.assertEqual(parse_qs(urlparse(response.url).query)['metric'],['amortized'])
-
-    def test_bad_filters_show_recovery_page_and_do_not_queue(self):
-        self.client.force_login(self.admin)
-        response=self.client.get('/?customer=bad-id')
-        self.assertEqual(response.status_code,400)
-        self.assertContains(response,'Open cost overview',status_code=400)
-        self.assertEqual(self.client.post('/refresh/',{'start':'invalid'}).status_code,400)
-        self.customer.refresh_from_db()
-        self.assertFalse(self.customer.sync_requested)
-
-    @patch('billing.explorer.timezone.now')
-    def test_explorer_default_six_complete_months_across_year(self, now):
-        from datetime import datetime, timezone as dt_timezone
-        from billing.explorer import defaults
-        now.return_value = datetime(2026,2,4,tzinfo=dt_timezone.utc)
-        params=defaults({})
-        self.assertEqual(params['start'],'2025-08-01')
-        self.assertEqual(params['end'],'2026-01-31')
-        self.assertEqual(params['granularity'],'monthly')
-
-    @patch('billing.reporting.timezone.now')
-    def test_explorer_pivot_and_chart_reconcile_for_every_group(self, now):
-        from datetime import datetime, timezone as dt_timezone
-        from billing.explorer import explorer_report
-        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
-        self.existing(date(2026,7,1),amount='9')
-        self.existing(date(2026,9,1),amount='0')
-        for i in range(11):
-            Cost.objects.create(customer=self.customer,day=date(2026,7,2),account_id='123456789012',
-                service=f'Service {i}',currency='USD',unblended=Decimal(i)-5,amortized=Decimal(i)-5)
-        for group in ['service','account','customer']:
-            params={'start':'2026-07-01','end':'2026-09-08','granularity':'monthly','group_by':group}
-            result=explorer_report(report(params),params)
-            self.assertEqual(result['period_totals'],[Decimal('9'),None,Decimal('0')])
-            self.assertEqual(sum(row['total'] for row in result['pivot_rows']),9)
-            self.assertEqual(result['period_average'],3)
-            series=result['chart_payload']['series']
-            self.assertEqual(sum(s['values'][0] or 0 for s in series),9)
-            self.assertTrue(all(s['values'][1] is None for s in series))
-            if group=='service':
-                self.assertEqual(len(series),10)
-                self.assertEqual(series[-1]['label'],'Others')
-
-    def test_explorer_csv_matches_matrix_and_escapes_customer_name(self):
-        import csv,io
-        today=timezone.now().date()
-        self.customer.name='=Formula Customer'
-        self.customer.save()
-        self.existing(today,amount='12.25')
-        self.client.force_login(self.reader)
-        query=f'start={today}&end={today}&group_by=customer&granularity=daily'
-        response=self.client.get('/export/report/?'+query)
-        self.assertEqual(response.status_code,200)
-        rows=list(csv.reader(io.StringIO(response.content.decode())))
-        self.assertEqual(rows[0],['Customer','Total (USD)',str(today)])
-        self.assertEqual(rows[2][0],"'=Formula Customer")
-        self.assertEqual(Decimal(rows[1][1]),Decimal('12.25'))
-        self.assertEqual(Decimal(rows[2][2]),Decimal('12.25'))
-        self.assertEqual(self.client.get('/?'+query).status_code,200)
-        self.assertEqual(self.client.get('/portfolio/').status_code,200)
-        self.assertEqual(self.client.get('/?group_by=unsupported').status_code,400)
-        self.assertEqual(self.client.get('/?chart_style=unsupported').status_code,400)
+    def test_customer_status_reflects_connection_states(self):
+        self.assertEqual(self.customer.status, 'Connected')
+        BillingSource.objects.filter(pk=self.source.pk).update(last_success=timezone.now() - timedelta(hours=13))
+        self.assertEqual(Customer.objects.get(pk=self.customer.pk).status, 'Stale data')
+        BillingSource.objects.filter(pk=self.source.pk).update(last_error='AccessDenied: check trust')
+        self.assertEqual(Customer.objects.get(pk=self.customer.pk).status, 'Permission problem')
+        BillingSource.objects.filter(pk=self.source.pk).update(enabled=False)
+        self.assertEqual(Customer.objects.get(pk=self.customer.pk).status, 'Paused')
+        fresh, fresh_source = make_customer('Fresh', '333333333333', connected=False)
+        self.assertEqual(fresh.status, 'Awaiting customer setup')

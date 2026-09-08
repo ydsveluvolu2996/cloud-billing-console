@@ -1,0 +1,1 @@
+<ol class="wizard" aria-label="Onboarding progress">{% for number, label in steps %}<li class="{% if number < step %}done{% elif number == step %}current{% endif %}" {% if number == step %}aria-current="step"{% endif %}><span>{{ number }}</span>{{ label }}</li>{% endfor %}</ol>

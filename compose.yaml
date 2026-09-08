@@ -35,6 +35,24 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     logging: *logging
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    command: ["python", "manage.py", "run_worker"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_NAME: billing
+      DB_USER: billing
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    stop_grace_period: 120s
+    logging: *logging
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped

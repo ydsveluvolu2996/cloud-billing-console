@@ -4,6 +4,7 @@ from decimal import Decimal
 from urllib.parse import urlencode
 from django.utils import timezone
 from . import parameters as contract
+from . import scope as scoping
 from .models import Customer, SavedReport
 from .reporting import report
 from .explorer import explorer_report, CHART_COLORS, SERVICE_LABELS
@@ -39,7 +40,7 @@ def unpack(queries,p,periods):
             if label not in periods:raise ValueError('AWS returned a period outside the selected report.')
             estimated=estimated or period.get('Estimated',False)
             groups=period.get('Groups',[])
-            if not groups and metric in period.get('Total',{}):groups=[{'Keys':[q.customer.name if p['group_by']=='customer' else 'Total'],'Metrics':period['Total']}]
+            if not groups and metric in period.get('Total',{}):groups=[{'Keys':[(q.customer.name if q.customer else q.source.customer.name) if p['group_by']=='customer' else 'Total'],'Metrics':period['Total']}]
             for group in groups:
                 m=group['Metrics'][metric];units.add(m['Unit']);amount=Decimal(m['Amount'])
                 if not amount.is_finite():raise ValueError('AWS returned a non-finite amount.')
@@ -70,9 +71,14 @@ def chart(rows,periods,p,unit):
     return {'periods':periods,'series':series,'totals':[float(v) if v is not None else None for v in pt],'currency':unit,'measure':p['measure'],'style':p['chart_style']},pt
 
 
+def unit_label(q):
+    name=(q.customer or q.source.customer).name
+    return name if q.customer or not q.source.shared else f'{name} (payer {q.source.account_id})'
+
+
 def build_report(params):
     p=contract.normalize(params);today=timezone.now().date();start=date.fromisoformat(p['start']);end=date.fromisoformat(p['end'])
-    local_params={'start':p['start'],'end':str(min(end,today)),'customer':p['customer'],'currency':p['currency'],
+    local_params={'start':p['start'],'end':str(min(end,today)),'customer':p['customer'],'source':p['source'],'currency':p['currency'],
                   'granularity':p['granularity'] if p['granularity']!='hourly' else 'daily',
                   'metric':p['metric'] if p['metric'] in ('unblended','amortized') else 'unblended'}
     if is_local(p):
@@ -81,24 +87,32 @@ def build_report(params):
     context=explorer_report(report(local_params),local_params)
     queries=[];actual=[];previous=[];forecast=[];warnings=[]
     if not is_local(p):
-        selected=Customer.objects.all()
-        if p['customer']:selected=selected.filter(pk=p['customer'])
-        active=selected.filter(enabled=True,last_success__isnull=False).exclude(role_arn='')
-        unavailable=selected.count()-active.count()
+        scope=scoping.resolve(p)
+        selected=Customer.objects.filter(active=True) if not scope.customer else Customer.objects.filter(pk=scope.customer.pk)
+        # One AWS request per (connection, customer scope). Shared payers carry a LINKED_ACCOUNT
+        # restriction derived from account assignments; portfolio reports query each connection once.
+        if scope.customer or p['group_by']=='customer':
+            units=[u for c in selected for u in scoping.report_units(c)]
+        else:
+            units=scoping.report_units(None)
+        if scope.source:units=[u for u in units if u[0].pk==scope.source.pk]
+        if scope.account_id:units=[(s,c,[scope.account_id]) for s,c,a in units if a is None or scope.account_id in a]
+        covered={u[0].customer_id for u in units}|{u[1].pk for u in units if u[1]}
+        unavailable=sum(1 for c in selected if c.pk not in covered)
         if unavailable:warnings.append(f'{unavailable} customer(s) are paused or have not completed a successful import and are excluded from this AWS report.')
         actual_end=min(end,today-timedelta(days=1) if end>today else today)
         period_labels=periods_between(start,actual_end,p['granularity'])
         prior_periods=periods_between(date.fromisoformat(p['compare_start']),date.fromisoformat(p['compare_end']),p['granularity']) if p['report_mode']=='compare' else []
-        for customer in active:
+        for source,customer,accounts in units:
             if start<=actual_end:
-                op,req=contract.aws_request(p,end=str(actual_end));actual.append(get_query(customer,op,req))
+                op,req=contract.aws_request(p,end=str(actual_end));actual.append(get_query(source,op,req,customer=customer,account_filter=accounts))
             if p['report_mode']=='compare':
-                op,req=contract.aws_request(p,start=p['compare_start'],end=p['compare_end']);previous.append(get_query(customer,op,req))
+                op,req=contract.aws_request(p,start=p['compare_start'],end=p['compare_end']);previous.append(get_query(source,op,req,customer=customer,account_filter=accounts))
             if end>today and p['forecast']=='1':
                 req={'TimePeriod':{'Start':str(today),'End':str(end+timedelta(days=1))},'Granularity':p['granularity'].upper(),'Metric':contract.FORECAST_METRICS[p['metric']],'PredictionIntervalLevel':80}
                 exp=contract.expression(p)
                 if exp:req['Filter']=exp
-                forecast.append(get_query(customer,'get_cost_forecast',req))
+                forecast.append(get_query(source,'get_cost_forecast',req,customer=customer,account_filter=accounts))
         queries=actual+previous+forecast
         rows,estimated,unit=unpack(actual,p,period_labels)
         payload,pt=chart(rows,period_labels,p,unit)
@@ -122,14 +136,14 @@ def build_report(params):
         for q in forecast:
             if q.data:
                 for period in q.data.get('ForecastResultsByTime',[]):
-                    frows.append({'customer':q.customer.name,'start':period['TimePeriod']['Start'],'end':period['TimePeriod']['End'],
+                    frows.append({'customer':unit_label(q),'start':period['TimePeriod']['Start'],'end':period['TimePeriod']['End'],
                                   'mean':Decimal(period['MeanValue']),'lower':Decimal(period.get('PredictionIntervalLowerBound','0')),'upper':Decimal(period.get('PredictionIntervalUpperBound','0'))})
         context.update(forecast_rows=frows,forecast_requested=bool(forecast),actual_end=actual_end,aws_report=True)
         for q in queries:
-            if q.error:warnings.append(q.customer.name+': '+q.error+(' Previous cached figures are displayed.' if q.data is not None else ''))
+            if q.error:warnings.append(unit_label(q)+': '+q.error+(' Previous cached figures are displayed.' if q.data is not None else ''))
         context.update(report_pending=any(q.requested for q in queries),query_ids=[q.pk for q in queries],
                        report_incomplete=unavailable>0 or any(q.data is None for q in queries),
-                       report_snapshot='; '.join(f'{q.customer.name}: {q.last_success.isoformat() if q.last_success else "pending"}' for q in actual))
+                       report_snapshot='; '.join(f'{unit_label(q)}: {q.last_success.isoformat() if q.last_success else "pending"}' for q in actual))
     q=contract.querydict(p)
     def url(**changes):
         new=p|changes
@@ -155,7 +169,7 @@ def build_report(params):
                    measure=p['measure'],measure_label='Cost' if p['measure']=='cost' else 'Usage',chart_style=p['chart_style'],
                    export_query=q.urlencode(),style_options=[{'label':s.title(),'value':s,'url':url(chart_style=s)} for s in ('bar','line','stacked')],
                    group_options=list(contract.GROUPS.items()),metric_options=[(k,v[0]) for k,v in contract.METRICS.items()],
-                   warnings=warnings,customers=Customer.objects.all(),saved_reports=SavedReport.objects.all(),
+                   warnings=warnings,customers=Customer.objects.filter(active=True),saved_reports=SavedReport.objects.all(),
                    filter_customer=p['customer'],active_page='explorer',clear_url=url(**{k:[] for k in contract.FILTERS},untagged='0',uncategorized='0'),
                    report_presets=[{'label':label,'url':url(date_range=v)} for label,v in [('This month','this_month'),('Last 3 months','last_3_months'),('Last 6 months','last_6_months')]])
     return context
