@@ -208,14 +208,18 @@ class Command(BaseCommand):
             for path in paths:
                 connection.queries_log.clear()
                 t0 = time.monotonic()
-                response = client.get(path)
+                try:
+                    response = client.get(path)
+                    status = response.status_code
+                except Exception as exc:  # record the failure instead of aborting the whole run
+                    status = f'error: {type(exc).__name__}'
                 elapsed = time.monotonic() - t0
                 queries = list(connection.queries_log)
                 for other in connections.all():
                     if other is not connection and other.alias != connection.alias:
                         queries.extend(other.queries_log)
                 key = path.split('?')[0] if 'customers/' not in path else '/customers/<id>/' + ('?tab=budgets' if 'tab=budgets' in path else '')
-                per_path.setdefault(key, {'samples': [], 'queries': [], 'status': response.status_code})
+                per_path.setdefault(key, {'samples': [], 'queries': [], 'status': status})
                 per_path[key]['samples'].append(elapsed)
                 per_path[key]['queries'].append(len(queries))
             connection.force_debug_cursor = False
@@ -235,7 +239,10 @@ class Command(BaseCommand):
                 local = []
                 for _ in range(per_reader):
                     t0 = time.monotonic()
-                    c.get(rng.choice(mix))
+                    try:
+                        c.get(rng.choice(mix))
+                    except Exception:
+                        pass
                     local.append(time.monotonic() - t0)
                 close_old_connections()
                 with lock:
