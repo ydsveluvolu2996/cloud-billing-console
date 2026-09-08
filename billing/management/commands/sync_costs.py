@@ -3,7 +3,8 @@ from pathlib import Path
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from billing.collector import sync_customer
-from billing.models import Customer, SyncRun
+from billing.models import Customer, SyncRun, SavedReport
+from billing.query_cache import refresh_queries
 
 
 class Command(BaseCommand):
@@ -38,3 +39,12 @@ class Command(BaseCommand):
                 full = options['full'] or (timezone.now().day == 2 and timezone.now().hour < 6)
                 run = sync_customer(customer, full=full)
                 self.stdout.write(f'{customer.name}: {run.status if run else "skipped"}')
+
+            if not options['queued']:
+                from billing.advanced_explorer import build_report
+                for saved in SavedReport.objects.all():
+                    try:
+                        build_report(saved.parameters)
+                    except ValueError:
+                        self.stderr.write(f'Saved report {saved.pk} needs parameter review.')
+            refresh_queries(customer_id=options['customer'], scheduled=not options['queued'])

@@ -47,7 +47,7 @@ The single instance is a deliberate availability tradeoff. Keep Ubuntu/Docker/co
 ## Customer onboarding
 
 1. Add the customer name, payer/standalone account ID, and optional budget in the dashboard.
-2. Generate their setup link. Their administrator enables Cost Explorer and creates the CloudFormation stack, which creates one IAM role allowing only `ce:GetCostAndUsage`.
+2. Generate their setup link. Their administrator enables Cost Explorer and creates the CloudFormation stack, which creates one IAM role allowing six read-only Cost Explorer actions (costs, dimensions, tags, categories, forecasts and resource costs).
 3. Paste `RoleArn` from CloudFormation Outputs and select **Save & verify connection**. Initial collection is queued and usually starts within one minute.
 4. Review imported totals using the same date range, currency, and cost basis in Cost Explorer. Current dates are estimates. Connect the management/payer account to include its linked accounts.
 5. To disconnect, pause collection and have the customer delete the onboarding stack. Imported data is retained. Permanent data removal should follow your agreed customer retention process.
@@ -67,3 +67,11 @@ DEBUG=true .venv/bin/python manage.py collectstatic --noinput
 ```
 
 GitHub Actions runs the checks against PostgreSQL. `/health/` checks database availability and exposes only status. Application errors and scheduled-job results are retained in rotating local logs; inspect them through SSM. Budget alerts are visible inside the dashboard; outgoing email/Slack notification delivery is not configured.
+
+## Complete report parameters
+
+The Cost Explorer page includes all 19 console billing filters, five cost bases, hourly/daily/monthly reports, usage quantities, period comparisons, AWS forecasts, tag/category absence views, filter visibility preferences, saved reports and import of the supplied AWS report URL. See [the parameter map](docs/cost-explorer-parameters.md) for exact behavior and AWS prerequisites.
+
+Advanced reports use a PostgreSQL-backed request cache and the existing cron worker. New queries run within the one-minute queue schedule; reports opened within seven days and saved reports refresh every six hours. Failed refreshes retain prior results and expose the error. Incomplete reports block CSV export. AWS Cost Explorer charges apply per API request/page, including metadata and forecast requests; cached chart changes make no additional AWS calls.
+
+For upgrades, back up first, build the application image, run `docker compose run --rm app python manage.py migrate --noinput`, and recreate the app. Update the existing customer IAM stack with `deploy/customer-role.yaml` and replace the generic onboarding template in the private artifact bucket. Resource/hourly opt-ins and tag activation remain customer-controlled.

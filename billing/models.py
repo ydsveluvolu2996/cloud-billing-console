@@ -84,3 +84,32 @@ class AuditEvent(models.Model):
 
     class Meta:
         ordering = ['-at']
+
+
+class ExplorerQuery(models.Model):
+    """A single customer/AWS request; old data survives unsuccessful refreshes."""
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='explorer_queries')
+    fingerprint = models.CharField(max_length=64)
+    operation = models.CharField(max_length=50)
+    parameters = models.JSONField(default=dict)
+    connection_fingerprint = models.CharField(max_length=64)
+    data = models.JSONField(null=True, blank=True)
+    requested = models.BooleanField(default=True)
+    last_used = models.DateTimeField(default=timezone.now)
+    last_attempt = models.DateTimeField(null=True, blank=True)
+    last_success = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['customer', 'fingerprint'], name='unique_explorer_query')]
+        indexes = [models.Index(fields=['requested', 'last_used'])]
+
+
+class SavedReport(models.Model):
+    name = models.CharField(max_length=120)
+    parameters = models.JSONField(default=dict)
+    created_by = models.CharField(max_length=150)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name', 'pk']

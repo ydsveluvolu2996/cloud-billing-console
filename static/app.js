@@ -174,10 +174,10 @@ if (explorerHost) {
   const ns = 'http://www.w3.org/2000/svg';
   const amount = value => {
     if (value === null) return '—';
-    return new Intl.NumberFormat('en', {style:'currency', currency:payload.currency, minimumFractionDigits:2,
+    return new Intl.NumberFormat('en', {style:payload.measure==='usage'?'decimal':'currency', currency:payload.measure==='usage'?undefined:payload.currency, minimumFractionDigits:2,
       maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 10 : 2}).format(value);
   };
-  const periodLabel = text => /^\d{4}-/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
+  const periodLabel = text => text.includes(':') ? text + ' UTC' : /^\d{4}-/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
   const drawExplorer = () => {
     const w = Math.max(220, explorerHost.clientWidth), h = explorerHost.clientHeight;
     const pad = {l:w < 400 ? 42 : 55,r:14,t:14,b:34}, pw = w-pad.l-pad.r, ph = h-pad.t-pad.b;
@@ -288,4 +288,86 @@ if (explorerHost) {
     button.setAttribute('aria-pressed',String(!hidden.has(index)));drawExplorer();
   }));
   new ResizeObserver(drawExplorer).observe(explorerHost);drawExplorer();
+}
+
+// Metadata is fetched on demand and cached by the same background worker as reports.
+const reportForm=document.getElementById('report-form');
+if(reportForm){
+  const field=name=>reportForm.elements.namedItem(name);
+  let changed=false;
+  reportForm.addEventListener('change',()=>{changed=true;});
+  reportForm.addEventListener('input',()=>{changed=true;});
+  ['start','end'].forEach(name=>field(name).addEventListener('change',()=>{field('date_range').value='custom';}));
+  field('report_mode').addEventListener('change',()=>{document.querySelector('[data-compare-fields]').hidden=field('report_mode').value!=='compare';});
+  field('group_by').addEventListener('change',()=>{document.querySelector('[data-group-key]').hidden=!['tag','cost_category'].includes(field('group_by').value);});
+  const makeOption=(key,value,checked=false)=>{
+    const label=document.createElement('label');label.className='checkbox-label';
+    const input=document.createElement('input');input.type='checkbox';input.name=key;input.value=value;input.checked=checked;
+    const span=document.createElement('span');span.textContent=value||'(Empty value)';label.append(input,span);return label;
+  };
+  const metadataRequests=new WeakMap();
+  async function metadata(kind,key,status,render){
+    const generation=(metadataRequests.get(status)||0)+1;metadataRequests.set(status,generation);
+    const query=new URLSearchParams({dimension:kind,key,customer:field('customer').value,start:field('start').value,end:field('end').value});
+    let attempts=0;
+    const read=async()=>{
+      try{
+        const response=await fetch(`/explorer/metadata/?${query}`,{credentials:'same-origin'});
+        if(!response.ok){const error=await response.json();throw new Error(error.error||'Could not load billing values.');}
+        const result=await response.json();if(metadataRequests.get(status)!==generation)return;render(result.values);
+        status.textContent=result.errors.length?result.errors.join(' '):result.pending?'Loading from AWS; the worker checks within a minute.':result.values.length?`${result.values.length} available values`:'No values returned for these dates and customers.';
+        if(result.pending&&attempts++<24)setTimeout(read,5000);
+      }catch(error){status.textContent=error.message;}
+    };await read();
+  }
+  reportForm.querySelectorAll('[data-filter]').forEach(box=>{
+    const key=box.dataset.filter, list=box.querySelector('.dimension-values'), status=box.querySelector('[data-filter-status]');
+    const count=()=>{const n=list.querySelectorAll('input:checked').length;box.querySelector('[data-filter-count]').textContent=n?`${n} selected`:'All';};
+    const search=()=>{const term=box.querySelector('[data-value-search]').value.toLowerCase();list.querySelectorAll('label').forEach(label=>{label.hidden=!label.textContent.toLowerCase().includes(term);});};
+    list.addEventListener('change',count);
+    box.querySelector('[data-value-search]').addEventListener('input',search);
+    box.querySelector('[data-load-values]').addEventListener('click',()=>{
+      const keyValue=field(`${key}_key`)?.value||'';
+      if(['tag','cost_category'].includes(key)&&!keyValue){status.textContent='Choose a key first.';return;}
+      metadata(key,keyValue,status,values=>{const existing=new Set([...list.querySelectorAll('input')].map(i=>i.value));values.forEach(value=>{if(!existing.has(value))list.append(makeOption(key,value));});search();});
+    });
+    box.addEventListener('toggle',()=>{if(box.open&&!box.dataset.loaded){box.dataset.loaded='1';(box.querySelector('[data-load-keys]')||box.querySelector('[data-load-values]')).click();}});
+    box.querySelector('[data-add-value]').addEventListener('click',()=>{
+      const input=box.querySelector('[data-manual-value]'), value=input.value;
+      if(!value)return;
+      const existing=[...list.querySelectorAll('input')].find(i=>i.value===value);
+      if(existing)existing.checked=true;else list.append(makeOption(key,value,true));input.value='';count();changed=true;
+    });
+    box.querySelector('[data-clear-values]').addEventListener('click',()=>{list.querySelectorAll('input').forEach(i=>{i.checked=false;});count();changed=true;});
+    box.querySelector('[data-load-keys]')?.addEventListener('click',()=>metadata(key,'',status,values=>{
+      const datalist=document.getElementById(`keys-${key}`);datalist.replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
+    }));
+    box.querySelector(`[name="${key}_key"]`)?.addEventListener('change',()=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);list.replaceChildren();count();status.textContent='Key changed. Load values for this key.';});
+  });
+  document.querySelector('[data-load-group-keys]').addEventListener('click',()=>metadata(field('group_by').value,'',document.querySelector('[data-key-status]'),values=>{
+    document.getElementById('group-key-options').replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
+  }));
+  ['customer','start','end'].forEach(name=>field(name).addEventListener('change',()=>{reportForm.querySelectorAll('[data-filter-status], [data-key-status]').forEach(status=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);status.textContent='Date or customer changed. Reload available values.';});reportForm.querySelectorAll('.dimension-values input:not(:checked)').forEach(input=>input.closest('label').remove());reportForm.querySelectorAll('[data-filter]').forEach(box=>{delete box.dataset.loaded;});}));
+  let preferences={};try{preferences=JSON.parse(localStorage.getItem('billing-filter-visibility')||'{}');}catch{}
+  reportForm.querySelectorAll('[data-visible-filter]').forEach(toggle=>{
+    const box=reportForm.querySelector(`[data-filter="${toggle.dataset.visibleFilter}"]`);
+    const apply=()=>{box.hidden=!toggle.checked&&!box.querySelector('input:checked');};
+    toggle.checked=preferences[toggle.dataset.visibleFilter]!==false;apply();
+    toggle.addEventListener('change',()=>{preferences[toggle.dataset.visibleFilter]=toggle.checked;try{localStorage.setItem('billing-filter-visibility',JSON.stringify(preferences));}catch{}apply();});
+  });
+  document.getElementById('save-current-report')?.addEventListener('submit',event=>{
+    event.currentTarget.elements.namedItem('report_name').value=field('report_name').value;
+  });
+  const pending=document.getElementById('pending-query-ids');
+  if(pending){
+    const ids=JSON.parse(pending.textContent);let checks=0;
+    const poll=async()=>{
+      try{const response=await fetch(`/explorer/status/?ids=${ids.join(',')}`,{credentials:'same-origin'});if(!response.ok)return;
+        const state=await response.json();
+        if(!state.pending){
+          if(!changed)location.reload();else document.querySelector('[data-query-progress]').textContent='Collection completed. Apply parameters or reload to view it.';
+        }else if(checks++<36)setTimeout(poll,5000);else document.querySelector('[data-query-progress]').textContent='Still queued. Reload after collection completes; check Activity if it remains pending.';
+      }catch{document.querySelector('[data-query-progress]').textContent='Unable to check progress. Reload to retry.';}
+    };setTimeout(poll,5000);
+  }
 }

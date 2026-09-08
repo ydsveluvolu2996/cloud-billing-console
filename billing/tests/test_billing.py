@@ -140,7 +140,7 @@ class BillingTests(TestCase):
         template=yaml.safe_load(customer_template(self.customer))
         role=template['Resources']['CostReadRole']['Properties']
         self.assertEqual(template['Parameters']['ExternalId']['Default'],str(self.customer.external_id))
-        self.assertEqual(role['Policies'][0]['PolicyDocument']['Statement'][0]['Action'],'ce:GetCostAndUsage')
+        self.assertEqual(set(role['Policies'][0]['PolicyDocument']['Statement'][0]['Action']), {'ce:GetCostAndUsage','ce:GetDimensionValues','ce:GetTags','ce:GetCostCategories','ce:GetCostForecast','ce:GetCostAndUsageWithResources'})
         self.assertIn('sts:ExternalId', role['AssumeRolePolicyDocument']['Statement'][0]['Condition']['StringEquals'])
 
     @patch('billing.collector.cost_client')

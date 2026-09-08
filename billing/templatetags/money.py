@@ -26,3 +26,10 @@ def price(value, currency='USD'):
     if 0 < abs(value) < 0.01:
         return sign + '<' + prefix + '0.01'
     return sign + prefix + money(abs(value))
+
+
+@register.filter
+def report_amount(value, unit='USD'):
+    if unit in ('USD','INR','EUR','GBP'):
+        return price(value,unit)
+    return precise_money(value)

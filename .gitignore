@@ -10,3 +10,7 @@ staticfiles/
 *.pem
 *.log
 .DS_Store
+
+# Local architecture graph and extraction cache
+graphify-out/
+.graphify_cache/

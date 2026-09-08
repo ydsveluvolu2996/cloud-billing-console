@@ -1,0 +1,49 @@
+<aside class="report-parameters" id="report-parameters" aria-label="Report parameters">
+  <div class="parameters-heading"><h2>Report parameters</h2><button class="icon-button" data-toggle-parameters aria-label="Close report parameters">×</button></div>
+  <form method="get" id="report-form">
+    <input type="hidden" name="chart_style" value="{{ chart_style }}"><input type="hidden" name="currency" value="USD">
+    <section class="parameter-section">
+      <h3>Time</h3>
+      <label>Report mode<select name="report_mode"><option value="standard" {% if params.report_mode == 'standard' %}selected{% endif %}>Standard</option><option value="compare" {% if params.report_mode == 'compare' %}selected{% endif %}>Compare</option></select></label>
+      <label>Date range<select name="date_range" id="date-range"><option value="custom" {% if params.date_range == 'custom' %}selected{% endif %}>Custom dates</option><option value="this_month" {% if params.date_range == 'this_month' %}selected{% endif %}>This month</option><option value="last_month" {% if params.date_range == 'last_month' %}selected{% endif %}>Last month</option><option value="last_7_days" {% if params.date_range == 'last_7_days' %}selected{% endif %}>Last 7 days</option><option value="last_14_days" {% if params.date_range == 'last_14_days' %}selected{% endif %}>Last 14 days</option><option value="last_3_months" {% if params.date_range == 'last_3_months' %}selected{% endif %}>Last 3 months</option><option value="last_6_months" {% if params.date_range == 'last_6_months' %}selected{% endif %}>Last 6 months</option><option value="last_12_months" {% if params.date_range == 'last_12_months' %}selected{% endif %}>Last 12 months</option></select></label>
+      <div class="date-pair"><label>From<input type="date" name="start" value="{{ start|date:'Y-m-d' }}" required></label><label>To<input type="date" name="end" value="{{ end|date:'Y-m-d' }}" required></label></div>
+      <div data-compare-fields {% if params.report_mode != 'compare' %}hidden{% endif %}><label>Compare from<input type="date" name="compare_start" value="{{ params.compare_start }}"></label><label>Compare to<input type="date" name="compare_end" value="{{ params.compare_end }}"></label><p>Leave blank to compare with the preceding period. Whole months use calendar-month comparisons.</p></div>
+      <label>Granularity<select name="granularity"><option value="monthly" {% if granularity == 'monthly' %}selected{% endif %}>Monthly</option><option value="daily" {% if granularity == 'daily' %}selected{% endif %}>Daily</option><option value="hourly" {% if granularity == 'hourly' %}selected{% endif %}>Hourly</option></select></label><p>Hourly and resource reports require enabled AWS granular data and dates within the last 14 days.</p>
+    </section>
+    <section class="parameter-section"><h3>Group by</h3><label>Dimension<select name="group_by">{% for key,label in group_options %}<option value="{{ key }}" {% if group_by == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><div data-group-key {% if group_by != 'tag' and group_by != 'cost_category' %}hidden{% endif %}><label>Group key<input name="group_key" value="{{ params.group_key }}" placeholder="Choose a tag or cost category key" list="group-key-options" maxlength="120"></label><datalist id="group-key-options"></datalist><button type="button" class="text-button" data-load-group-keys>Load available keys</button><p data-key-status></p></div></section>
+    <section class="parameter-section"><div class="parameter-section-title"><h3>Filters <small>({{ applied_count }})</small></h3><a href="{{ clear_url }}">Clear all</a></div>
+      <label>Customer<select name="customer"><option value="">All customers</option>{% for c in customers %}<option value="{{ c.pk }}" {% if filter_customer == c.pk|stringformat:'s' %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></label>
+      <details class="filter-preferences"><summary>Filter preference</summary><p>Choose which filters appear below. Applied filters always stay visible.</p>{% for f in filters %}<label class="checkbox-label"><input type="checkbox" data-visible-filter="{{ f.key }}" checked>{{ f.label }}</label>{% endfor %}</details>
+      <p>Values within a filter use OR. Different filters use AND.</p>
+      {% for f in filters %}
+      <details class="dimension-filter" data-filter="{{ f.key }}" {% if f.expanded %}open{% endif %}>
+        <summary>{{ f.label }}<span data-filter-count>{% if f.values %}{{ f.values|length }} selected{% else %}All{% endif %}</span></summary>
+        <div class="dimension-body">
+          {% if f.is_keyed %}<label>{{ f.label }} key<input name="{{ f.key }}_key" value="{{ f.key_value }}" list="keys-{{ f.key }}" maxlength="120" placeholder="Select or enter a key"></label><datalist id="keys-{{ f.key }}"></datalist><button type="button" class="text-button" data-load-keys="{{ f.key }}">Load available keys</button>{% endif %}
+          <label>Match<select name="{{ f.key }}_mode"><option value="include" {% if f.mode == 'include' %}selected{% endif %}>Include selected values</option><option value="exclude" {% if f.mode == 'exclude' %}selected{% endif %}>Exclude selected values</option></select></label>
+          <input type="search" placeholder="Find {{ f.label|lower }} values" aria-label="Find {{ f.label|lower }} values" data-value-search>
+          <div class="dimension-values">{% for v in f.values %}<label class="checkbox-label"><input type="checkbox" name="{{ f.key }}" value="{{ v }}" checked><span>{{ v }}</span></label>{% endfor %}</div>
+          <button type="button" class="text-button" data-load-values>Load available values</button><span class="filter-loading" data-filter-status role="status"></span>
+          <div class="manual-filter-value"><input type="text" placeholder="Enter exact AWS value" aria-label="Exact {{ f.label|lower }} value" maxlength="1024" data-manual-value><button type="button" class="text-button" data-add-value>Add</button></div>
+          <button type="button" class="text-button" data-clear-values>Clear selection</button>
+          {% if f.key == 'resource' %}<p>Choose EC2-Instances in Service. AWS resource data must already be enabled.</p>{% endif %}
+          {% if f.key == 'tag' %}<p>Only activated cost allocation tags are available in billing reports.</p>{% endif %}
+        </div>
+      </details>
+      {% endfor %}
+    </section>
+    <section class="parameter-section"><h3>Advanced options</h3>
+      <label>Show<select name="measure"><option value="cost" {% if measure == 'cost' %}selected{% endif %}>Costs</option><option value="usage" {% if measure == 'usage' %}selected{% endif %}>Usage quantity</option></select></label>
+      <label>Aggregate costs by<select name="metric">{% for key,label in metric_options %}<option value="{{ key }}" {% if metric == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      <input type="hidden" name="forecast" value="0"><label class="checkbox-label"><input type="checkbox" name="forecast" value="1" {% if params.forecast == '1' %}checked{% endif %}>Show forecasted values</label>
+      <input type="hidden" name="untagged" value="0"><label class="checkbox-label"><input type="checkbox" name="untagged" value="1" {% if params.untagged == '1' %}checked{% endif %}>Show only untagged resources</label>
+      <input type="hidden" name="uncategorized" value="0"><label class="checkbox-label"><input type="checkbox" name="uncategorized" value="1" {% if params.uncategorized == '1' %}checked{% endif %}>Show only uncategorized resources</label>
+      <input type="hidden" name="normalized" value="0"><label class="checkbox-label"><input type="checkbox" name="normalized" value="1" {% if params.normalized == '1' %}checked{% endif %}>Show usage as normalized units</label>
+      <p>Forecasts appear for future dates and depend on AWS history. Untagged/uncategorized views use your selected key. Usage requires one usage type; normalized units apply to eligible instance usage.</p>
+    </section>
+    <section class="parameter-section"><h3>Report library</h3><label>Report name<input name="report_name" value="{{ params.report_name }}" maxlength="120" required></label>{% if user.is_staff %}<button type="submit" class="button secondary full" form="save-current-report">Save current report</button>{% endif %}<p>Apply changes before saving. Relative date ranges update when opened.</p>{% for saved in saved_reports %}<a class="saved-report-link" href="{% url 'open_report' saved.pk %}">▧ {{ saved.name }}</a>{% empty %}<p>No saved reports yet.</p>{% endfor %}</section>
+    <div class="parameter-submit"><button class="button full">Apply parameters</button><a href="/">Reset report</a></div>
+  </form>
+</aside>
+{% if user.is_staff %}<form method="post" action="{% url 'save_report' %}" id="save-current-report">{% csrf_token %}{% for key,values in parameter_pairs %}{% for value in values %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}{% endfor %}</form>{% endif %}
+{{ parameters_json|json_script:'report-parameters-data' }}

@@ -22,6 +22,11 @@ from billing import web
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', web.dashboard, name='dashboard'),
+    path('explorer/metadata/', web.explorer_metadata, name='explorer_metadata'),
+    path('explorer/status/', web.explorer_status, name='explorer_status'),
+    path('reports/save/', web.save_report, name='save_report'),
+    path('reports/import/', web.import_report, name='import_report'),
+    path('reports/<int:pk>/', web.open_report, name='open_report'),
     path('portfolio/', web.portfolio, name='portfolio'),
     path('export/report/', web.export_report, name='export_report'),
     path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),

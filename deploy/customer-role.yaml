@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Read-only Cost Explorer connection for Cloud Billing Console. Creates one role with one cost-reading permission.
+Description: Read-only Cost Explorer connection for Cloud Billing Console. Creates one role with six read-only billing actions.
 Parameters:
   CollectorRoleArn:
     Type: String
@@ -47,7 +47,13 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ce:GetCostAndUsage
+                Action:
+                  - ce:GetCostAndUsage
+                  - ce:GetDimensionValues
+                  - ce:GetTags
+                  - ce:GetCostCategories
+                  - ce:GetCostForecast
+                  - ce:GetCostAndUsageWithResources
                 Resource: '*'
 Outputs:
   RoleArn:
