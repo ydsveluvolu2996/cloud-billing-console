@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings, Client
 from django.utils import timezone
 from billing.collector import sync_customer, verify
 from billing.models import Cost, Customer
-from billing.onboarding import customer_template
+from billing.onboarding import customer_template, quick_create_url
 from billing.reporting import report
 
 
@@ -151,3 +151,15 @@ class BillingTests(TestCase):
         self.customer.refresh_from_db()
         self.assertTrue(self.customer.sync_requested)
         self.assertIsNotNone(self.customer.verified_at)
+
+    @override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/CloudBillingCollector',ARTIFACT_BUCKET='test-billing-bucket',AWS_REGION='ap-south-1')
+    def test_setup_link_signs_regional_endpoint_and_round_trips_parameters(self):
+        import boto3
+        from urllib.parse import urlparse,parse_qs
+        factory=boto3.session.Session(aws_access_key_id='test-access-key',aws_secret_access_key='test-secret-key').client
+        with patch('billing.onboarding.boto3.client',side_effect=factory):
+            link=quick_create_url(self.customer)
+        params=parse_qs(urlparse(link).fragment.split('?',1)[1])
+        self.assertEqual(urlparse(params['templateURL'][0]).hostname,'test-billing-bucket.s3.ap-south-1.amazonaws.com')
+        self.assertEqual(params['param_ExternalId'],[str(self.customer.external_id)])
+        self.assertEqual(params['param_ExpectedAccountId'],['123456789012'])

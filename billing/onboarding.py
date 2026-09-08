@@ -19,7 +19,11 @@ def customer_template(customer):
 def quick_create_url(customer):
     if not settings.ARTIFACT_BUCKET or not settings.COLLECTOR_ROLE_ARN:
         return ''
-    s3 = boto3.client('s3', region_name=settings.AWS_REGION, config=Config(signature_version='s3v4'))
+    # New buckets may redirect the global S3 endpoint. A redirect changes the
+    # signed host and invalidates the URL, so always sign the regional endpoint.
+    s3 = boto3.client('s3', region_name=settings.AWS_REGION,
+                      endpoint_url=f'https://s3.{settings.AWS_REGION}.amazonaws.com',
+                      config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}))
     # Generic template contains no credentials; presigned URL expires after one hour.
     template_url = s3.generate_presigned_url('get_object', Params={'Bucket': settings.ARTIFACT_BUCKET,
         'Key': 'templates/customer-role.yaml'}, ExpiresIn=3600)
