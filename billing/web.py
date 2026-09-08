@@ -12,6 +12,7 @@ from .forms import BudgetForm, ConnectionForm, CustomerForm
 from .models import AuditEvent, Cost, Customer, SyncRun
 from .onboarding import customer_template, quick_create_url
 from .reporting import report
+from .explorer import defaults as explorer_defaults, explorer_report
 
 
 def staff_required(view):
@@ -27,8 +28,21 @@ def staff_required(view):
 @never_cache
 @login_required
 def dashboard(request):
+    return render_dashboard(request, explorer=True)
+
+
+@never_cache
+@login_required
+def portfolio(request):
+    return render_dashboard(request, explorer=False)
+
+
+def render_dashboard(request, explorer):
+    params = explorer_defaults(request.GET) if explorer else request.GET
     try:
-        context = report(request.GET)
+        context = report(params)
+        if explorer:
+            context = explorer_report(context, params)
     except ValueError as exc:
         return render(request, 'billing/filter_error.html', {'error': str(exc), 'active_page': 'overview'}, status=400)
     choices = Cost.objects.all()
@@ -38,8 +52,8 @@ def dashboard(request):
         'currencies': sorted(set(Cost.objects.values_list('currency', flat=True)) | {'USD'}),
         'accounts': choices.order_by('account_id').values_list('account_id', flat=True).distinct(),
         'service_options': choices.order_by('service').values_list('service', flat=True).distinct(),
-        'active_page': 'overview'})
-    return render(request, 'billing/dashboard.html', context)
+        'active_page': 'explorer' if explorer else 'overview'})
+    return render(request, 'billing/explorer.html' if explorer else 'billing/dashboard.html', context)
 
 
 @never_cache
@@ -142,6 +156,8 @@ def refresh_costs(request):
     # Reuse validated filters; never redirect to an arbitrary submitted URL.
     try:
         data = report(request.POST)
+        if request.POST.get('group_by'):
+            data = explorer_report(data, request.POST)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
     items = Customer.objects.filter(enabled=True).exclude(role_arn='')
@@ -176,6 +192,25 @@ def export_csv(request):
         writer.writerow([cost.day.isoformat(), safe_csv(cost.customer.name), cost.account_id, safe_csv(cost.service),
                          cost.currency, str(cost.unblended), str(cost.amortized), cost.estimated])
     AuditEvent.objects.create(actor=request.user.username, action='Cost report exported')
+    return response
+
+
+@never_cache
+@login_required
+def export_report(request):
+    params = explorer_defaults(request.GET)
+    try:
+        data = explorer_report(report(params), params)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="cost-explorer-report.csv"'
+    writer = csv.writer(response)
+    writer.writerow([data['group_label'], 'Total (' + data['currency'] + ')', *data['periods']])
+    writer.writerow(['Total costs', str(data['total']), *[str(v) if v is not None else '' for v in data['period_totals']]])
+    for row in data['pivot_rows']:
+        writer.writerow([safe_csv(row['label']), str(row['total']), *[str(v) if v is not None else '' for v in row['cells']]])
+    AuditEvent.objects.create(actor=request.user.username, action='Grouped cost report exported')
     return response
 
 

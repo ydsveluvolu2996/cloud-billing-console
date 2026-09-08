@@ -151,3 +151,140 @@ if (host) {
   };
   new ResizeObserver(draw).observe(host); draw();
 }
+
+// Explorer parameters stay docked on desktop and open as a drawer on smaller screens.
+const parameters = document.getElementById('report-parameters');
+if (parameters) {
+  const toggles = document.querySelectorAll('[data-toggle-parameters]');
+  const updateExpanded = () => toggles.forEach(button => button.setAttribute('aria-expanded', String(getComputedStyle(parameters).display !== 'none')));
+  toggles.forEach(button => button.addEventListener('click', () => {
+    const open = getComputedStyle(parameters).display !== 'none';
+    document.body.classList.toggle('parameters-hidden', open);
+    document.body.classList.toggle('parameters-open', !open);
+    updateExpanded();
+    if (!open) parameters.querySelector('input:not([type="hidden"])').focus();
+  }));
+  window.addEventListener('resize', updateExpanded); updateExpanded();
+}
+const explorerHost = document.getElementById('explorer-chart');
+if (explorerHost) {
+  const payload = JSON.parse(document.getElementById('explorer-data').textContent);
+  const tooltip = document.getElementById('explorer-tooltip');
+  const hidden = new Set();
+  const ns = 'http://www.w3.org/2000/svg';
+  const amount = value => {
+    if (value === null) return '—';
+    return new Intl.NumberFormat('en', {style:'currency', currency:payload.currency, minimumFractionDigits:2,
+      maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 5 : 2}).format(value);
+  };
+  const periodLabel = text => /^\d{4}-/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
+  const drawExplorer = () => {
+    const w = Math.max(220, explorerHost.clientWidth), h = explorerHost.clientHeight;
+    const pad = {l:w < 400 ? 42 : 55,r:14,t:14,b:34}, pw = w-pad.l-pad.r, ph = h-pad.t-pad.b;
+    const series = payload.series.filter((_,i) => !hidden.has(i));
+    const count = payload.periods.length, step = pw / Math.max(1,count);
+    const totals = payload.periods.map((_,i) => ({
+      positive:series.reduce((sum,s) => sum+Math.max(0,s.values[i]||0),0),
+      negative:series.reduce((sum,s) => sum+Math.min(0,s.values[i]||0),0)
+    }));
+    const rawMax = payload.style === 'stacked' ? Math.max(0,...totals.map(t=>t.positive)) : Math.max(0,...series.flatMap(s=>s.values.map(v=>v||0)));
+    const rawMin = payload.style === 'stacked' ? Math.min(0,...totals.map(t=>t.negative)) : Math.min(0,...series.flatMap(s=>s.values.map(v=>v||0)));
+    const roughStep = (rawMax-rawMin || 1)/4, magnitude = 10 ** Math.floor(Math.log10(roughStep));
+    const tick = [1,2,2.5,5,10].find(n=>n*magnitude>=roughStep)*magnitude;
+    const max = Math.ceil(rawMax/tick)*tick || (rawMin < 0 ? 0 : tick*4), min=Math.floor(rawMin/tick)*tick;
+    const y = value => pad.t+(max-value)/(max-min)*ph;
+    const x = i => pad.l+step*(i+.5);
+    const svg = document.createElementNS(ns,'svg'); svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+    svg.setAttribute('role','group'); svg.setAttribute('aria-label',`${payload.style} chart. Use left and right arrow keys to inspect periods.`);
+    const node = (tag, attrs, text, parent=svg) => {
+      const element=document.createElementNS(ns,tag);
+      for(const [key,value] of Object.entries(attrs)) element.setAttribute(key,value);
+      if(text !== undefined) element.textContent=text;
+      parent.appendChild(element); return element;
+    };
+    for(let i=0;i<=Math.round((max-min)/tick);i++) {
+      const value=min+i*tick;
+      node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:'#e0e5eb','stroke-width':value===0?1.5:1});
+      node('text',{x:pad.l-9,y:y(value)+3,fill:'#647483','text-anchor':'end','font-size':10},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
+    }
+    const positive=Array(count).fill(0),negative=Array(count).fill(0);
+    series.forEach((s,j)=>{
+      if(payload.style === 'line') {
+        let path='',connected=false;
+        s.values.forEach((v,i)=>{
+          if(v===null){connected=false;return;}
+          path+=`${connected?' L':' M'}${x(i)} ${y(v)}`; connected=true;
+          node('circle',{cx:x(i),cy:y(v),r:count>80?1.5:3,fill:s.color});
+        });
+        node('path',{d:path,stroke:s.color,'stroke-width':2,fill:'none'});
+      } else {
+        s.values.forEach((v,i)=>{
+          if(v===null || v===0) return;
+          let from=0,to=v,bw,left;
+          if(payload.style === 'stacked') {
+            from=v>=0?positive[i]:negative[i];to=from+v;
+            if(v>=0)positive[i]=to;else negative[i]=to;
+            bw=Math.max(.5,Math.min(75,step*.57));left=x(i)-bw/2;
+          } else {
+            const groupWidth=Math.min(step*.78,115);
+            bw=Math.max(.4,groupWidth/Math.max(1,series.length)*.87);
+            left=x(i)-groupWidth/2+j*groupWidth/Math.max(1,series.length);
+          }
+          node('rect',{x:left,y:Math.min(y(from),y(to)),width:bw,height:Math.max(.2,Math.abs(y(from)-y(to))),fill:s.color});
+        });
+      }
+    });
+    const every=Math.max(1,Math.ceil(count/Math.max(2,Math.floor(pw/78))));
+    payload.periods.forEach((period,i)=>{
+      if(i%every===0)node('text',{x:x(i),y:h-10,'text-anchor':'middle',fill:'#5d6d7b','font-size':10},/^\d{4}-/.test(period)?periodLabel(period).replace(/ 20\d\d$/,''):period);
+    });
+    const guide=node('line',{x1:0,x2:0,y1:pad.t,y2:h-pad.b,stroke:'#7d93ac','stroke-dasharray':'3 3',visibility:'hidden','pointer-events':'none'});
+    const targets=[];
+    let overlay;
+    const showPeriod=i=>{
+      guide.setAttribute('x1',x(i)); guide.setAttribute('x2',x(i)); guide.setAttribute('visibility','visible');
+      tooltip.replaceChildren();
+      const available=series.filter(s=>s.values[i]!==null);
+      const displayedTotal=payload.totals[i]===null?null:available.reduce((sum,s)=>sum+s.values[i],0);
+      const title=document.createElement('strong'); title.textContent=`${periodLabel(payload.periods[i])} · ${hidden.size ? 'Visible total' : 'Total'} ${amount(displayedTotal)}`;tooltip.appendChild(title);
+      available.forEach(s=>{const span=document.createElement('span');span.textContent=`${s.label}: ${amount(s.values[i])}`;tooltip.appendChild(span);});
+      if(overlay)overlay.remove();
+      const ow=Math.min(310,pw),oh=Math.min(h-pad.t-pad.b,32+available.length*20);
+      const ox=Math.max(pad.l,Math.min(w-pad.r-ow,x(i)+(i<count/2?14:-ow-14)));
+      overlay=node('g',{transform:`translate(${ox},${pad.t})`,'pointer-events':'none','aria-hidden':'true'});
+      node('rect',{x:0,y:0,width:ow,height:oh,rx:7,fill:'#fff',stroke:'#bdcbd9','stroke-width':1.2},undefined,overlay);
+      node('text',{x:12,y:20,fill:'#263e53','font-size':11,'font-weight':600},periodLabel(payload.periods[i]),overlay);
+      node('text',{x:ow-12,y:20,fill:'#263e53','font-size':11,'font-weight':600,'text-anchor':'end'},amount(displayedTotal),overlay);
+      available.slice(0,Math.floor((oh-32)/20)).forEach((s,j)=>{
+        const text=s.label.length>27?s.label.slice(0,25)+'…':s.label;
+        node('rect',{x:12,y:34+j*20,width:7,height:7,fill:s.color},undefined,overlay);
+        node('text',{x:25,y:41+j*20,fill:'#53697c','font-size':10},text,overlay);
+        node('text',{x:ow-12,y:41+j*20,fill:'#263e53','font-size':10,'text-anchor':'end'},amount(s.values[i]),overlay);
+      });
+    };
+    payload.periods.forEach((period,i)=>{
+      const hit=node('rect',{x:pad.l+i*step,y:pad.t,width:step,height:ph,fill:'transparent',tabindex:i===0?0:-1,role:'img',
+        'aria-label':`${periodLabel(period)}. Total ${amount(payload.totals[i])}. Focus to inspect groups.`});
+      hit.addEventListener('pointerenter',()=>showPeriod(i));hit.addEventListener('focus',()=>showPeriod(i));
+      hit.addEventListener('click',()=>showPeriod(i));
+      hit.addEventListener('keydown',event=>{
+        let next;
+        if(event.key==='ArrowRight')next=Math.min(count-1,i+1);
+        if(event.key==='ArrowLeft')next=Math.max(0,i-1);
+        if(event.key==='Home')next=0;
+        if(event.key==='End')next=count-1;
+        if(event.key==='Escape'){overlay?.remove();guide.setAttribute('visibility','hidden');return;}
+        if(next!==undefined){event.preventDefault();hit.tabIndex=-1;targets[next].tabIndex=0;targets[next].focus();}
+      });
+      targets.push(hit);
+    });
+    svg.addEventListener('pointerleave',()=>{overlay?.remove();guide.setAttribute('visibility','hidden');});
+    explorerHost.replaceChildren(svg);
+  };
+  document.querySelectorAll('[data-series]').forEach(button=>button.addEventListener('click',()=>{
+    const index=Number(button.dataset.series);
+    if(hidden.has(index))hidden.delete(index);else hidden.add(index);
+    button.setAttribute('aria-pressed',String(!hidden.has(index)));drawExplorer();
+  }));
+  new ResizeObserver(drawExplorer).observe(explorerHost);drawExplorer();
+}

@@ -15,3 +15,11 @@ def precise_money(value):
     if value is not None and 0 < abs(value) < 0.01:
         return '<0.01' if value > 0 else '−<0.01'
     return money(value)
+
+
+@register.filter
+def price(value, currency='USD'):
+    if value is None:
+        return '—'
+    prefix = {'USD': '$', 'INR': '₹', 'EUR': '€', 'GBP': '£'}.get(currency, currency + ' ')
+    return prefix + precise_money(value)

@@ -22,6 +22,8 @@ from billing import web
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', web.dashboard, name='dashboard'),
+    path('portfolio/', web.portfolio, name='portfolio'),
+    path('export/report/', web.export_report, name='export_report'),
     path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     path('password/', auth_views.PasswordChangeView.as_view(template_name='registration/password.html', success_url='/'), name='password_change'),

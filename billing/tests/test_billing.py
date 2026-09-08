@@ -217,3 +217,56 @@ class BillingTests(TestCase):
         self.assertEqual(self.client.post('/refresh/',{'start':'invalid'}).status_code,400)
         self.customer.refresh_from_db()
         self.assertFalse(self.customer.sync_requested)
+
+    @patch('billing.explorer.timezone.now')
+    def test_explorer_default_six_complete_months_across_year(self, now):
+        from datetime import datetime, timezone as dt_timezone
+        from billing.explorer import defaults
+        now.return_value = datetime(2026,2,4,tzinfo=dt_timezone.utc)
+        params=defaults({})
+        self.assertEqual(params['start'],'2025-08-01')
+        self.assertEqual(params['end'],'2026-01-31')
+        self.assertEqual(params['granularity'],'monthly')
+
+    @patch('billing.reporting.timezone.now')
+    def test_explorer_pivot_and_chart_reconcile_for_every_group(self, now):
+        from datetime import datetime, timezone as dt_timezone
+        from billing.explorer import explorer_report
+        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
+        self.existing(date(2026,7,1),amount='9')
+        self.existing(date(2026,9,1),amount='0')
+        for i in range(11):
+            Cost.objects.create(customer=self.customer,day=date(2026,7,2),account_id='123456789012',
+                service=f'Service {i}',currency='USD',unblended=Decimal(i)-5,amortized=Decimal(i)-5)
+        for group in ['service','account','customer']:
+            params={'start':'2026-07-01','end':'2026-09-08','granularity':'monthly','group_by':group}
+            result=explorer_report(report(params),params)
+            self.assertEqual(result['period_totals'],[Decimal('9'),None,Decimal('0')])
+            self.assertEqual(sum(row['total'] for row in result['pivot_rows']),9)
+            self.assertEqual(result['period_average'],3)
+            series=result['chart_payload']['series']
+            self.assertEqual(sum(s['values'][0] or 0 for s in series),9)
+            self.assertTrue(all(s['values'][1] is None for s in series))
+            if group=='service':
+                self.assertEqual(len(series),10)
+                self.assertEqual(series[-1]['label'],'Others')
+
+    def test_explorer_csv_matches_matrix_and_escapes_customer_name(self):
+        import csv,io
+        today=timezone.now().date()
+        self.customer.name='=Formula Customer'
+        self.customer.save()
+        self.existing(today,amount='12.25')
+        self.client.force_login(self.reader)
+        query=f'start={today}&end={today}&group_by=customer&granularity=daily'
+        response=self.client.get('/export/report/?'+query)
+        self.assertEqual(response.status_code,200)
+        rows=list(csv.reader(io.StringIO(response.content.decode())))
+        self.assertEqual(rows[0],['Customer','Total (USD)',str(today)])
+        self.assertEqual(rows[2][0],"'=Formula Customer")
+        self.assertEqual(Decimal(rows[1][1]),Decimal('12.25'))
+        self.assertEqual(Decimal(rows[2][2]),Decimal('12.25'))
+        self.assertEqual(self.client.get('/?'+query).status_code,200)
+        self.assertEqual(self.client.get('/portfolio/').status_code,200)
+        self.assertEqual(self.client.get('/?group_by=unsupported').status_code,400)
+        self.assertEqual(self.client.get('/?chart_style=unsupported').status_code,400)

@@ -4,6 +4,9 @@ A private team dashboard for daily and monthly AWS costs across customer account
 
 ## Features
 
+- Cost Explorer-style home report: six complete months by default, stacked/bar/line charts, service/account/customer grouping, a right-side parameter panel, and a searchable monthly or daily cost matrix.
+- Separate customer portfolio for budgets and month-end projections. Matrix CSV exports match the visible period columns; detailed CSV exports retain the original cost slices.
+
 - Customer, linked-account, service, currency, date range, and cost-basis filters.
 - Daily/monthly charts with keyboard-accessible values, date shortcuts, period comparisons, month-to-date totals, budget indicators, and a simple month-end run-rate projection.
 - Searchable, sortable customer, AWS account, and service breakdowns; drill-downs preserve dates, currency and cost basis.
