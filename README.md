@@ -42,6 +42,8 @@ Local development defaults to SQLite. Production requires PostgreSQL. Do not pub
 
 SSM is the administration channel. No SSH key or port is required. The instance role can assume only `/BillingConsole/CostReadOnly` roles. Each customer's trust policy must independently authorize the exact collector principal and external ID. The app never stores temporary AWS credentials.
 
+To rename the dashboard, point the new hostname at the Elastic IP and update `DASHBOARD_HOST`, `ALLOWED_HOSTS`, and `CSRF_TRUSTED_ORIGINS` in the private deployment environment. Set `DASHBOARD_ALIASES` to a space-separated list of previous hostnames to keep their HTTPS links working as permanent redirects to the new hostname, preserving paths and query strings. Leave it empty when no aliases are needed. Keep alias DNS records pointed at this instance for certificate renewal. Validate the Caddy configuration and recreate both the app and proxy containers after changing their environment. Verify the new HTTPS certificate, login page, health endpoint, and old-link redirects. No database migration is needed for a hostname change.
+
 The single instance is a deliberate availability tradeoff. Keep Ubuntu/Docker/container dependencies patched. EC2 CPU credits are in standard mode to avoid unexpected surplus-credit charges; monitor capacity as customers grow. Increasing the instance size or moving PostgreSQL to RDS are later options.
 
 ## Customer onboarding

@@ -41,6 +41,7 @@ services:
     ports: ['80:80', '443:443']
     environment:
       DASHBOARD_HOST: ${DASHBOARD_HOST:?Set DASHBOARD_HOST}
+      DASHBOARD_ALIASES: ${DASHBOARD_ALIASES:-}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data

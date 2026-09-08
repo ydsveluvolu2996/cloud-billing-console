@@ -1,4 +1,6 @@
-{$DASHBOARD_HOST} {
+{$DASHBOARD_HOST} {$DASHBOARD_ALIASES} {
+    @alias not host {$DASHBOARD_HOST}
+    redir @alias https://{$DASHBOARD_HOST}{uri} 308
     encode zstd gzip
     header {
         -Server
