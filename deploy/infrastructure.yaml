@@ -167,7 +167,10 @@ Resources:
           export DEBIAN_FRONTEND=noninteractive
           timedatectl set-timezone UTC
           apt-get update
-          apt-get install -y docker.io docker-compose-v2 awscli ca-certificates curl unattended-upgrades
+          apt-get install -y docker.io docker-compose-v2 ca-certificates curl unzip unattended-upgrades
+          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+          unzip -q /tmp/awscli.zip -d /tmp/awscli-install
+          /tmp/awscli-install/aws/install --update
           systemctl enable --now docker
           systemctl enable --now cron
           install -d -m 700 /opt/cloud-billing
