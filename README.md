@@ -5,13 +5,15 @@ A private team dashboard for daily and monthly AWS costs across customer account
 ## Features
 
 - Customer, linked-account, service, currency, date range, and cost-basis filters.
-- Daily and monthly charts, month-to-date totals, budget indicators, and a simple month-end run-rate projection.
+- Daily/monthly charts with keyboard-accessible values, date shortcuts, period comparisons, month-to-date totals, budget indicators, and a simple month-end run-rate projection.
+- Searchable, sortable customer, AWS account, and service breakdowns; drill-downs preserve dates, currency and cost basis.
+- Customer connection directory, visible import status, and an administrator-only refresh action for the selected customer or portfolio.
 - Six-hour collection at 00:00, 06:00, 12:00, and 18:00 UTC, plus queued manual imports.
 - Customer-specific read-only IAM onboarding with external IDs and verification.
 - Authentication, login rate limiting, administrator-only connection management, CSV exports, and audit activity.
 - Exact decimal storage, pagination, retry handling, and atomic replacement of revised AWS costs.
 
-This is cost analytics, not invoicing or payment tracking. Cost Explorer data is delayed and current-period values can change. Initial imports cover six previous months plus the current month when AWS makes them available. Routine imports refresh the previous and current months; the first run on the second of each month reconciles the full history window. Different currencies are never summed. A zero means an imported zero; a dash means no imported figure is available. AWS API requests incur charges, including failed/manual retries and pagination.
+This is cost analytics, not invoicing or payment tracking. Cost Explorer data is delayed and current-period values can change. Initial imports cover six previous months plus the current month when AWS makes them available. Routine imports refresh the previous and current months; the first run on the second of each month reconciles the full history window. Different currencies are never summed. In chart data and customer rows, zero means an imported zero; a dash means no imported figure is available. Missing dates remain chart gaps. Nonzero charges smaller than 0.01 remain visible in detailed tables. Service shares are calculated against net spend, so credits can produce negative shares or shares above 100%. Projections and budget checks always cover the whole customer in the current month, even when a service/account filter is selected. AWS API requests incur charges, including failed/manual retries and pagination.
 
 ## Local development
 

@@ -30,20 +30,26 @@ def dashboard(request):
     try:
         context = report(request.GET)
     except ValueError as exc:
-        return HttpResponseBadRequest(str(exc))
+        return render(request, 'billing/filter_error.html', {'error': str(exc), 'active_page': 'overview'}, status=400)
+    choices = Cost.objects.all()
+    if context['filter_customer']:
+        choices = choices.filter(customer_id=context['filter_customer'])
     context.update({'customers': Customer.objects.all(),
         'currencies': sorted(set(Cost.objects.values_list('currency', flat=True)) | {'USD'}),
-        'accounts': Cost.objects.order_by('account_id').values_list('account_id', flat=True).distinct(),
-        'service_options': Cost.objects.order_by('service').values_list('service', flat=True).distinct(),
-        'stale_count': sum(c.status in ('Stale', 'Action required') for c in Customer.objects.all()),
-        'latest_sync': SyncRun.objects.filter(status='success').first(), 'active_page': 'overview'})
+        'accounts': choices.order_by('account_id').values_list('account_id', flat=True).distinct(),
+        'service_options': choices.order_by('service').values_list('service', flat=True).distinct(),
+        'active_page': 'overview'})
     return render(request, 'billing/dashboard.html', context)
 
 
 @never_cache
 @login_required
 def customers(request):
-    return render(request, 'billing/customers.html', {'customers': Customer.objects.all(), 'active_page': 'customers'})
+    items = list(Customer.objects.all())
+    return render(request, 'billing/customers.html', {'customers': items, 'active_page': 'customers',
+        'connected_count': sum(c.status == 'Connected' for c in items),
+        'attention_count': sum(c.status in ('Stale', 'Action required', 'Awaiting setup') for c in items),
+        'paused_count': sum(not c.enabled for c in items)})
 
 
 @staff_required
@@ -128,6 +134,26 @@ def request_sync(request, pk):
     else:
         messages.error(request, 'Complete onboarding and enable collection first.')
     return redirect('customer_detail', pk=pk)
+
+
+@require_POST
+@staff_required
+def refresh_costs(request):
+    # Reuse validated filters; never redirect to an arbitrary submitted URL.
+    try:
+        data = report(request.POST)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+    items = Customer.objects.filter(enabled=True).exclude(role_arn='')
+    if data['filter_customer']:
+        items = items.filter(pk=data['filter_customer'])
+    count = items.update(sync_requested=True)
+    if count:
+        AuditEvent.objects.create(actor=request.user.username, action=f'Billing refresh requested for {count} customer(s)')
+        messages.success(request, f'Refresh queued for {count} customer(s). Collection starts within a minute. Reload the page after the import completes.')
+    else:
+        messages.error(request, 'Connect an active customer before requesting a refresh.')
+    return redirect('/?' + data['export_query'])
 
 
 def safe_csv(value):

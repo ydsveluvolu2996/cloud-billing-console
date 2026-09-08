@@ -163,3 +163,57 @@ class BillingTests(TestCase):
         self.assertEqual(urlparse(params['templateURL'][0]).hostname,'test-billing-bucket.s3.ap-south-1.amazonaws.com')
         self.assertEqual(params['param_ExternalId'],[str(self.customer.external_id)])
         self.assertEqual(params['param_ExpectedAccountId'],['123456789012'])
+
+    @patch('billing.reporting.timezone.now')
+    def test_breakdowns_preserve_negative_credits_and_filters(self, now):
+        from datetime import datetime, timezone as dt_timezone
+        from urllib.parse import urlparse, parse_qs
+        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
+        self.existing(date(2026,9,1), amount='12.25')
+        Cost.objects.create(customer=self.customer,day=date(2026,9,2),account_id='123456789012',
+            service='Credit',currency='USD',unblended=Decimal('-2.25'),amortized=Decimal('-2.25'))
+        result=report({'start':'2026-09-01','end':'2026-09-03','metric':'amortized'})
+        self.assertEqual(result['total'],10)
+        self.assertEqual(sum(row['amount'] for row in result['service_rows']),10)
+        self.assertEqual(sum(row['amount'] for row in result['account_rows']),10)
+        self.assertEqual(result['service_rows'][-1]['amount'],Decimal('-2.25'))
+        for row in [result['rows'][0],result['account_rows'][0],result['service_rows'][0]]:
+            query=parse_qs(urlparse(row['url']).query)
+            self.assertEqual(query['start'],['2026-09-01'])
+            self.assertEqual(query['end'],['2026-09-03'])
+            self.assertEqual(query['metric'],['amortized'])
+        self.assertIsNone(result['points'][2]['amount'])
+        self.assertEqual(result['missing_days'],1)
+
+    @patch('billing.reporting.timezone.now')
+    def test_monthly_chart_keeps_missing_month_gaps_and_zero_cost(self, now):
+        from datetime import datetime, timezone as dt_timezone
+        now.return_value = datetime(2026,9,8,tzinfo=dt_timezone.utc)
+        self.existing(date(2026,7,1),amount='5')
+        self.existing(date(2026,9,1),amount='0')
+        result=report({'start':'2026-07-01','end':'2026-09-08','granularity':'monthly'})
+        self.assertEqual([point['amount'] for point in result['points']],[5.0,None,0.0])
+        self.assertEqual(result['points'][1]['label'],'Aug 2026')
+
+    def test_refresh_scopes_customer_and_preserves_filters(self):
+        from urllib.parse import urlparse, parse_qs
+        other=Customer.objects.create(name='Other customer',account_id='222222222222',role_arn='arn:aws:iam::222222222222:role/BillingConsole/CostReadOnly')
+        self.client.force_login(self.reader)
+        self.assertEqual(self.client.post('/refresh/',{}).status_code,403)
+        self.client.force_login(self.admin)
+        response=self.client.post('/refresh/',{'customer':str(self.customer.pk),'service':'Amazon EC2','metric':'amortized'})
+        self.customer.refresh_from_db(); other.refresh_from_db()
+        self.assertTrue(self.customer.sync_requested)
+        self.assertFalse(other.sync_requested)
+        self.assertEqual(response.status_code,302)
+        self.assertEqual(parse_qs(urlparse(response.url).query)['service'],['Amazon EC2'])
+        self.assertEqual(parse_qs(urlparse(response.url).query)['metric'],['amortized'])
+
+    def test_bad_filters_show_recovery_page_and_do_not_queue(self):
+        self.client.force_login(self.admin)
+        response=self.client.get('/?customer=bad-id')
+        self.assertEqual(response.status_code,400)
+        self.assertContains(response,'Open cost overview',status_code=400)
+        self.assertEqual(self.client.post('/refresh/',{'start':'invalid'}).status_code,400)
+        self.customer.refresh_from_db()
+        self.assertFalse(self.customer.sync_requested)

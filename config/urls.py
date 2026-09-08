@@ -32,6 +32,7 @@ urlpatterns = [
     path('customers/<uuid:pk>/setup/', web.launch_setup, name='launch_setup'),
     path('customers/<uuid:pk>/sync/', web.request_sync, name='request_sync'),
     path('export/', web.export_csv, name='export_csv'),
+    path('refresh/', web.refresh_costs, name='refresh_costs'),
     path('activity/', web.activity, name='activity'),
     path('health/', web.health, name='health'),
 ]
