@@ -22,4 +22,7 @@ def price(value, currency='USD'):
     if value is None:
         return '—'
     prefix = {'USD': '$', 'INR': '₹', 'EUR': '€', 'GBP': '£'}.get(currency, currency + ' ')
-    return prefix + precise_money(value)
+    sign = '-' if value < 0 else ''
+    if 0 < abs(value) < 0.01:
+        return sign + '<' + prefix + '0.01'
+    return sign + prefix + money(abs(value))

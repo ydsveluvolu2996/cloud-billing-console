@@ -191,7 +191,9 @@ if (explorerHost) {
     const rawMin = payload.style === 'stacked' ? Math.min(0,...totals.map(t=>t.negative)) : Math.min(0,...series.flatMap(s=>s.values.map(v=>v||0)));
     const roughStep = (rawMax-rawMin || 1)/4, magnitude = 10 ** Math.floor(Math.log10(roughStep));
     const tick = [1,2,2.5,5,10].find(n=>n*magnitude>=roughStep)*magnitude;
-    const max = Math.ceil(rawMax/tick)*tick || (rawMin < 0 ? 0 : tick*4), min=Math.floor(rawMin/tick)*tick;
+    const max = Math.ceil(rawMax/tick)*tick || (rawMin < 0 ? 0 : tick*4);
+    // Preserve tiny credits without reserving an entire large negative tick.
+    const min = rawMax > 0 && Math.abs(rawMin) < tick*.05 ? rawMin*1.12 : Math.floor(rawMin/tick)*tick;
     const y = value => pad.t+(max-value)/(max-min)*ph;
     const x = i => pad.l+step*(i+.5);
     const svg = document.createElementNS(ns,'svg'); svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
@@ -202,8 +204,7 @@ if (explorerHost) {
       if(text !== undefined) element.textContent=text;
       parent.appendChild(element); return element;
     };
-    for(let i=0;i<=Math.round((max-min)/tick);i++) {
-      const value=min+i*tick;
+    for(let value=Math.ceil(min/tick)*tick;value<=max+tick*.001;value+=tick) {
       node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:'#e0e5eb','stroke-width':value===0?1.5:1});
       node('text',{x:pad.l-9,y:y(value)+3,fill:'#647483','text-anchor':'end','font-size':10},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
     }
