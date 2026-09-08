@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cloud Billing Console - one EC2 instance, private S3 backups, and a scoped collector role.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AmiId:
+    Type: AWS::EC2::Image::Id
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+Resources:
+  Artifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: BackupRetention
+            Prefix: backups/
+            Status: Enabled
+            ExpirationInDays: 35
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: IncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Project
+          Value: cloud-billing-console
+  ArtifactPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: Artifacts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RequireTLS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - Fn::GetAtt: [Artifacts, Arn]
+              - Fn::Sub: '${Artifacts.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  CollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CloudBillingCollector
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CustomerBillingConnections
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: arn:aws:iam::*:role/BillingConsole/CostReadOnly
+        - PolicyName: OwnArtifactsAndBackups
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource:
+                  - Fn::Sub: '${Artifacts.Arn}/releases/*'
+                  - Fn::Sub: '${Artifacts.Arn}/templates/*'
+                  - Fn::Sub: '${Artifacts.Arn}/backups/*'
+              - Effect: Allow
+                Action: [s3:PutObject]
+                Resource:
+                  - Fn::Sub: '${Artifacts.Arn}/backups/*'
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: CollectorRole
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS dashboard and HTTP ACME validation only. Administration through SSM.
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Redirect to HTTPS and certificate validation
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Authenticated billing dashboard
+      Tags:
+        - Key: Name
+          Value: cloud-billing-console-web
+  Server:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId:
+        Ref: AmiId
+      InstanceType:
+        Ref: InstanceType
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      CreditSpecification:
+        CPUCredits: standard
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: false
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId:
+            Ref: SubnetId
+          GroupSet:
+            - Ref: WebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: cloud-billing-console
+        - Key: Project
+          Value: cloud-billing-console
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          timedatectl set-timezone UTC
+          apt-get update
+          apt-get install -y docker.io docker-compose-v2 awscli ca-certificates curl unattended-upgrades
+          systemctl enable --now docker
+          systemctl enable --now cron
+          install -d -m 700 /opt/cloud-billing
+          touch /opt/cloud-billing-bootstrap-ready
+  Address:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: cloud-billing-console
+  AddressAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId:
+        Fn::GetAtt: [Address, AllocationId]
+      InstanceId:
+        Ref: Server
+Outputs:
+  InstanceId:
+    Value:
+      Ref: Server
+  PublicIp:
+    Value:
+      Ref: Address
+  ArtifactBucket:
+    Value:
+      Ref: Artifacts
+  CollectorRoleArn:
+    Value:
+      Fn::GetAtt: [CollectorRole, Arn]

@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Server is configured to UTC. Both commands share the collector's process lock.
+0 */6 * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py sync_costs >> /var/log/cloud-billing-sync.log 2>&1
+* * * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py sync_costs --queued >> /var/log/cloud-billing-sync.log 2>&1
+30 2 * * * root /opt/cloud-billing/deploy/backup.sh >> /var/log/cloud-billing-backup.log 2>&1
+15 3 * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py clearsessions >> /var/log/cloud-billing-sync.log 2>&1
