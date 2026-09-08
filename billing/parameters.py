@@ -127,6 +127,8 @@ def aws_request(p, start=None, end=None):
     start=start or p['start']; end=end or p['end']
     metric = ('NormalizedUsageAmount' if p['normalized']=='1' else 'UsageQuantity') if p['measure']=='usage' else METRICS[p['metric']][1]
     req={'TimePeriod':{'Start':start,'End':str(date.fromisoformat(end)+timedelta(days=1))},'Granularity':p['granularity'].upper(),'Metrics':[metric]}
+    if p['granularity']=='hourly':
+        req['TimePeriod']={key:value+'T00:00:00Z' for key,value in req['TimePeriod'].items()}
     exp=expression(p)
     if exp:req['Filter']=exp
     g=p['group_by']

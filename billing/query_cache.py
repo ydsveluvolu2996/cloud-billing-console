@@ -42,6 +42,8 @@ def request_error(exc):
             # AWS validation describes unsupported combinations and opt-in prerequisites;
             # never contains credentials and is escaped by Django/JSON textContent.
             return f'{code}: '+exc.response['Error'].get('Message','Review the selected report parameters.')[:440]
+        if code in ('AccessDenied','AccessDeniedException') and 'opt-in' in exc.response['Error'].get('Message','').lower():
+            return 'AWS granular data is not enabled. Enable the requested hourly/resource data in the payer account Cost Explorer settings to use this report.'
         if code in ('AccessDenied','AccessDeniedException'):
             return 'Billing permission missing. Update the customer CloudFormation role using the current dashboard template.'
         if code=='DataUnavailableException':

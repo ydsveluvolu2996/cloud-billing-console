@@ -138,3 +138,13 @@ class ExplorerParameterTests(TestCase):
         self.assertEqual(expression(normalize(self.params|{'untagged':'1'})), {'Tags':{'MatchOptions':['ABSENT']}})
         self.assertEqual(expression(normalize(self.params|{'uncategorized':'1'})), {'CostCategories':{'MatchOptions':['ABSENT']}})
         self.assertEqual(expression(normalize(self.params|{'uncategorized':'1','cost_category_key':'BusinessUnit'})), {'CostCategories':{'MatchOptions':['ABSENT'],'Key':'BusinessUnit'}})
+
+    def test_hourly_requests_use_utc_timestamps_and_explain_opt_in(self):
+        from billing.query_cache import request_error
+        p=normalize(self.params|{'start':str(self.today-timedelta(days=1)),'granularity':'hourly'})
+        _,req=aws_request(p)
+        self.assertEqual(req['TimePeriod']['Start'],str(self.today-timedelta(days=1))+'T00:00:00Z')
+        self.assertEqual(req['TimePeriod']['End'],str(self.today+timedelta(days=1))+'T00:00:00Z')
+        exc=ClientError({'Error':{'Code':'AccessDeniedException','Message':'Hourly data granularity is an opt-in only feature.'}},'GetCostAndUsage')
+        self.assertIn('granular data is not enabled',request_error(exc))
+        self.assertNotIn('permission missing',request_error(exc))
