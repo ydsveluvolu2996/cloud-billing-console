@@ -15,7 +15,7 @@ def is_local(p):
         and p['granularity'] in ('daily','monthly') and p['group_by'] in ('service','account','customer')
         and date.fromisoformat(p['end'])<=timezone.now().date() and p['untagged']=='0' and p['uncategorized']=='0'
         and all(not p[k] for k in contract.FILTERS if k not in ('service','account'))
-        and all(len(p[k])<=1 and p[k+'_mode']=='include' for k in ('service','account')))
+        and all(len(p[k])<=1 and contract.EMPTY_VALUE not in p[k] and p[k+'_mode']=='include' for k in ('service','account')))
 
 
 def periods_between(start,end,granularity):
@@ -53,7 +53,7 @@ def unpack(queries,p,periods):
     rows=[]
     for key,bucket in values.items():
         cells=[bucket.get(t) for t in periods]
-        label=SERVICE_LABELS.get(key,key) if p['group_by']=='service' else key
+        label=SERVICE_LABELS.get(key,key) if p['group_by']=='service' else key or '(Not specified)'
         rows.append({'key':key,'label':label,'source_label':key,'cells':cells,'total':sum((v for v in cells if v is not None),Decimal(0))})
     rows.sort(key=lambda r:(-r['total'],r['label']))
     return rows,estimated,next(iter(units),'USD' if p['measure']=='cost' else 'units')
@@ -137,7 +137,8 @@ def build_report(params):
     for row in context['pivot_rows']:
         group=p['group_by']
         if group in contract.FILTERS and row['key']!='(Unassigned)':
-            changes={group:[row['key']],group+'_mode':'include'}
+            value=contract.EMPTY_VALUE if row['key']=='' or (group=='region' and row['key']=='NoRegion') else row['key']
+            changes={group:[value],group+'_mode':'include'}
             if group in ('tag','cost_category'):changes[group+'_key']=p['group_key']
             row['url']=url(**changes)
         elif group=='customer':

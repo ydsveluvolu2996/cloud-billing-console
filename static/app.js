@@ -302,7 +302,7 @@ if(reportForm){
   field('group_by').addEventListener('change',()=>{document.querySelector('[data-group-key]').hidden=!['tag','cost_category'].includes(field('group_by').value);});
   const makeOption=(key,value,checked=false)=>{
     const label=document.createElement('label');label.className='checkbox-label';
-    const input=document.createElement('input');input.type='checkbox';input.name=key;input.value=value;input.checked=checked;
+    const input=document.createElement('input');input.type='checkbox';input.name=key;input.value=value===''?'__billing_empty_value__':value;input.checked=checked;
     const span=document.createElement('span');span.textContent=value||'(Empty value)';label.append(input,span);return label;
   };
   const metadataRequests=new WeakMap();
@@ -329,7 +329,7 @@ if(reportForm){
     box.querySelector('[data-load-values]').addEventListener('click',()=>{
       const keyValue=field(`${key}_key`)?.value||'';
       if(['tag','cost_category'].includes(key)&&!keyValue){status.textContent='Choose a key first.';return;}
-      metadata(key,keyValue,status,values=>{const existing=new Set([...list.querySelectorAll('input')].map(i=>i.value));values.forEach(value=>{if(!existing.has(value))list.append(makeOption(key,value));});search();});
+      metadata(key,keyValue,status,values=>{const existing=new Set([...list.querySelectorAll('input')].map(i=>i.value));values.forEach(value=>{if(!existing.has(value===''?'__billing_empty_value__':value))list.append(makeOption(key,value));});search();});
     });
     box.addEventListener('toggle',()=>{if(box.open&&!box.dataset.loaded){box.dataset.loaded='1';(box.querySelector('[data-load-keys]')||box.querySelector('[data-load-values]')).click();}});
     box.querySelector('[data-add-value]').addEventListener('click',()=>{

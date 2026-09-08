@@ -25,6 +25,7 @@ METRICS = {'unblended': ('Unblended costs', 'UnblendedCost'), 'amortized': ('Amo
            'net_amortized': ('Net amortized costs', 'NetAmortizedCost')}
 FORECAST_METRICS = dict(zip(METRICS, ['UNBLENDED_COST','AMORTIZED_COST','BLENDED_COST','NET_UNBLENDED_COST','NET_AMORTIZED_COST']))
 EC2 = 'Amazon Elastic Compute Cloud - Compute'
+EMPTY_VALUE = '__billing_empty_value__'
 
 
 def truth(value):
@@ -113,9 +114,9 @@ def expression(p):
             category='Tags' if key=='tag' else 'CostCategories'
             if p['untagged' if key=='tag' else 'uncategorized']=='1':
                 parts.append({category:{'Key':p[key+'_key'],'MatchOptions':['ABSENT']}});continue
-            expr={category:{'Key':p[key+'_key'],'Values':p[key]}}
+            expr={category:{'Key':p[key+'_key'],'Values':['' if v==EMPTY_VALUE else v for v in p[key]]}}
         else:
-            expr={'Dimensions':{'Key':aws_key,'Values':p[key]}}
+            expr={'Dimensions':{'Key':aws_key,'Values':['' if v==EMPTY_VALUE else v for v in p[key]]}}
         if p[key]: parts.append({'Not':expr} if p[key+'_mode']=='exclude' else expr)
     return {'And':parts} if len(parts)>1 else parts[0] if parts else None
 

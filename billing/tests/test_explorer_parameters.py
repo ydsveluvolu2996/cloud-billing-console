@@ -123,3 +123,13 @@ class ExplorerParameterTests(TestCase):
         with self.assertRaises(ValueError):import_console_url(url.replace('%5B%5D','%5B1%5D'))
         result=self.client.post('/reports/save/',querydict(p));self.assertEqual(result.status_code,302)
         saved=SavedReport.objects.get();self.assertEqual(saved.parameters,p);self.assertEqual(self.client.get(f'/reports/{saved.pk}/').status_code,302)
+
+    def test_empty_dimension_selection_survives_roundtrip(self):
+        from billing.parameters import EMPTY_VALUE
+        p=normalize(self.params|{'region':[EMPTY_VALUE]})
+        self.assertEqual(normalize(querydict(p))['region'],[EMPTY_VALUE])
+        self.assertEqual(expression(p),{'Dimensions':{'Key':'REGION','Values':['']}})
+        q=get_query(self.customer,*aws_request(normalize(self.params)))
+        response=self.response();response['ResultsByTime'][0]['Groups'][0]['Keys']=['NoRegion']
+        q.data=response;q.requested=False;q.last_attempt=timezone.now();q.last_success=timezone.now();q.save()
+        self.assertIn('region=__billing_empty_value__',build_report(self.params)['pivot_rows'][0]['url'])

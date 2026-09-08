@@ -22,7 +22,7 @@
           {% if f.is_keyed %}<label>{{ f.label }} key<input name="{{ f.key }}_key" value="{{ f.key_value }}" list="keys-{{ f.key }}" maxlength="120" placeholder="Select or enter a key"></label><datalist id="keys-{{ f.key }}"></datalist><button type="button" class="text-button" data-load-keys="{{ f.key }}">Load available keys</button>{% endif %}
           <label>Match<select name="{{ f.key }}_mode"><option value="include" {% if f.mode == 'include' %}selected{% endif %}>Include selected values</option><option value="exclude" {% if f.mode == 'exclude' %}selected{% endif %}>Exclude selected values</option></select></label>
           <input type="search" placeholder="Find {{ f.label|lower }} values" aria-label="Find {{ f.label|lower }} values" data-value-search>
-          <div class="dimension-values">{% for v in f.values %}<label class="checkbox-label"><input type="checkbox" name="{{ f.key }}" value="{{ v }}" checked><span>{{ v }}</span></label>{% endfor %}</div>
+          <div class="dimension-values">{% for v in f.values %}<label class="checkbox-label"><input type="checkbox" name="{{ f.key }}" value="{{ v }}" checked><span>{% if v == '__billing_empty_value__' %}(Empty value){% else %}{{ v }}{% endif %}</span></label>{% endfor %}</div>
           <button type="button" class="text-button" data-load-values>Load available values</button><span class="filter-loading" data-filter-status role="status"></span>
           <div class="manual-filter-value"><input type="text" placeholder="Enter exact AWS value" aria-label="Exact {{ f.label|lower }} value" maxlength="1024" data-manual-value><button type="button" class="text-button" data-add-value>Add</button></div>
           <button type="button" class="text-button" data-clear-values>Clear selection</button>
