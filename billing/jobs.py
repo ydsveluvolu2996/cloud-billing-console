@@ -107,7 +107,7 @@ def complete(job, progress=None):
     now = timezone.now()
     Job.objects.filter(pk=job.pk).update(status=Job.DONE, finished_at=now, last_error='', lease_expires=None,
                                          progress=progress if progress is not None else job.progress,
-                                         duration_ms=int((now - (job.started_at or now)).total_seconds() * 1000))
+                                         duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
 
 
 def fail(job, error, permanent=False):
@@ -117,7 +117,7 @@ def fail(job, error, permanent=False):
     Job.objects.filter(pk=job.pk).update(
         status=Job.FAILED if exhausted else Job.QUEUED, last_error=message, lease_expires=None,
         run_after=now if exhausted else now + backoff(job.attempts), finished_at=now if exhausted else None,
-        progress=job.progress, duration_ms=int((now - (job.started_at or now)).total_seconds() * 1000))
+        progress=job.progress, duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
     return exhausted
 
 

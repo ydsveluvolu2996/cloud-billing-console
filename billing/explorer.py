@@ -13,7 +13,10 @@ SERVICE_LABELS = {
     'Amazon Simple Notification Service': 'SNS', 'Amazon Simple Queue Service': 'SQS',
     'Amazon Relational Database Service': 'RDS', 'Amazon Elastic Load Balancing': 'Elastic Load Balancing',
 }
-CHART_COLORS = ['#6483db', '#ba4265', '#38988e', '#8b60bd', '#d49436', '#4089a9', '#cc7053', '#697dba', '#81963a', '#828b98']
+# Blue monochrome series palette: distinct lightness steps from deep navy to pale sky, plus a
+# neutral grey reserved for the aggregated "Others" series. Charts also vary pattern/dash so
+# meaning never depends on colour alone.
+CHART_COLORS = ['#1E3A8A', '#2563EB', '#60A5FA', '#1D4ED8', '#93C5FD', '#3B82F6', '#BFDBFE', '#172554', '#7DA2E8', '#94A3B8']
 
 
 def defaults(params):

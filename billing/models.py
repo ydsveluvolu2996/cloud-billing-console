@@ -219,7 +219,7 @@ class Cost(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=['source', 'day', 'account_id', 'service', 'currency'], name='unique_cost_slice')]
         indexes = [models.Index(fields=['day', 'currency']), models.Index(fields=['customer', 'day']),
-                   models.Index(fields=['account_id', 'day'])]
+                   models.Index(fields=['account_id', 'day']), models.Index(fields=['customer', 'currency', 'day'], name='billing_cost_scope_day_idx')]
 
 
 class CollectionPeriod(models.Model):

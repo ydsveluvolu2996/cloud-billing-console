@@ -33,3 +33,8 @@ def report_amount(value, unit='USD'):
     if unit in ('USD','INR','EUR','GBP'):
         return price(value,unit)
     return precise_money(value)
+
+
+@register.filter
+def forecast_label(method):
+    return {'aws': 'AWS forecast', 'run_rate': 'run rate', 'actual': 'actual', 'unavailable': 'unavailable'}.get(method, method)

@@ -1,4 +1,44 @@
 'use strict';
+// Design tokens shared with app.css (blue monochrome). Patterns and dashes carry meaning alongside colour.
+const TOKENS = {primary:'#2563EB', hover:'#1D4ED8', deep:'#1E3A8A', soft:'#EFF6FF', selected:'#DBEAFE', border:'#E2E8F0', muted:'#64748B', text2:'#475569', text:'#0F172A', surface:'#FFFFFF'};
+const PATTERNS = ['solid', 'diagonal', 'dots', 'horizontal', 'solid', 'cross', 'diagonal-reverse', 'solid', 'dots', 'dense'];
+const DASHES = ['', '6 4', '2 4', '10 4 2 4', '', '4 4', '12 4', '', '2 4', '8 3'];
+const MARKERS = ['circle', 'square', 'diamond', 'triangle', 'circle', 'square', 'diamond', 'triangle', 'circle', 'square'];
+function definePattern(svg, ns, id, color, kind) {
+  const defs = svg.querySelector('defs') || svg.insertBefore(document.createElementNS(ns, 'defs'), svg.firstChild);
+  const pattern = document.createElementNS(ns, 'pattern');
+  pattern.setAttribute('id', id); pattern.setAttribute('patternUnits', 'userSpaceOnUse'); pattern.setAttribute('width', '6'); pattern.setAttribute('height', '6');
+  const base = document.createElementNS(ns, 'rect'); base.setAttribute('width', '6'); base.setAttribute('height', '6'); base.setAttribute('fill', color); pattern.appendChild(base);
+  const mark = document.createElementNS(ns, kind === 'dots' || kind === 'dense' ? 'circle' : 'path');
+  mark.setAttribute('stroke', 'rgba(255,255,255,.75)'); mark.setAttribute('stroke-width', '1.2'); mark.setAttribute('fill', 'rgba(255,255,255,.8)');
+  if (kind === 'diagonal') mark.setAttribute('d', 'M0 6L6 0');
+  else if (kind === 'diagonal-reverse') mark.setAttribute('d', 'M0 0L6 6');
+  else if (kind === 'horizontal') mark.setAttribute('d', 'M0 3H6');
+  else if (kind === 'cross') mark.setAttribute('d', 'M0 6L6 0M0 0L6 6');
+  else if (kind === 'dots') { mark.setAttribute('cx', '3'); mark.setAttribute('cy', '3'); mark.setAttribute('r', '1.1'); mark.removeAttribute('stroke'); }
+  else if (kind === 'dense') { mark.setAttribute('cx', '1.5'); mark.setAttribute('cy', '1.5'); mark.setAttribute('r', '1'); mark.removeAttribute('stroke'); }
+  if (kind !== 'solid') { if (kind === 'dots' || kind === 'dense') pattern.appendChild(mark); else { mark.setAttribute('fill', 'none'); pattern.appendChild(mark); } }
+  defs.appendChild(pattern);
+  return `url(#${id})`;
+}
+function marker(ns, kind, cx, cy, r, color) {
+  const node = document.createElementNS(ns, kind === 'circle' ? 'circle' : 'path');
+  if (kind === 'circle') { node.setAttribute('cx', cx); node.setAttribute('cy', cy); node.setAttribute('r', r); }
+  else if (kind === 'square') node.setAttribute('d', `M${cx-r} ${cy-r}h${2*r}v${2*r}h${-2*r}z`);
+  else if (kind === 'diamond') node.setAttribute('d', `M${cx} ${cy-r*1.3}L${cx+r*1.3} ${cy}L${cx} ${cy+r*1.3}L${cx-r*1.3} ${cy}z`);
+  else node.setAttribute('d', `M${cx} ${cy-r*1.3}L${cx+r*1.25} ${cy+r}H${cx-r*1.25}z`);
+  node.setAttribute('fill', color); node.setAttribute('stroke', TOKENS.surface); node.setAttribute('stroke-width', '1');
+  return node;
+}
+const navToggle = document.querySelector('[data-nav-toggle]');
+if (navToggle) {
+  navToggle.addEventListener('click', () => {
+    const open = document.body.classList.toggle('nav-open');
+    navToggle.setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && document.body.classList.contains('nav-open')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); navToggle.focus(); } });
+  document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('#sidebar, [data-nav-toggle]')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); } });
+}
 document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
   const field = document.getElementById(button.dataset.copy);
   try { await navigator.clipboard.writeText(field.value); button.textContent = 'Link copied'; }
@@ -117,10 +157,12 @@ if (host) {
     }
     for (let i=0; i<=Math.round((max-min)/tick); i++) {
       const v = min+tick*i;
-      el('line', {x1:pad.l, x2:w-pad.r, y1:y(v), y2:y(v), stroke:'#e8edf0', 'stroke-dasharray':'3 4'});
-      el('text', {x:pad.l-9, y:y(v)+3, 'text-anchor':'end', fill:'#7d8d98', 'font-size':10}, Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(v));
+      el('line', {x1:pad.l, x2:w-pad.r, y1:y(v), y2:y(v), stroke:TOKENS.border, 'stroke-dasharray':'3 4'});
+      el('text', {x:pad.l-9, y:y(v)+3, 'text-anchor':'end', fill:TOKENS.muted, 'font-size':11}, Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(v));
     }
-    el('line', {x1:pad.l, x2:w-pad.r, y1:y(0), y2:y(0), stroke:'#d8e2e6'});
+    el('line', {x1:pad.l, x2:w-pad.r, y1:y(0), y2:y(0), stroke:TOKENS.muted});
+    const creditFill = definePattern(svg, ns, 'credit-hatch', TOKENS.deep, 'diagonal');
+    const fillFor = (d, active) => d.amount === null ? (active ? TOKENS.muted : TOKENS.border) : d.amount < 0 ? creditFill : active ? TOKENS.hover : TOKENS.primary;
     const step = plotW / Math.max(1,data.length), bw = Math.max(1, Math.min(42,step*.56));
     const labelEvery = Math.max(1,Math.ceil(data.length/Math.max(2,Math.floor(plotW/68))));
     const targets = [];
@@ -128,12 +170,12 @@ if (host) {
       const x = pad.l+i*step+step/2;
       const bar = el('rect', {x:x-bw/2, y:d.amount === null ? y(0)-2 : Math.min(y(d.amount),y(0)), width:bw,
         height:d.amount === null ? 2 : Math.max(2,Math.abs(y(d.amount)-y(0))), rx:Math.min(3,bw/3),
-        fill:d.amount === null ? '#dce4e9' : d.amount < 0 ? '#b78237' : '#168c78', class:'chart-bar',
-        tabindex:i===0?0:-1, role:'img', 'aria-label':`${label(d.label)}: ${money(d.amount)}`});
+        fill:fillFor(d, false), class:'chart-bar',
+        tabindex:i===0?0:-1, role:'img', 'aria-label':`${label(d.label)}: ${money(d.amount)}${d.amount !== null && d.amount < 0 ? ' (credit)' : ''}`});
       const title = document.createElementNS(ns,'title');
       title.textContent = `${label(d.label)}: ${money(d.amount)}`; bar.appendChild(title);
-      const show = () => { readout.textContent = `${label(d.label)} · ${money(d.amount)}`; bar.setAttribute('fill',d.amount === null ? '#9caeb9' : d.amount < 0 ? '#8c5e23' : '#0c574d'); };
-      const hide = () => { bar.setAttribute('fill',d.amount === null ? '#dce4e9' : d.amount < 0 ? '#b78237' : '#168c78'); };
+      const show = () => { readout.textContent = `${label(d.label)} · ${money(d.amount)}${d.amount !== null && d.amount < 0 ? ' (credit)' : ''}`; bar.setAttribute('fill', fillFor(d, true)); bar.setAttribute('stroke', TOKENS.deep); };
+      const hide = () => { bar.setAttribute('fill', fillFor(d, false)); bar.removeAttribute('stroke'); };
       bar.addEventListener('pointerenter',show); bar.addEventListener('pointerleave',hide);
       bar.addEventListener('focus',show); bar.addEventListener('blur',hide);
       bar.addEventListener('keydown',event => {
@@ -145,7 +187,7 @@ if (host) {
         if(next!==undefined){event.preventDefault();bar.tabIndex=-1;targets[next].tabIndex=0;targets[next].focus();}
       });
       targets.push(bar);
-      if (i%labelEvery===0) el('text', {x, y:h-11, 'text-anchor':'middle', fill:'#7d8d98', 'font-size':10}, /^\d{4}-/.test(d.label) ? new Date(`${d.label}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'UTC'}) : d.label.replace(' 20', ' ’'));
+      if (i%labelEvery===0) el('text', {x, y:h-11, 'text-anchor':'middle', fill:TOKENS.muted, 'font-size':11}, /^\d{4}-/.test(d.label) ? new Date(`${d.label}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'UTC'}) : d.label.replace(' 20', ' ’'));
     });
     host.replaceChildren(svg);
   };
@@ -205,19 +247,23 @@ if (explorerHost) {
       parent.appendChild(element); return element;
     };
     for(let value=(Math.ceil(min/tick)*tick || 0);value<=max+tick*.001;value+=tick) {
-      node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:'#e0e5eb','stroke-width':value===0?1.5:1});
-      node('text',{x:pad.l-9,y:y(value)+3,fill:'#647483','text-anchor':'end','font-size':10},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
+      node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:value===0?TOKENS.muted:TOKENS.border,'stroke-width':value===0?1.5:1});
+      node('text',{x:pad.l-9,y:y(value)+3,fill:TOKENS.muted,'text-anchor':'end','font-size':11},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
     }
+    const fills = payload.series.map((s,i) => PATTERNS[i % PATTERNS.length] === 'solid' ? s.color : definePattern(svg, ns, `series-${i}`, s.color, PATTERNS[i % PATTERNS.length]));
+    const indexOf = s => payload.series.indexOf(s);
     const positive=Array(count).fill(0),negative=Array(count).fill(0);
     series.forEach((s,j)=>{
       if(payload.style === 'line') {
         let path='',connected=false;
+        const k=indexOf(s);
         s.values.forEach((v,i)=>{
           if(v===null){connected=false;return;}
           path+=`${connected?' L':' M'}${x(i)} ${y(v)}`; connected=true;
-          node('circle',{cx:x(i),cy:y(v),r:count>80?1.5:3,fill:s.color});
         });
-        node('path',{d:path,stroke:s.color,'stroke-width':2,fill:'none'});
+        const line=node('path',{d:path,stroke:s.color,'stroke-width':2,fill:'none','stroke-linejoin':'round'});
+        if(DASHES[k % DASHES.length]) line.setAttribute('stroke-dasharray', DASHES[k % DASHES.length]);
+        if(count<=80) s.values.forEach((v,i)=>{ if(v!==null) svg.appendChild(marker(ns, MARKERS[k % MARKERS.length], x(i), y(v), 3, s.color)); });
       } else {
         s.values.forEach((v,i)=>{
           if(v===null || v===0) return;
@@ -231,15 +277,16 @@ if (explorerHost) {
             bw=Math.max(.4,groupWidth/Math.max(1,series.length)*.87);
             left=x(i)-groupWidth/2+j*groupWidth/Math.max(1,series.length);
           }
-          node('rect',{x:left,y:Math.min(y(from),y(to)),width:bw,height:Math.max(.2,Math.abs(y(from)-y(to))),fill:s.color});
+          const bar=node('rect',{x:left,y:Math.min(y(from),y(to)),width:bw,height:Math.max(.2,Math.abs(y(from)-y(to))),fill:fills[indexOf(s)]});
+          if(v<0) bar.setAttribute('stroke', TOKENS.deep), bar.setAttribute('stroke-dasharray', '2 2'), bar.setAttribute('stroke-width', '1');
         });
       }
     });
     const every=Math.max(1,Math.ceil(count/Math.max(2,Math.floor(pw/78))));
     payload.periods.forEach((period,i)=>{
-      if(i%every===0)node('text',{x:x(i),y:h-10,'text-anchor':'middle',fill:'#5d6d7b','font-size':10},/^\d{4}-/.test(period)?periodLabel(period).replace(/ 20\d\d$/,''):period);
+      if(i%every===0)node('text',{x:x(i),y:h-10,'text-anchor':'middle',fill:TOKENS.muted,'font-size':11},/^\d{4}-/.test(period)?periodLabel(period).replace(/ 20\d\d$/,''):period);
     });
-    const guide=node('line',{x1:0,x2:0,y1:pad.t,y2:h-pad.b,stroke:'#7d93ac','stroke-dasharray':'3 3',visibility:'hidden','pointer-events':'none'});
+    const guide=node('line',{x1:0,x2:0,y1:pad.t,y2:h-pad.b,stroke:TOKENS.primary,'stroke-dasharray':'3 3',visibility:'hidden','pointer-events':'none'});
     const targets=[];
     let overlay;
     const showPeriod=i=>{
@@ -253,14 +300,14 @@ if (explorerHost) {
       const ow=Math.min(310,pw),oh=Math.min(h-pad.t-pad.b,32+available.length*20);
       const ox=Math.max(pad.l,Math.min(w-pad.r-ow,x(i)+(i<count/2?14:-ow-14)));
       overlay=node('g',{transform:`translate(${ox},${pad.t})`,'pointer-events':'none','aria-hidden':'true'});
-      node('rect',{x:0,y:0,width:ow,height:oh,rx:7,fill:'#fff',stroke:'#bdcbd9','stroke-width':1.2},undefined,overlay);
-      node('text',{x:12,y:20,fill:'#263e53','font-size':11,'font-weight':600},periodLabel(payload.periods[i]),overlay);
-      node('text',{x:ow-12,y:20,fill:'#263e53','font-size':11,'font-weight':600,'text-anchor':'end'},amount(displayedTotal),overlay);
+      node('rect',{x:0,y:0,width:ow,height:oh,rx:8,fill:TOKENS.surface,stroke:TOKENS.border,'stroke-width':1},undefined,overlay);
+      node('text',{x:12,y:20,fill:TOKENS.text,'font-size':11,'font-weight':600},periodLabel(payload.periods[i]),overlay);
+      node('text',{x:ow-12,y:20,fill:TOKENS.text,'font-size':11,'font-weight':600,'text-anchor':'end'},amount(displayedTotal),overlay);
       available.slice(0,Math.floor((oh-32)/20)).forEach((s,j)=>{
         const text=s.label.length>27?s.label.slice(0,25)+'…':s.label;
-        node('rect',{x:12,y:34+j*20,width:7,height:7,fill:s.color},undefined,overlay);
-        node('text',{x:25,y:41+j*20,fill:'#53697c','font-size':10},text,overlay);
-        node('text',{x:ow-12,y:41+j*20,fill:'#263e53','font-size':10,'text-anchor':'end'},amount(s.values[i]),overlay);
+        node('rect',{x:12,y:34+j*20,width:9,height:9,rx:2,fill:fills[indexOf(s)],stroke:TOKENS.border,'stroke-width':.5},undefined,overlay);
+        node('text',{x:27,y:41+j*20,fill:TOKENS.text2,'font-size':10},text,overlay);
+        node('text',{x:ow-12,y:41+j*20,fill:TOKENS.text,'font-size':10,'text-anchor':'end'},amount(s.values[i]),overlay);
       });
     };
     payload.periods.forEach((period,i)=>{
@@ -282,6 +329,17 @@ if (explorerHost) {
     svg.addEventListener('pointerleave',()=>{overlay?.remove();guide.setAttribute('visibility','hidden');});
     explorerHost.replaceChildren(svg);
   };
+  document.querySelectorAll('[data-series]').forEach(button=>{
+    // Legend swatches show the same pattern/dash as the chart so series are distinguishable without colour.
+    const index=Number(button.dataset.series), series=payload.series[index], swatch=button.querySelector('svg');
+    if(series && swatch){
+      swatch.setAttribute('viewBox','0 0 14 14'); swatch.replaceChildren();
+      const kind=PATTERNS[index % PATTERNS.length];
+      const fill=kind==='solid'?series.color:definePattern(swatch, ns, `legend-${index}`, series.color, kind);
+      const rect=document.createElementNS(ns,'rect'); rect.setAttribute('width','14'); rect.setAttribute('height','14'); rect.setAttribute('fill',fill); swatch.appendChild(rect);
+      if(payload.style==='line'){ const line=document.createElementNS(ns,'path'); line.setAttribute('d','M1 7H13'); line.setAttribute('stroke',TOKENS.surface); line.setAttribute('stroke-width','2'); if(DASHES[index % DASHES.length]) line.setAttribute('stroke-dasharray',DASHES[index % DASHES.length]); swatch.appendChild(line); }
+    }
+  });
   document.querySelectorAll('[data-series]').forEach(button=>button.addEventListener('click',()=>{
     const index=Number(button.dataset.series);
     if(hidden.has(index))hidden.delete(index);else hidden.add(index);

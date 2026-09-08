@@ -185,3 +185,25 @@ class BillingTests(TestCase):
         self.assertEqual(Customer.objects.get(pk=self.customer.pk).status, 'Paused')
         fresh, fresh_source = make_customer('Fresh', '333333333333', connected=False)
         self.assertEqual(fresh.status, 'Awaiting customer setup')
+
+
+@web_settings
+class ShellTests(TestCase):
+    """The redesigned shell keeps authentication, navigation and CSRF-protected forms working."""
+
+    def test_login_page_and_submission(self):
+        User.objects.create_user('shell', password='test-only-a-long-password')
+        client = Client(enforce_csrf_checks=True)
+        page = client.get('/login/')
+        self.assertContains(page, 'name="username"')
+        self.assertContains(page, 'csrfmiddlewaretoken')
+        token = client.cookies['csrftoken'].value
+        response = client.post('/login/', {'username': 'shell', 'password': 'wrong', 'csrfmiddlewaretoken': token})
+        self.assertContains(response, 'did not match')
+        response = client.post('/login/', {'username': 'shell', 'password': 'test-only-a-long-password', 'csrfmiddlewaretoken': token})
+        self.assertEqual(response.status_code, 302)
+        home = client.get('/portfolio/')
+        self.assertContains(home, 'data-nav-toggle')
+        self.assertContains(home, 'aria-current="page"')
+        self.assertContains(home, 'class="topbar"')
+        self.assertEqual(client.get('/password/').status_code, 200)
