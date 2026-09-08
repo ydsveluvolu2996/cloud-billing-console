@@ -81,7 +81,7 @@ Screenshots (synthetic development data only, no customer information):
 
 ## Tests, CI and capacity evidence
 
-* `python manage.py test billing.tests`: 89 tests, passing on SQLite and PostgreSQL 16
+* `python manage.py test billing.tests`: 90 tests, passing on SQLite and PostgreSQL 16
   (locally) — collection, pagination, transfers, shared payers, discovery fallback, bulk CSV,
   jobs (coalescing, leases, crash recovery, backoff, fairness, scheduling), allocation rules and
   reconciliation, budgets (history, overspend, forecasts, alert deduplication, stale data,

@@ -10,7 +10,7 @@ from .models import AwsAccount, BillingSource, Budget, Cost, Customer
 
 
 def customer_queryset(scope):
-    qs = Customer.objects.prefetch_related('sources', Prefetch('budgets', queryset=Budget.objects.filter(active=True, scope=Budget.CUSTOMER).prefetch_related('amounts')))
+    qs = Customer.objects.prefetch_related('sources__periods', Prefetch('budgets', queryset=Budget.objects.filter(active=True, scope=Budget.CUSTOMER).prefetch_related('amounts')))
     if scope.customer:
         return qs.filter(pk=scope.customer.pk)
     return qs.filter(active=True)

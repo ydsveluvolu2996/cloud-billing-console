@@ -142,7 +142,7 @@ class BillingSource(models.Model):
             return 'Account discovery complete'
         if not self.initial_import_done:
             return 'Initial import running'
-        if self.last_error or self.periods.filter(status__in=['failed', 'partial']).exists():
+        if self.last_error or any(p.status in ('failed', 'partial') for p in self.periods.all()):
             return 'Partial data'
         if self.last_success and self.last_success < timezone.now() - self.STALE_AFTER:
             return 'Stale data'

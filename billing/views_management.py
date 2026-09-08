@@ -48,13 +48,13 @@ def overview(request):
     today = timezone.now().date()
     month = today.replace(day=1)
     currency = request.GET.get('currency', 'USD')
-    customers = Customer.objects.filter(active=True).prefetch_related('sources')
+    customers = Customer.objects.filter(active=True).prefetch_related('sources__periods')
     statuses = [c.status for c in customers]
     spend = Cost.objects.filter(customer__isnull=False, currency=currency, day__gte=month, day__lte=today).aggregate(v=Sum('unblended'))['v']
     last_month = month - relativedelta(months=1)
     previous = Cost.objects.filter(customer__isnull=False, currency=currency, day__gte=last_month, day__lt=month).aggregate(v=Sum('unblended'))['v']
     summary = budgeting.portfolio_summary(month)
-    sources = BillingSource.objects.filter(customer__active=True, kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).select_related('customer')
+    sources = BillingSource.objects.filter(customer__active=True, kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).select_related('customer').prefetch_related('periods')
     problem_sources = [s for s in sources if s.state in ('Partial data', 'Permission problem', 'Stale data')]
     top = list(Cost.objects.filter(customer__isnull=False, currency=currency, day__gte=month, day__lte=today).values('customer_id', 'customer__name').annotate(v=Sum('unblended')).order_by('-v')[:8])
     return render(request, 'billing/overview.html', {
@@ -78,7 +78,7 @@ def customers(request):
     query = request.GET.get('q', '').strip()
     status_filter = request.GET.get('status', '')
     show = request.GET.get('show', 'active')
-    items = Customer.objects.prefetch_related('sources', Prefetch('budgets', queryset=Budget.objects.filter(active=True, scope=Budget.CUSTOMER).prefetch_related('amounts')))
+    items = Customer.objects.prefetch_related('sources__periods', Prefetch('budgets', queryset=Budget.objects.filter(active=True, scope=Budget.CUSTOMER).prefetch_related('amounts')))
     if show == 'active':
         items = items.filter(active=True)
     elif show == 'offboarded':
@@ -689,13 +689,15 @@ def onboarding_view(request):
     sources = BillingSource.objects.select_related('customer').prefetch_related('periods')
     if query:
         sources = sources.filter(Q(customer__name__icontains=query) | Q(account_id__icontains=query) | Q(customer__reference__icontains=query))
+    account_counts = {r['source_id']: r['n'] for r in AwsAccount.objects.filter(source__in=sources).values('source_id').annotate(n=Count('pk'))}
+    pending_counts = {r['source_id']: r['n'] for r in Job.objects.filter(source__in=sources, status__in=[Job.QUEUED, Job.LEASED]).values('source_id').annotate(n=Count('pk'))}
     rows = []
     for source in sources:
         state = source.state
         if state_filter and state != state_filter:
             continue
-        rows.append({'source': source, 'state': state, 'accounts': source.accounts.count(), 'step': source.onboarding_step,
-                     'pending': Job.objects.filter(source=source, status__in=[Job.QUEUED, Job.LEASED]).count()})
+        rows.append({'source': source, 'state': state, 'accounts': account_counts.get(source.pk, 0), 'step': source.onboarding_step,
+                     'pending': pending_counts.get(source.pk, 0)})
     sort, direction = sort_param(request, ['customer', 'state', 'step', 'last_success'], 'customer')
     keyfn = {'customer': lambda r: (r['source'].customer.name.lower(), r['source'].account_id), 'state': lambda r: r['state'], 'step': lambda r: r['step'],
              'last_success': lambda r: (r['source'].last_success is None, r['source'].last_success or timezone.now())}[sort]
