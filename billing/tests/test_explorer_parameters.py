@@ -46,7 +46,7 @@ class ExplorerParameterTests(TestCase):
             self.assertEqual(aws_request(normalize(self.params|{'metric':k}))[1]['Metrics'],[v])
 
     def test_invalid_usage_resource_dates_and_group_are_rejected(self):
-        for extra in [{'measure':'usage'},{'group_by':'nonsense'},{'untagged':'1'},{'group_by':'tag'},{'group_by':'resource'},{'start':'2000-01-01'},{'tag_key':'Team','tag':['yes'],'untagged':'1'},{'normalized':'1'}]:
+        for extra in [{'measure':'usage'},{'group_by':'nonsense'},{'tag':['Team']},{'group_by':'tag'},{'group_by':'resource'},{'start':'2000-01-01'},{'tag_key':'Team','tag':['yes'],'untagged':'1'},{'normalized':'1'}]:
             with self.subTest(extra=extra),self.assertRaises(ValueError):normalize(self.params|extra)
         p=normalize(self.params|{'measure':'usage','usage_type':['USE1-BoxUsage:t3.small'],'normalized':'1'})
         self.assertEqual(aws_request(p)[1]['Metrics'],['NormalizedUsageAmount'])
@@ -133,3 +133,8 @@ class ExplorerParameterTests(TestCase):
         response=self.response();response['ResultsByTime'][0]['Groups'][0]['Keys']=['NoRegion']
         q.data=response;q.requested=False;q.last_attempt=timezone.now();q.last_success=timezone.now();q.save()
         self.assertIn('region=__billing_empty_value__',build_report(self.params)['pivot_rows'][0]['url'])
+
+    def test_absence_switches_without_a_key_match_all_tags_and_categories(self):
+        self.assertEqual(expression(normalize(self.params|{'untagged':'1'})), {'Tags':{'MatchOptions':['ABSENT']}})
+        self.assertEqual(expression(normalize(self.params|{'uncategorized':'1'})), {'CostCategories':{'MatchOptions':['ABSENT']}})
+        self.assertEqual(expression(normalize(self.params|{'uncategorized':'1','cost_category_key':'BusinessUnit'})), {'CostCategories':{'MatchOptions':['ABSENT'],'Key':'BusinessUnit'}})

@@ -18,8 +18,8 @@ Captured from the authenticated AWS Cost Explorer console on 8 September 2026. T
 | usageAggregate | Usage quantity; requires one usage type to avoid adding incompatible units |
 | useNormalizedUnits | NormalizedUsageAmount for eligible instance usage |
 | excludeForecasting | Show/hide AWS forecasts; forecasts appear separately from actual charges |
-| showOnlyUntagged | ABSENT expression on the chosen billing tag key |
-| showOnlyUncategorized | ABSENT expression on the chosen cost category key |
+| showOnlyUntagged | ABSENT across all tags, or the chosen billing tag key |
+| showOnlyUncategorized | ABSENT across all categories, or the chosen cost category key |
 | reportName | Editable title and shared saved-report library |
 | isDefault | Console presentation metadata; no impact on AWS billing queries |
 | Filter preference | Browser-local visibility settings; applied filters stay visible |

@@ -78,7 +78,7 @@ def normalize(params, today=None):
     if p['group_by'] in ('tag','cost_category') and not p['group_key']:
         raise ValueError('Choose a tag or cost category key to group by.')
     for key,flag in [('tag','untagged'),('cost_category','uncategorized')]:
-        if (p[key] or p[flag]=='1') and not p[key+'_key']:
+        if p[key] and not p[key+'_key']:
             raise ValueError(f'Choose the {FILTERS[key][0].lower()} key for this filter.')
         if p[key] and p[flag]=='1': raise ValueError('Clear the selected values before choosing only untagged or uncategorized resources.')
     if p['measure']=='usage' and not (len(p['usage_type'])==1 and p['usage_type_mode']=='include'):
@@ -113,7 +113,9 @@ def expression(p):
         if key in ('tag','cost_category'):
             category='Tags' if key=='tag' else 'CostCategories'
             if p['untagged' if key=='tag' else 'uncategorized']=='1':
-                parts.append({category:{'Key':p[key+'_key'],'MatchOptions':['ABSENT']}});continue
+                absent={'MatchOptions':['ABSENT']}
+                if p[key+'_key']:absent['Key']=p[key+'_key']
+                parts.append({category:absent});continue
             expr={category:{'Key':p[key+'_key'],'Values':['' if v==EMPTY_VALUE else v for v in p[key]]}}
         else:
             expr={'Dimensions':{'Key':aws_key,'Values':['' if v==EMPTY_VALUE else v for v in p[key]]}}
