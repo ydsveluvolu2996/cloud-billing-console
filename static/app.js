@@ -175,7 +175,7 @@ if (explorerHost) {
   const amount = value => {
     if (value === null) return '—';
     return new Intl.NumberFormat('en', {style:'currency', currency:payload.currency, minimumFractionDigits:2,
-      maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 5 : 2}).format(value);
+      maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 10 : 2}).format(value);
   };
   const periodLabel = text => /^\d{4}-/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
   const drawExplorer = () => {
@@ -204,7 +204,7 @@ if (explorerHost) {
       if(text !== undefined) element.textContent=text;
       parent.appendChild(element); return element;
     };
-    for(let value=Math.ceil(min/tick)*tick;value<=max+tick*.001;value+=tick) {
+    for(let value=(Math.ceil(min/tick)*tick || 0);value<=max+tick*.001;value+=tick) {
       node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:'#e0e5eb','stroke-width':value===0?1.5:1});
       node('text',{x:pad.l-9,y:y(value)+3,fill:'#647483','text-anchor':'end','font-size':10},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
     }
