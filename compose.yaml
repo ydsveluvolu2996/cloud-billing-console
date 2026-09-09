@@ -124,3 +124,6 @@ networks:
   frontend: {}
   database:
     internal: true
+    ipam:
+      config:
+      - subnet: ${BILLING_DATABASE_SUBNET:-172.30.50.0/24}

@@ -380,9 +380,13 @@ Resources:
 
           timedatectl set-timezone UTC
 
+          # The collector security group permits HTTPS, not plain HTTP package mirrors.
+
+          sed -i ''s|http://|https://|g'' /etc/apt/sources.list.d/ubuntu.sources
+
           apt-get update
 
-          apt-get install -y python3-venv python3-pip unattended-upgrades
+          apt-get install -y python3-venv python3-pip ca-certificates curl unzip unattended-upgrades
 
           useradd --system --create-home billing-collector
 
