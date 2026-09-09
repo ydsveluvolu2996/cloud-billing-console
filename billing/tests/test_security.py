@@ -82,6 +82,24 @@ class IsolationTests(TestCase):
         q=ExplorerQuery.objects.create(customer=self.b,source=self.sb,fingerprint='x',connection_fingerprint='x',operation='get_cost_and_usage',parameters={},data={'secret':'private'})
         response=self.client.get('/explorer/status/?ids='+str(q.pk))
         self.assertEqual(response.json()['count'],0)
+
+    def test_bulk_preview_cannot_survive_revocation_or_username_reuse(self):
+        from billing.access import scope_fingerprint
+        CustomerMembership.objects.create(user=self.user,customer=self.b,role='operator')
+        preview=BulkImport.objects.create(kind='customers',uploaded_by=self.user.username,requested_by=self.user,
+            scope_fingerprint=scope_fingerprint(for_user(self.user)),rows=[{'customer':'Tenant Alpha'}],errors=['Synthetic invalid row'])
+        with context(for_user(self.user)):
+            self.assertTrue(BulkImport.objects.filter(pk=preview.pk).exists())
+        self.member.active=False;self.member.save()
+        with context(for_user(self.user)):
+            self.assertFalse(BulkImport.objects.filter(pk=preview.pk).exists())
+        self.client.force_login(self.user);s=self.client.session;s['mfa_at']=timezone.now().timestamp();s.save()
+        response=self.client.post('/onboarding/bulk/',{'action':'apply','import_id':preview.pk})
+        self.assertEqual(response.status_code,404);self.assertNotContains(response,'Tenant Alpha',status_code=404)
+        self.user.username='renamed-alice';self.user.save()
+        replacement=User.objects.create_user('alice');CustomerMembership.objects.create(user=replacement,customer=self.b,role='operator')
+        with context(for_user(replacement)):
+            self.assertFalse(BulkImport.objects.filter(pk=preview.pk).exists())
     def test_no_membership_denies_data(self):
         u=User.objects.create_user('no-membership')
         with context(for_user(u)):

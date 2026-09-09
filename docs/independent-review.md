@@ -2,7 +2,7 @@
 
 **Independent review has not occurred.** Implementation-agent tests and scans are engineering evidence, not an independent security assessment or compliance certification. External portal access remains disabled. All critical/high findings block release.
 
-Review the final draft PR SHA, [B01–B34 tracker](build-tracker.md), [security architecture](security-architecture.md), [manual IAM map](manual-iam-onboarding.md), migrations 0008–0019, generated database policies and [release/recovery runbooks](deployment-runbook.md). Evidence under `docs/evidence/` is synthetic or public image/pricing metadata. CI artifacts are keyed to their exact Git SHA. Obtain actual customer and infrastructure evidence separately in approved restricted storage.
+Review the final draft PR SHA, [B01–B34 tracker](build-tracker.md), [security architecture](security-architecture.md), [manual IAM map](manual-iam-onboarding.md), migrations 0008–0020, generated database policies and [release/recovery runbooks](deployment-runbook.md). Evidence under `docs/evidence/` is synthetic or public image/pricing metadata. CI artifacts are keyed to their exact Git SHA. Obtain actual customer and infrastructure evidence separately in approved restricted storage.
 
 ## Threat boundaries and review priorities
 

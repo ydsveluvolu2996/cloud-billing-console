@@ -21,7 +21,7 @@ The reproducible **local synthetic** drill is:
   --output docs/evidence/restore-drill.json
 ```
 
-The tool rejects non-loopback hosts, the source as target and populated targets. Stop local writers while taking comparison manifests. It verifies complete canonical row digests, relative column order/types, constraints and indexes, canonicalizing PostgreSQL's equivalent text-array cast syntax and dropped-column ordinal gaps. It validates the dump catalog and writes counts/digests only. The recorded drill restored 182,306 bytes in 1.517 seconds, with all rows/schema matched and every constraint validated. This small synthetic recovery fixture is **not** a recovery-time measurement for the million-row scale database or production.
+The tool rejects non-loopback hosts, the source as target and populated targets. Stop local writers while taking comparison manifests. It verifies complete canonical row digests, relative column order/types, constraints and indexes, canonicalizing PostgreSQL's equivalent text-array cast syntax and dropped-column ordinal gaps. It validates the dump catalog and writes counts/digests only. The recorded drill restored 185,004 bytes in 1.428 seconds, with all rows/schema matched and every constraint validated. This small synthetic recovery fixture is **not** a recovery-time measurement for the million-row scale database or production.
 
 ## Rotation and recovery
 

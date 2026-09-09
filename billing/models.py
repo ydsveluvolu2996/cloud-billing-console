@@ -582,6 +582,8 @@ class SavedReport(ScopedModel):
 
 
 class BulkImport(ScopedModel):
+    requested_by = models.ForeignKey('auth.User', null=True, blank=True, on_delete=models.SET_NULL)
+    scope_fingerprint = models.CharField(max_length=64, blank=True)
     """CSV preview/apply record for customers or budgets."""
     kind = models.CharField(max_length=20)  # customers | budgets
     uploaded_by = models.CharField(max_length=150)

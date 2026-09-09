@@ -1,11 +1,11 @@
 {
   "synthetic": true,
   "source": "billing_security_checks",
-  "target": "billing_security_restore_verified",
+  "target": "billing_security_restore_scoped_previews",
   "matched": true,
-  "dump_sha256": "4cd11b1bf38fe710f8e91cd0f9732f193fe69923fa15b2b65104f85eb55a4791",
-  "dump_bytes": 182306,
-  "recovery_seconds": 1.517,
+  "dump_sha256": "d71c34cb982b9d9545e98e4b698c63fb0f3d49acc1baea66a2686f568f9c9ac4",
+  "dump_bytes": 185004,
+  "recovery_seconds": 1.428,
   "tables": {
     "auth_group": {
       "rows": 0,
@@ -21,7 +21,7 @@
     },
     "auth_user": {
       "rows": 1,
-      "sha256": "f52d0cc4ad6176070898859941a087838238f72fe3698a483920560f35dddf39"
+      "sha256": "5967cd7ce482a517583992c28ae8f756a3e5e21e7c36eaf66656aa429ad5fde0"
     },
     "auth_user_groups": {
       "rows": 0,
@@ -44,8 +44,8 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "axes_accesslog": {
-      "rows": 4,
-      "sha256": "641ef87611a3651cf7762d95e166d18a8edad69246219690a43d3305bbb42671"
+      "rows": 9,
+      "sha256": "9be449918c62ef75c02f214a262f1e8ab6cb71d183135c5c7bfa74b22c555b61"
     },
     "billing_accountassignment": {
       "rows": 3,
@@ -76,8 +76,8 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "billing_auditevent": {
-      "rows": 9,
-      "sha256": "7c3a401a5d4952a88e8df5e1232621a536175c0760af283656bb06e357c19103"
+      "rows": 19,
+      "sha256": "8ff06182f2b8bffdb001e8f183788fa70c64d04b79a5e9dfa9c1441ded48a938"
     },
     "billing_awsaccount": {
       "rows": 3,
@@ -188,22 +188,22 @@
       "sha256": "208e1f551fbb026fe482c55529ac3064775827ba8ed1fb5d0b1267b8195aa4c7"
     },
     "django_migrations": {
-      "rows": 50,
-      "sha256": "1b85bc101a450a33debfef14f73297db9ff9fd0ec4d3555074b436ffc61f581c"
+      "rows": 51,
+      "sha256": "ca4a6fc9b51177211f10431c1550323d6f35b64560dd02f3ecfdf2fac0bb2e80"
     },
     "django_session": {
-      "rows": 4,
-      "sha256": "a6ac916abef009715ceaaa89dab3af7b8d527c9b87221f486aa556752712ca83"
+      "rows": 9,
+      "sha256": "8da443218e7eabaa88b0d35650b1e1cbd760b52c9e7cd02a1f3fb8202aeae3af"
     },
     "otp_totp_totpdevice": {
       "rows": 1,
-      "sha256": "5cff3366e0382e52c69978e0edfd33316aa33cd6f783d99a6f1b3cc593c26dcc"
+      "sha256": "f75029c5a911799dda4e0a9cfa6d5591985534f276868200aa03694d87f0699a"
     },
     "_schema": {
-      "sha256": "1edd6e4d0e2e4bbfd8c0ec41b983311407bc3e64fea3213b8017764501c0040f",
-      "columns": 466,
-      "constraints": 166,
-      "indexes": 165,
+      "sha256": "9b907877bb5b459f1b8af76aa97707875c39b9c4f0ba78a2b8cf94a01f214ff2",
+      "columns": 468,
+      "constraints": 167,
+      "indexes": 166,
       "all_constraints_validated": true
     }
   },

@@ -97,7 +97,7 @@ def restriction(model, access=None):
         return Q()
     name = model.__name__
     if name == 'BulkImport':
-        return Q(uploaded_by=access.username) if access.editable else Q(pk__in=[])
+        return Q(requested_by_id=access.user_id,scope_fingerprint=scope_fingerprint(access)) if access.editable else Q(pk__in=[])
     if name == 'BillingSource' and not access.write:
         from .models import AccountAssignment
         owned_sources=AccountAssignment.objects.filter(customer_id__in=access.ids).values_list('account__source_id',flat=True)
@@ -187,7 +187,7 @@ def validate_object(obj):
         if ExplorerQuery.objects.filter(source_id=obj.source_id,requested_by_id=access.user_id).exists():
             return
     if name == 'BulkImport':
-        if obj.uploaded_by != access.username or not access.editable:
+        if obj.requested_by_id != access.user_id or obj.scope_fingerprint != scope_fingerprint(access) or not access.editable:
             raise PermissionDenied('This import belongs to another operator.')
         return
     if name == 'Customer':

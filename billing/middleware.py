@@ -5,7 +5,7 @@ from django.db import connection, transaction
 from django.http import HttpResponseForbidden
 from django.shortcuts import redirect
 from django.utils import timezone
-from .access import context, for_user
+from .access import context, for_user, scope_fingerprint
 from .models import UserSecurity
 
 
@@ -33,6 +33,9 @@ class SecurityMiddleware:
                     cursor.execute("SELECT set_config('billing.user_id', %s, true)", [str(request.user.pk) if request.user.is_authenticated else ''])
                     cursor.execute("SELECT set_config('billing.external_enabled', %s, true)", ['true' if settings.EXTERNAL_PORTAL_ENABLED else 'false'])
             access = for_user(request.user, write=request.method not in ('GET','HEAD','OPTIONS'))
+            if connection.vendor == 'postgresql' and settings.DATABASE_RLS_ENABLED:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('billing.scope_fingerprint', %s, true)", [scope_fingerprint(access)])
             with context(access):
                 if settings.ENFORCE_CUSTOMER_AUTHORIZATION and request.path.startswith('/admin/') and not access.portfolio:
                     return HttpResponseForbidden('Explicit portfolio administrator authorization is required.')

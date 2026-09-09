@@ -691,10 +691,12 @@ def onboarding_bulk(request):
 
 
 def bulk_view(request, kind, parser, applier, template, title, columns, done_url):
+    from .access import for_user,scope_fingerprint
+    fingerprint=scope_fingerprint(for_user(request.user))
     form = CsvUploadForm()
     preview = None
     if request.method == 'POST' and request.POST.get('action') == 'apply':
-        preview = get_object_or_404(BulkImport.objects.select_for_update(), pk=request.POST.get('import_id'), kind=kind, uploaded_by=request.user.username)
+        preview = get_object_or_404(BulkImport.objects.select_for_update(), pk=request.POST.get('import_id'), kind=kind, requested_by=request.user,scope_fingerprint=fingerprint)
         if preview.applied_at:
             messages.success(request, 'This preview was already applied; no records were duplicated.')
             return redirect(done_url)
@@ -719,7 +721,7 @@ def bulk_view(request, kind, parser, applier, template, title, columns, done_url
                 form.add_error('file', 'The file must be UTF-8 encoded CSV.')
             else:
                 rows, errors = parser(text)
-                preview = BulkImport.objects.create(kind=kind, uploaded_by=request.user.username, rows=rows, errors=errors)
+                preview = BulkImport.objects.create(kind=kind, uploaded_by=request.user.username,requested_by=request.user,scope_fingerprint=fingerprint, rows=rows, errors=errors)
     return render(request, template, {'form': form, 'preview': preview, 'title': title, 'columns': columns, 'kind': kind, 'active_page': 'onboarding' if kind == 'customers' else 'budgets'})
 
 

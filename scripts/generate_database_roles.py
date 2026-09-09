@@ -82,7 +82,7 @@ for name,m in models.items():
   read="billing_account_access(account_id,false) OR billing_can_access(billing_parent_customer('billing_billingsource',source_id::text),NULL,false)"
   write="billing_account_access(account_id,true) OR billing_can_access(billing_parent_customer('billing_billingsource',source_id::text),NULL,true)"
  elif name=='BulkImport':
-  read="uploaded_by=(SELECT username FROM auth_user WHERE id::text=current_setting('billing.user_id',true))";write=read
+  read="requested_by_id::text=current_setting('billing.user_id',true) AND scope_fingerprint<>'' AND scope_fingerprint=current_setting('billing.scope_fingerprint',true)";write=read
  elif name in CUSTOMER_PATHS:
   path=CUSTOMER_PATHS[name];first=path.split('__')[0]
   if '__' not in path:
@@ -102,7 +102,7 @@ for name,m in models.items():
    read=f'({read}) OR ({scoped_request})';write=f'({write}) OR ({scoped_request})'
   if name=='ExplorerQuery':
    read=f'billing_customer_visible({cid})'
-   read+=" AND (requested_by_id::text=current_setting('billing.user_id',true) OR requested_by_id IS NULL)"
+   read+=" AND requested_by_id::text=current_setting('billing.user_id',true) AND scope_fingerprint<>'' AND scope_fingerprint=current_setting('billing.scope_fingerprint',true)"
    write=read
   if name=='AuditEvent':
    write="actor=(SELECT username FROM auth_user WHERE id::text=current_setting('billing.user_id',true)) OR current_setting('billing.user_id',true) IS NULL OR current_setting('billing.user_id',true)=''"

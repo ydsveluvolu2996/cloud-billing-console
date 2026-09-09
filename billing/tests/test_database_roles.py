@@ -52,6 +52,25 @@ class DatabaseRoleTests(TransactionTestCase):
                     with self.assertRaises(psycopg.errors.InsufficientPrivilege):
                         with c.transaction():c.execute(statement)
 
+    def test_database_previews_and_caches_require_current_request_scope(self):
+        from billing.models import BulkImport,ExplorerQuery
+        from billing.access import for_user,scope_fingerprint
+        before=scope_fingerprint(for_user(self.user))
+        BulkImport.objects.create(kind='customers',uploaded_by=self.user.username,requested_by=self.user,scope_fingerprint=before)
+        ExplorerQuery.objects.create(customer=self.a,source=self.sa,requested_by=self.user,scope_fingerprint=before,
+            fingerprint='scope-test',connection_fingerprint='scope-test',operation='get_cost_and_usage',parameters={})
+        with self.connect('billing_web') as c:
+            c.execute("SELECT set_config('billing.user_id',%s,true)",[str(self.user.pk)])
+            for table in ('billing_bulkimport','billing_explorerquery'):
+                self.assertEqual(c.execute(sql.SQL('SELECT count(*) FROM {}').format(sql.Identifier(table))).fetchone()[0],0)
+            c.execute("SELECT set_config('billing.scope_fingerprint',%s,true)",[before])
+            for table in ('billing_bulkimport','billing_explorerquery'):
+                self.assertEqual(c.execute(sql.SQL('SELECT count(*) FROM {}').format(sql.Identifier(table))).fetchone()[0],1)
+            member=CustomerMembership.objects.get(user=self.user);member.account_ids=[self.sa.account_id];member.save()
+            c.execute("SELECT set_config('billing.scope_fingerprint',%s,true)",[scope_fingerprint(for_user(self.user))])
+            for table in ('billing_bulkimport','billing_explorerquery'):
+                self.assertEqual(c.execute(sql.SQL('SELECT count(*) FROM {}').format(sql.Identifier(table))).fetchone()[0],0)
+
     def test_effective_transfer_requires_both_scopes_and_keeps_historical_facts(self):
         from billing.models import AccountAssignment
         from billing.collector import ensure_assignment
