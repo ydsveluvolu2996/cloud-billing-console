@@ -1,7 +1,8 @@
 <aside class="report-parameters" id="report-parameters" aria-label="Report parameters">
-  <div class="parameters-heading"><h2>Report parameters</h2><button class="icon-button" data-toggle-parameters aria-label="Close report parameters">×</button></div>
+  <div class="parameters-heading"><h2>Report parameters</h2><button class="icon-button" data-toggle-parameters aria-label="Close report parameters" type="button">×</button></div>
   <form method="get" id="report-form">
     <input type="hidden" name="chart_style" value="{{ chart_style }}"><input type="hidden" name="currency" value="USD">
+    <div class="parameters-body">
     <section class="parameter-section">
       <h3>Time</h3>
       <label>Report mode<select name="report_mode"><option value="standard" {% if params.report_mode == 'standard' %}selected{% endif %}>Standard</option><option value="compare" {% if params.report_mode == 'compare' %}selected{% endif %}>Compare</option></select></label>
@@ -41,7 +42,8 @@
       <input type="hidden" name="normalized" value="0"><label class="checkbox-label"><input type="checkbox" name="normalized" value="1" {% if params.normalized == '1' %}checked{% endif %}>Show usage as normalized units</label>
       <p>Forecasts appear for future dates and depend on AWS history. Untagged/uncategorized views cover all keys, or only the key you select. Usage requires one usage type; normalized units apply to eligible instance usage.</p>
     </section>
-    <section class="parameter-section"><h3>Report library</h3><label>Report name<input name="report_name" value="{{ params.report_name }}" maxlength="120" required></label>{% if user.is_staff %}<button type="submit" class="button secondary full" form="save-current-report">Save current report</button>{% endif %}<p>Apply changes before saving. Relative date ranges update when opened.</p>{% for saved in saved_reports %}<a class="saved-report-link" href="{% url 'open_report' saved.pk %}">▧ {{ saved.name }}</a>{% empty %}<p>No saved reports yet.</p>{% endfor %}</section>
+    <section class="parameter-section"><h3>Report library</h3><label>Report name<input name="report_name" value="{{ params.report_name }}" maxlength="120" required></label>{% if user.is_staff %}<button type="submit" class="button secondary full" form="save-current-report">Save current report</button>{% endif %}<p>Apply changes before saving. Relative date ranges update when opened.</p>{% for saved in saved_reports %}<a class="saved-report-link" href="{% url 'open_report' saved.pk %}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 13h6M9 17h6"/></svg>{{ saved.name }}</a>{% empty %}<p>No saved reports yet.</p>{% endfor %}</section>
+    </div>
     <div class="parameter-submit"><button class="button full">Apply parameters</button><a href="/">Reset report</a></div>
   </form>
 </aside>

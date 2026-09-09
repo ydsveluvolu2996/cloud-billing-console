@@ -1,14 +1,18 @@
+"""Compatibility entry point for the legacy cron lines.
+
+Collection now runs through the durable job queue. This command schedules the current slot,
+honours manual refresh requests and runs queued jobs once, sharing the same process lock as
+before so overlapping cron invocations never double-collect.
+"""
 import fcntl
 from pathlib import Path
 from django.core.management.base import BaseCommand
-from django.utils import timezone
-from billing.collector import sync_customer
-from billing.models import Customer, SyncRun, SavedReport
-from billing.query_cache import refresh_queries
+from billing import jobs, scheduler
+from billing.models import BillingSource, SavedReport
 
 
 class Command(BaseCommand):
-    help = 'Collect connected customer billing; a process lock prevents overlapping runs.'
+    help = 'Schedule and run queued collection jobs once; a process lock prevents overlapping runs.'
 
     def add_arguments(self, parser):
         parser.add_argument('--customer')
@@ -22,29 +26,20 @@ class Command(BaseCommand):
             except BlockingIOError:
                 self.stdout.write('Another collection is already running.')
                 return
-            # Holding the exclusive lock means prior unfinished runs were interrupted.
-            for unfinished in SyncRun.objects.filter(status='running'):
-                unfinished.status = 'failed'
-                unfinished.error = 'Collection was interrupted. A retry has been queued.'
-                unfinished.finished_at = timezone.now()
-                unfinished.save()
-                Customer.objects.filter(pk=unfinished.customer_id).update(sync_requested=True, last_error=unfinished.error)
-            customers = Customer.objects.filter(enabled=True).exclude(role_arn='')
+            jobs.recover_expired()
+            sources = scheduler.active_sources()
             if options['customer']:
-                customers = customers.filter(pk=options['customer'])
-            if options['queued']:
-                customers = customers.filter(sync_requested=True)
-            for customer in customers:
-                Customer.objects.filter(pk=customer.pk).update(sync_requested=False)
-                full = options['full'] or (timezone.now().day == 2 and timezone.now().hour < 6)
-                run = sync_customer(customer, full=full)
-                self.stdout.write(f'{customer.name}: {run.status if run else "skipped"}')
-
+                sources = sources.filter(customer_id=options['customer'])
+            if options['full'] or options['customer']:
+                for source in sources:
+                    scheduler.request_refresh(source, months_back=6 if options['full'] else 1)
             if not options['queued']:
+                scheduler.schedule_due()
                 from billing.advanced_explorer import build_report
                 for saved in SavedReport.objects.all():
                     try:
                         build_report(saved.parameters)
                     except ValueError:
                         self.stderr.write(f'Saved report {saved.pk} needs parameter review.')
-            refresh_queries(customer_id=options['customer'], scheduled=not options['queued'])
+            ran = jobs.run_once()
+            self.stdout.write(f'jobs run: {ran}')

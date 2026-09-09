@@ -1,23 +1,9 @@
-"""
-URL configuration for config project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/5.2/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
+"""URL configuration for the Cloud Billing Console."""
 from django.contrib import admin
 from django.urls import path
 from django.contrib.auth import views as auth_views
 from billing import web
+from billing import views_management as manage
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -28,16 +14,38 @@ urlpatterns = [
     path('reports/import/', web.import_report, name='import_report'),
     path('reports/<int:pk>/', web.open_report, name='open_report'),
     path('portfolio/', web.portfolio, name='portfolio'),
+    path('overview/', manage.overview, name='overview'),
     path('export/report/', web.export_report, name='export_report'),
     path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     path('password/', auth_views.PasswordChangeView.as_view(template_name='registration/password.html', success_url='/'), name='password_change'),
-    path('customers/', web.customers, name='customers'),
-    path('customers/add/', web.customer_add, name='customer_add'),
-    path('customers/<uuid:pk>/', web.customer_detail, name='customer_detail'),
-    path('customers/<uuid:pk>/template/', web.template_download, name='template_download'),
-    path('customers/<uuid:pk>/setup/', web.launch_setup, name='launch_setup'),
+    path('customers/', manage.customers, name='customers'),
+    path('customers/add/', manage.customer_add, name='customer_add'),
+    path('customers/<uuid:pk>/', manage.customer_detail, name='customer_detail'),
+    path('customers/<uuid:pk>/edit/', manage.customer_edit, name='customer_edit'),
+    path('customers/<uuid:pk>/offboard/', manage.customer_offboard, name='customer_offboard'),
     path('customers/<uuid:pk>/sync/', web.request_sync, name='request_sync'),
+    path('customers/<uuid:pk>/sources/add/', manage.source_add, name='source_add'),
+    path('customers/<uuid:pk>/projects/add/', manage.project_add, name='project_add'),
+    path('sources/<uuid:pk>/', manage.source_detail, name='source_detail'),
+    path('sources/<uuid:pk>/template/', manage.source_template, name='source_template'),
+    path('sources/<uuid:pk>/setup/', manage.source_setup, name='source_setup'),
+    path('sources/<uuid:pk>/<slug:action>/', manage.source_action, name='source_action'),
+    path('accounts/unassigned/', manage.unassigned_accounts, name='unassigned_accounts'),
+    path('accounts/<str:account_id>/', manage.account_detail, name='account_detail'),
+    path('accounts/<str:account_id>/assign/', manage.account_assign, name='account_assign'),
+    path('projects/<int:pk>/', manage.project_detail, name='project_detail'),
+    path('projects/<int:pk>/rules/add/', manage.rule_add, name='rule_add'),
+    path('projects/<int:pk>/rules/<int:rule_id>/retire/', manage.rule_retire, name='rule_retire'),
+    path('budgets/', manage.budget_list, name='budget_list'),
+    path('budgets/add/', manage.budget_add, name='budget_add'),
+    path('budgets/bulk/', manage.budget_bulk, name='budget_bulk'),
+    path('budgets/imported/', manage.imported_budgets, name='imported_budgets'),
+    path('budgets/<int:pk>/', manage.budget_detail, name='budget_detail'),
+    path('alerts/<int:pk>/ack/', manage.alert_ack, name='alert_ack'),
+    path('onboarding/', manage.onboarding_view, name='onboarding'),
+    path('onboarding/bulk/', manage.onboarding_bulk, name='onboarding_bulk'),
+    path('templates/<slug:kind>.csv', manage.csv_template, name='csv_template'),
     path('export/', web.export_csv, name='export_csv'),
     path('refresh/', web.refresh_costs, name='refresh_costs'),
     path('activity/', web.activity, name='activity'),

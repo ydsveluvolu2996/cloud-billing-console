@@ -4,6 +4,15 @@ A private team dashboard for daily and monthly AWS costs across customer account
 
 ## Features
 
+The dashboard now manages the whole customer estate, not only cost charts: business customers with several payer or standalone connections, an inventory of every linked account with effective-dated ownership, projects with versioned allocation rules, and budgets at customer, payer, account and project level. Collection runs through a durable PostgreSQL job queue serviced by a separately supervised worker container. See [docs/customer-account-project-budgets.md](docs/customer-account-project-budgets.md) for the model and rules, [docs/capacity.md](docs/capacity.md) for measured capacity and [docs/CODEX_DEPLOYMENT_HANDOFF.md](docs/CODEX_DEPLOYMENT_HANDOFF.md) for deployment.
+
+- Portfolio overview, server-side searchable/sortable customer directory, customer detail with Accounts, Projects, Budgets, Reports and Sync tabs, payer/member account tree, account detail with service and daily/monthly breakdowns.
+- Resumable six-step onboarding wizard with per-connection CloudFormation links, background role verification, Organizations discovery (billing-only fallback), initial import, rotation, pause/resume, offboarding with retained history and bulk CSV onboarding.
+- Shared payers with explicit, disjoint account assignments and an unassigned review queue; duplicate payer/member detection; historical ownership on account transfers.
+- Projects allocated by linked accounts, activated tag, cost category or account + tag/category with previews, reconciliation and a visible Unallocated / shared remainder.
+- Dashboard budgets (history, month overrides, filters, thresholds, alerts, run-rate or AWS forecasts, honest data status) and read-only imported AWS budgets.
+- Blue monochrome design system with token-based CSS, patterned monochrome charts and an accessible application shell.
+
 - Cost Explorer-style home report: six complete months by default, stacked/bar/line charts, service/account/customer grouping, a right-side parameter panel, and a searchable monthly or daily cost matrix.
 - Separate customer portfolio for budgets and month-end projections. Matrix CSV exports match the visible period columns; detailed CSV exports retain the original cost slices.
 
@@ -35,9 +44,9 @@ Local development defaults to SQLite. Production requires PostgreSQL. Do not pub
 
 1. Deploy `deploy/infrastructure.yaml` in your chosen account with an Ubuntu 24.04 AMI, a public subnet, and `CAPABILITY_NAMED_IAM`. It creates a t3.small, 30 GiB encrypted gp3 disk, stable public IP, SSM administration, and a private versioned S3 bucket. Only HTTP/HTTPS are inbound; the database and application port are not published.
 2. Copy a release to `/opt/cloud-billing`. Generate a private `.env` based on `.env.example`. Point your hostname to the public IP. The temporary `sslip.io` hostname is replaceable and depends on that service's DNS availability.
-3. Run `docker compose build`, `docker compose up -d db`, `docker compose run --rm app python manage.py migrate`, and `docker compose up -d`.
+3. Run `docker compose build`, `docker compose up -d db`, `docker compose run --rm app python manage.py migrate`, and `docker compose up -d` (this starts the `app`, `worker` and `proxy` services; the worker schedules and runs all collection jobs).
 4. Create the administrator with `docker compose exec app python manage.py createsuperuser`. No public signup exists. All regular application users are internal team readers; staff can manage customers, and superusers can manage users. Customer logins are not supported by this version.
-5. Install `deploy/cloud-billing.cron` into `/etc/cron.d/cloud-billing`, `deploy/cloud-billing.logrotate` into `/etc/logrotate.d/cloud-billing`, and make `deploy/backup.sh` executable. Server time zone must be UTC.
+5. Install `deploy/cloud-billing.cron` into `/etc/cron.d/cloud-billing` (backups, session cleanup and an hourly safety-net `sync_costs --queued` in case the worker container is down), `deploy/cloud-billing.logrotate` into `/etc/logrotate.d/cloud-billing`, and make `deploy/backup.sh` executable. Server time zone must be UTC.
 6. Upload `deploy/customer-role.yaml` to `templates/customer-role.yaml` in the private artifact bucket. The app generates one-hour presigned quick-create links. The download-template route remains available if link creation fails.
 
 SSM is the administration channel. No SSH key or port is required. The instance role can assume only `/BillingConsole/CostReadOnly` roles. Each customer's trust policy must independently authorize the exact collector principal and external ID. The app never stores temporary AWS credentials.
@@ -48,11 +57,12 @@ The single instance is a deliberate availability tradeoff. Keep Ubuntu/Docker/co
 
 ## Customer onboarding
 
-1. Add the customer name, payer/standalone account ID, and optional budget in the dashboard.
-2. Generate their setup link. Their administrator enables Cost Explorer and creates the CloudFormation stack, which creates one IAM role allowing six read-only Cost Explorer actions (costs, dimensions, tags, categories, forecasts and resource costs).
-3. Paste `RoleArn` from CloudFormation Outputs and select **Save & verify connection**. Initial collection is queued and usually starts within one minute.
-4. Review imported totals using the same date range, currency, and cost basis in Cost Explorer. Current dates are estimates. Connect the management/payer account to include its linked accounts.
-5. To disconnect, pause collection and have the customer delete the onboarding stack. Imported data is retained. Permanent data removal should follow your agreed customer retention process.
+1. Create the customer (name, internal reference, owner, optional monthly budget), then add each management/payer or standalone account as a connection. Duplicate accounts and members of already-connected payers are rejected.
+2. Generate the connection's setup link or template. The customer's administrator enables Cost Explorer and creates the CloudFormation stack: one read-only role with the six Cost Explorer actions, plus optional `organizations:DescribeOrganization`/`ListAccounts` for a complete inventory and optional `budgets:ViewBudget` for read-only budget import.
+3. Paste `RoleArn` from the stack Outputs. The worker assumes the role with the connection's unique external ID, confirms the account identity, records capabilities and discovers linked accounts (billing-only fallback when Organizations access is declined).
+4. Assign accounts (shared payers use the review queue), create projects and budgets, and queue the initial import (six completed months plus the current month).
+5. Connection states: Awaiting customer setup, Connection verified, Account discovery complete, Initial import running, Connected, Partial data, Permission problem, Stale data, Paused. Rotate the external ID to reconnect; pause or offboard to stop collection while retaining history.
+6. Bulk onboarding: upload a CSV under Onboarding → Bulk CSV, review the validated preview, then apply. No customer e-mails are sent automatically.
 
 ## Backups and recovery
 
@@ -66,7 +76,11 @@ To restore, stop the app/cron, restore `.env` securely, bring up PostgreSQL, and
 DEBUG=true .venv/bin/python manage.py test billing.tests
 DEBUG=true .venv/bin/python manage.py makemigrations --check --dry-run
 DEBUG=true .venv/bin/python manage.py collectstatic --noinput
+DEBUG=true .venv/bin/python manage.py run_worker --once          # schedule and drain the job queue once
+DEBUG=true .venv/bin/python manage.py synthetic_load --customers 5 --accounts 50 --months 2 --output /tmp/load.json  # isolated database only
 ```
+
+`synthetic_load` refuses to run against a database containing real customers; use it only on an isolated database (see `docs/capacity.md`).
 
 GitHub Actions runs the checks against PostgreSQL. `/health/` checks database availability and exposes only status. Application errors and scheduled-job results are retained in rotating local logs; inspect them through SSM. Budget alerts are visible inside the dashboard; outgoing email/Slack notification delivery is not configured.
 

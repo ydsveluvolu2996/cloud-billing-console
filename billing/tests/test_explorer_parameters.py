@@ -8,13 +8,15 @@ from botocore.exceptions import ClientError
 from billing.parameters import normalize, expression, aws_request, import_console_url, FILTERS, querydict
 from billing.advanced_explorer import build_report
 from billing.query_cache import get_query, run_query, fetch_pages
-from billing.models import Customer, Cost, ExplorerQuery, SavedReport
+from billing.models import Customer, Cost, ExplorerQuery, SavedReport, BillingSource
+from .helpers import make_customer, web_settings
 
 
+@web_settings
 class ExplorerParameterTests(TestCase):
     def setUp(self):
         self.today=timezone.now().date();self.start=self.today.replace(day=1)
-        self.customer=Customer.objects.create(name='One',account_id='111111111111',role_arn='arn:aws:iam::111111111111:role/BillingConsole/CostReadOnly',last_success=timezone.now())
+        self.customer,self.source=make_customer('One','111111111111')
         self.user=get_user_model().objects.create_user('operator',password='test-pass-long',is_staff=True)
         self.client.force_login(self.user)
         self.params={'start':str(self.start),'end':str(self.today),'group_by':'region','forecast':'0'}
@@ -52,7 +54,7 @@ class ExplorerParameterTests(TestCase):
         self.assertEqual(aws_request(p)[1]['Metrics'],['NormalizedUsageAmount'])
 
     def test_cache_queues_once_and_does_not_call_aws_from_web(self):
-        with patch('billing.query_cache.cost_client') as aws:
+        with patch('billing.query_cache.Session') as aws:
             first=build_report(self.params);second=build_report(self.params|{'chart_style':'line'})
         aws.assert_not_called();self.assertEqual(first['query_ids'],second['query_ids']);self.assertEqual(ExplorerQuery.objects.count(),1)
         self.assertTrue(first['report_incomplete']);self.assertTrue(first['report_pending'])
@@ -64,35 +66,36 @@ class ExplorerParameterTests(TestCase):
         self.assertContains(result,'5.25');self.assertContains(result,'Snapshot')
 
     def test_failed_refresh_retains_data_and_cooldown(self):
-        p=normalize(self.params);op,req=aws_request(p);q=get_query(self.customer,op,req)
+        p=normalize(self.params);op,req=aws_request(p);q=get_query(self.source,op,req)
         self.complete([q]);q.refresh_from_db()
         ce=Mock();ce.get_cost_and_usage.side_effect=ClientError({'Error':{'Code':'AccessDeniedException','Message':'sensitive raw detail'}},'GetCostAndUsage')
         run_query(q,ce);q.refresh_from_db()
         self.assertIsNotNone(q.data);self.assertIn('permission missing',q.error);self.assertNotIn('sensitive',q.error)
-        self.assertFalse(get_query(self.customer,op,req).requested)
+        self.assertFalse(get_query(self.source,op,req).requested)
         self.assertEqual(build_report(self.params)['total'],Decimal('5.25'))
 
     def test_role_rotation_does_not_reuse_cache(self):
-        p=normalize(self.params);op,req=aws_request(p);first=get_query(self.customer,op,req)
-        import uuid
-        self.customer.external_id=uuid.uuid4();self.customer.save()
-        second=get_query(self.customer,op,req)
+        p=normalize(self.params);op,req=aws_request(p);first=get_query(self.source,op,req)
+        from billing.onboarding import rotate_external_id
+        self.source=rotate_external_id(self.source);self.source.verified_at=timezone.now();self.source.save()
+        second=get_query(self.source,op,req)
         self.assertNotEqual(first.pk,second.pk)
+        first.refresh_from_db()
         ce=Mock();run_query(first,ce);ce.get_cost_and_usage.assert_not_called()
 
     def test_pagination_keeps_period_fragments_and_credits(self):
         ce=Mock();page=self.response('10');page['NextPageToken']='next';ce.get_cost_and_usage.side_effect=[page,self.response('-1.5')]
-        p=normalize(self.params);op,req=aws_request(p);q=get_query(self.customer,op,req);run_query(q,ce)
+        p=normalize(self.params);op,req=aws_request(p);q=get_query(self.source,op,req);run_query(q,ce)
         self.assertEqual(build_report(self.params)['total'],Decimal('8.5'))
         self.assertEqual(ce.get_cost_and_usage.call_args_list[1].kwargs['NextPageToken'],'next')
         ce.get_cost_and_usage.side_effect=[page,page]
         with self.assertRaises(ValueError):fetch_pages(ce,op,req)
 
     def test_partial_customer_reports_block_csv_and_mixed_units_rejected(self):
-        Customer.objects.create(name='Two',account_id='222222222222',role_arn='arn:aws:iam::222222222222:role/BillingConsole/CostReadOnly',last_success=timezone.now())
-        build_report(self.params);self.complete(ExplorerQuery.objects.filter(customer=self.customer))
+        make_customer('Two','222222222222')
+        build_report(self.params);self.complete(ExplorerQuery.objects.filter(source=self.source))
         self.assertTrue(build_report(self.params)['report_incomplete']);self.assertEqual(self.client.get('/export/report/',self.params).status_code,409)
-        q=ExplorerQuery.objects.exclude(customer=self.customer).get();q.data=self.response(unit='EUR');q.requested=False;q.save()
+        q=ExplorerQuery.objects.exclude(source=self.source).get();q.data=self.response(unit='EUR');q.requested=False;q.save()
         with self.assertRaises(ValueError):build_report(self.params)
 
     def test_compare_uses_calendar_months_and_same_filters(self):
@@ -112,7 +115,7 @@ class ExplorerParameterTests(TestCase):
 
     def test_metadata_is_authenticated_queued_and_payer_supported(self):
         self.assertEqual(Client().get('/explorer/metadata/?dimension=region').status_code,302)
-        with patch('billing.query_cache.cost_client') as aws:
+        with patch('billing.query_cache.Session') as aws:
             data=self.client.get('/explorer/metadata/',{'dimension':'payer','start':str(self.start),'end':str(self.today)}).json()
         aws.assert_not_called();self.assertTrue(data['pending']);self.assertEqual(ExplorerQuery.objects.get().parameters['Dimension'],'PAYER_ACCOUNT')
 
@@ -129,7 +132,7 @@ class ExplorerParameterTests(TestCase):
         p=normalize(self.params|{'region':[EMPTY_VALUE]})
         self.assertEqual(normalize(querydict(p))['region'],[EMPTY_VALUE])
         self.assertEqual(expression(p),{'Dimensions':{'Key':'REGION','Values':['']}})
-        q=get_query(self.customer,*aws_request(normalize(self.params)))
+        q=get_query(self.source,*aws_request(normalize(self.params)))
         response=self.response();response['ResultsByTime'][0]['Groups'][0]['Keys']=['NoRegion']
         q.data=response;q.requested=False;q.last_attempt=timezone.now();q.last_success=timezone.now();q.save()
         self.assertIn('region=__billing_empty_value__',build_report(self.params)['pivot_rows'][0]['url'])

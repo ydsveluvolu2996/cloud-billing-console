@@ -43,7 +43,7 @@ def values(params, key):
 
 def normalize(params, today=None):
     today = today or timezone.now().date()
-    p = {k:params.get(k, '') for k in ('customer','currency','start','end','granularity','group_by','group_key','chart_style','metric','report_mode','compare_start','compare_end','tag_key','cost_category_key','report_name','date_range','measure','forecast','untagged','uncategorized','normalized')}
+    p = {k:params.get(k, '') for k in ('customer','source','currency','start','end','granularity','group_by','group_key','chart_style','metric','report_mode','compare_start','compare_end','tag_key','cost_category_key','report_name','date_range','measure','forecast','untagged','uncategorized','normalized')}
     p.update(currency=p['currency'] or 'USD', granularity=p['granularity'] or 'monthly', group_by=p['group_by'] or 'service', chart_style=p['chart_style'] or 'stacked', metric=p['metric'] or 'unblended', report_mode=p['report_mode'] or 'standard', measure=p['measure'] or 'cost', report_name=p['report_name'] or 'Cost report')
     p['date_range'] = p['date_range'] or ('custom' if p['start'] and p['end'] else 'last_6_months')
     month = today.replace(day=1)
