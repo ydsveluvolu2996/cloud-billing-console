@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from django.test import TestCase
 from django.utils import timezone
 from billing import allocation
-from billing.models import AllocationRule, ExplorerQuery, Project, ProjectCost
+from billing.models import AllocationRule, ExplorerQuery, Project, ProjectCost, CustomerApproval
 from billing.query_cache import run_query
 from .helpers import cost, make_customer
 
@@ -13,6 +13,8 @@ from .helpers import cost, make_customer
 class AllocationTests(TestCase):
     def setUp(self):
         self.customer, self.source = make_customer('Alloc Co', '111111111111', accounts=('222222222222', '333333333333'))
+        CustomerApproval.objects.create(customer=self.customer,status='approved',metadata=['tag:Project'])
+        self.source.capabilities.update(active_tag_keys=['Project'],tags=True);self.source.save(update_fields=['capabilities'])
         self.today = timezone.now().date()
         self.month = self.today.replace(day=1)
         self.day = self.month

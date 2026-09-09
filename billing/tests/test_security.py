@@ -177,3 +177,68 @@ class MFATests(TestCase):
     def test_recovery_cannot_enroll_over_confirmed_device(self):
         TOTPDevice.objects.create(user=self.user,confirmed=True,name='existing')
         self.assertNotContains(self.client.get('/mfa/'),'otpauth://')
+
+@secure_settings
+class ScopeChangeTests(TestCase):
+    def setUp(self):
+        self.a,self.source=make_customer('Shared custodian','123456789012',shared=True)
+        self.b,_=make_customer('Consumer','222222222222')
+        assign('333333333333',self.b,self.source)
+        cost(self.source,date.today(),10,account_id='333333333333')
+        self.user=User.objects.create_user('scoped-reader')
+        self.membership=CustomerMembership.objects.create(user=self.user,customer=self.b,role='viewer')
+    def test_shared_report_job_and_permission_change_invalidate_cache(self):
+        from billing.query_cache import get_query,run_query
+        from billing.scheduler import load_source
+        with context(for_user(self.user)):
+            q=get_query(self.source,'get_cost_and_usage',{'TimePeriod':{'Start':'2026-01-01','End':'2026-02-01'}},customer=self.b,account_filter=['333333333333'])
+        with override_settings(REQUIRE_CONNECTION_APPROVAL=False):
+            self.assertEqual(load_source(Job.objects.get(kind='explorer_refresh')).pk,self.source.pk)
+        self.membership.account_ids=['222222222222'];self.membership.save()
+        client=Mock()
+        run_query(q,client)
+        client.get_cost_and_usage.assert_not_called()
+        with context(for_user(self.user)):self.assertFalse(ExplorerQuery.objects.filter(pk=q.pk).exists())
+    def test_ownership_transfer_invalidates_cached_fingerprint(self):
+        from billing.query_cache import connection_key
+        from billing.collector import ensure_assignment
+        before=connection_key(self.source)
+        account=AwsAccount.objects.get(account_id='333333333333')
+        ensure_assignment(account,self.a,start=date.today(),actor='synthetic')
+        self.assertNotEqual(connection_key(self.source),before)
+    def test_expired_support_membership_denies_every_model(self):
+        self.membership.expires_at=timezone.now()-timedelta(seconds=1);self.membership.save()
+        with context(for_user(self.user)):
+            self.assertEqual(Cost.objects.count(),0);self.assertEqual(Customer.objects.count(),0)
+    def test_sensitive_audit_details_are_omitted(self):
+        from billing.authentication import security_event
+        security_event('test','Redaction regression',customer=self.b,password='never-store',snapshot={'amount':'sensitive'},access_token='never-store')
+        encoded=json.dumps(AuditEvent.objects.get(action='Redaction regression').details)
+        self.assertNotIn('never-store',encoded);self.assertNotIn('sensitive',encoded)
+
+
+@secure_settings
+class OIDCTests(TestCase):
+    def test_signed_nonce_expiry_issuer_audience_and_exact_subject(self):
+        import jwt
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        from billing.oidc import BillingOIDCBackend
+        from django.core.exceptions import SuspiciousOperation
+        key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        private=key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption())
+        public=key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
+        now=int(timezone.now().timestamp())
+        payload={'iss':'https://identity.example.invalid','aud':'synthetic-client','sub':'subject-1','iat':now,'exp':now+300,'nonce':'synthetic-nonce'}
+        with override_settings(OIDC_RP_CLIENT_ID='synthetic-client',OIDC_RP_IDP_SIGN_KEY=public,OIDC_ISSUER=payload['iss']):
+            backend=BillingOIDCBackend()
+            token=jwt.encode(payload,private,algorithm='RS256')
+            self.assertEqual(backend.verify_token(token,nonce='synthetic-nonce')['sub'],'subject-1')
+            for changes in ({'iss':'https://foreign.example.invalid'},{'aud':'foreign-client'},{'nonce':'wrong'},{'exp':now-1},{'iat':now+600}):
+                with self.subTest(changes=changes),self.assertRaises((SuspiciousOperation,jwt.InvalidTokenError)):
+                    backend.verify_token(jwt.encode({**payload,**changes},private,algorithm='RS256'),nonce='synthetic-nonce')
+            self.assertIsNone(backend.get_or_create_user(None,None,payload))
+            user=User.objects.create_user('provisioned',email='same@example.invalid')
+            UserSecurity.objects.create(user=user,oidc_issuer=payload['iss'],oidc_subject=payload['sub'])
+            self.assertEqual(backend.get_or_create_user(None,None,payload),user)
+            self.assertIsNone(backend.get_or_create_user(None,None,{**payload,'sub':'different','email':user.email}))

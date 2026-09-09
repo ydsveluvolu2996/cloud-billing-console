@@ -27,7 +27,8 @@ STATES = ['Awaiting customer setup', 'Connection verified', 'Account discovery c
 
 def month_param(request):
     try:
-        return date.fromisoformat(request.GET.get('month', '')).replace(day=1)
+        raw=request.GET.get('month','')
+        return date.fromisoformat(raw+'-01' if len(raw)==7 else raw).replace(day=1)
     except ValueError:
         return timezone.now().date().replace(day=1)
 
@@ -171,7 +172,7 @@ def account_tree(customer, month, today, currency):
         if a.end is None:
             entry['current'] = True
     sources = {s.pk: s for s in customer.sources.all()}
-    for s in BillingSource.objects.filter(pk__in=[e['account'].source_id for e in accounts.values() if e['account'].source_id]).select_related('customer'):
+    for s in BillingSource.objects.filter(pk__in=[e['account'].source_id for e in accounts.values() if e['account'].source_id]):
         sources.setdefault(s.pk, s)
     tree = []
     used = set()
@@ -196,6 +197,16 @@ def account_tree(customer, month, today, currency):
                      'periods': CollectionPeriod.objects.filter(source=source).order_by('-month')[:3]})
     orphans = [{**entry, 'spend': spend.get(account_id)} for account_id, entry in sorted(accounts.items()) if account_id not in used]
     return {'tree': tree, 'orphans': orphans, 'month_end': month_end, 'month_total': sum((r['v'] for r in spend.values()), Decimal(0)) if spend else None}
+
+
+@never_cache
+@login_required
+def customer_tree(request, pk):
+    customer=get_object_or_404(Customer,pk=pk)
+    month=month_param(request)
+    currency=request.GET.get('currency','USD')
+    return render(request,'billing/includes/customer_tree.html',dict(
+        customer=customer,month=month,currency=currency,**account_tree(customer,month,timezone.now().date(),currency)))
 
 
 @require_POST
@@ -252,7 +263,8 @@ def source_detail(request, pk):
     if request.method == 'POST' and request.POST.get('action') == 'connection':
         form = ConnectionForm(request.POST, instance=source)
         if form.is_valid():
-            changed = form.cleaned_data['role_arn'] != BillingSource.objects.get(pk=pk).role_arn
+            previous = BillingSource.objects.get(pk=pk)
+            changed = (form.cleaned_data['role_arn'] != previous.role_arn or form.cleaned_data.get('approved_capabilities',[]) != previous.approved_capabilities)
             source = form.save(commit=False)
             if changed:
                 source.connection_version += 1

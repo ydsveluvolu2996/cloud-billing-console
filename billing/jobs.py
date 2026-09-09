@@ -51,7 +51,9 @@ def enqueue(kind, key=None, source=None, payload=None, priority=5, run_after=Non
     access = current_access.get()
     payload = dict(payload or {})
     if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION:
-        if source is None or (not access.portfolio and source.customer_id not in access.customers):
+        from .models import ExplorerQuery
+        scoped_report = source is not None and kind=='explorer_refresh' and ExplorerQuery.objects.filter(source=source,requested_by_id=access.user_id).exists()
+        if source is None or (not access.portfolio and source.customer_id not in access.customers and not scoped_report):
             from django.core.exceptions import PermissionDenied
             raise PermissionDenied('A customer-scoped approved connection is required.')
         payload['actor_id'] = access.user_id
@@ -125,19 +127,22 @@ def heartbeat(job, progress=None):
 
 def complete(job, progress=None):
     now = timezone.now()
-    Job.objects.filter(pk=job.pk).update(status=Job.DONE, finished_at=now, last_error='', lease_expires=None,
+    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker).update(status=Job.DONE, finished_at=now, last_error='', lease_expires=None,
                                          progress=progress if progress is not None else job.progress,
                                          duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
 
 
 def fail(job, error, permanent=False):
     now = timezone.now()
-    message = str(error)[:500]
+    from .redaction import redact
+    message = redact(error)[:500]
     exhausted = permanent or job.attempts >= job.max_attempts
-    Job.objects.filter(pk=job.pk).update(
+    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker).update(
         status=Job.FAILED if exhausted else Job.QUEUED, last_error=message, lease_expires=None,
         run_after=now if exhausted else now + backoff(job.attempts), finished_at=now if exhausted else None,
         progress=job.progress, duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
+    from .authentication import security_event
+    security_event('collector','Collection job failed',customer=job.source.customer if job.source else None,target=str(job.pk),outcome='failed',kind=job.kind,exhausted=exhausted)
     return exhausted
 
 

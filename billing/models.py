@@ -122,12 +122,12 @@ class BillingSource(ScopedModel):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['customer__name', 'account_id']
+        ordering = ['account_id']
         constraints = [models.UniqueConstraint(fields=['account_id'], condition=Q(kind__in=['payer', 'standalone']),
                                                name='unique_cost_source_account')]
 
     def __str__(self):
-        return f'{self.customer.name} · {self.account_id}'
+        return f'{self.account_id} · {self.get_kind_display()}'
 
     @property
     def expected_role_arn(self):
@@ -548,6 +548,7 @@ class AuditEvent(ScopedModel):
 
 
 class ExplorerQuery(ScopedModel):
+    scope_fingerprint = models.CharField(max_length=64, blank=True)
     requested_by = models.ForeignKey('auth.User',null=True,blank=True,on_delete=models.SET_NULL)
     """A single connection/AWS request; old data survives unsuccessful refreshes."""
     source = models.ForeignKey(BillingSource, on_delete=models.CASCADE, related_name='explorer_queries', null=True)
@@ -656,6 +657,7 @@ class CustomerApproval(ScopedModel):
     expected_accounts = models.JSONField(default=list, blank=True)
     billing_fields = models.JSONField(default=list, blank=True)
     metadata = models.JSONField(default=list, blank=True)
+    optional_capabilities = models.JSONField(default=list, blank=True)
     storage_region = models.CharField(max_length=30, blank=True)
     retention_days = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=[('pending','Pending approval'),('approved','Approved'),('revoked','Revoked')], default='pending')

@@ -23,12 +23,26 @@ class TokenForm(forms.Form):
                            widget=forms.TextInput(attrs={'autocomplete':'one-time-code', 'autofocus': True}))
 
 
-def security_event(actor, action, customer=None, outcome='success', target='', **details):
+def security_event(actor, action, customer=None, outcome='success', target='', source=None, **details):
     from .models import AuditEvent
     from .access import context
+    from django.db import connection
+    from .redaction import audit_details
+    payload=audit_details({'outcome':outcome,'target':target,**details})
     with context(None):
-        return AuditEvent.objects.create(actor=actor, action=action, customer=customer,
-                                        details={'outcome': outcome, 'target': target, **details})
+        if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED:
+            # INSERT without RETURNING does not need SELECT visibility for global
+            # authentication events. Runtime audit privileges remain append-only.
+            import json,logging
+            now=timezone.now()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT nextval(pg_get_serial_sequence('billing_auditevent','id'))")
+                identifier=cursor.fetchone()[0]
+                cursor.execute('INSERT INTO billing_auditevent(id,at,actor,action,customer_id,source_id,details) VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                    [identifier,now,actor,action,customer.pk if customer else None,source.pk if source else None,json.dumps(payload)])
+            logging.getLogger('security.audit').info(json.dumps({'id':identifier,'at':now.isoformat(),'actor':actor,'customer':str(customer.pk) if customer else '', 'action':action,'details':payload}))
+            return None
+        return AuditEvent.objects.create(actor=actor,action=action,customer=customer,source=source,details=payload)
 
 
 def revoke_sessions(user, actor, evidence=''):
@@ -87,7 +101,7 @@ def mfa(request):
                 profile.save(update_fields=['recovery_failed','recovery_locked_until'])
                 security_event(request.user.username, 'MFA failed', outcome='denied', target=str(request.user.pk))
                 form.add_error('token', 'Code invalid, already used or temporarily rate-limited. Wait and try a fresh code.')
-    return render(request, 'registration/mfa.html', {'form': form, 'enrolling': enrolling, 'device': device if enrolling else None, 'recovery_codes': codes})
+    return render(request, 'registration/mfa.html', {'form': form, 'enrolling': enrolling, 'device': device if enrolling else None, 'enrollment_key': __import__('base64').b32encode(device.bin_key).decode() if enrolling else '', 'recovery_codes': codes})
 
 
 @require_POST

@@ -122,10 +122,10 @@ def load_source(job):
         if job.kind != 'verify' and (not source.verified_at or source.trust_checks.get('connection_version') != source.connection_version):
             raise jobs.PermanentJobError('Current connection trust validation is required.')
     actor_id = job.payload.get('actor_id')
-    if actor_id:
+    if actor_id and job.kind != 'explorer_refresh':
         from django.contrib.auth.models import User
         from .access import for_user
-        actor = User.objects.filter(pk=actor_id,is_active=True).first()
+        actor = User.objects.only('id','username','is_active','is_superuser','is_staff').filter(pk=actor_id,is_active=True).first()
         access = for_user(actor) if actor else None
         permitted = access.customers if access and job.kind=='explorer_refresh' else access.editable if access else ()
         if access is None or (not access.portfolio and source.customer_id not in permitted):

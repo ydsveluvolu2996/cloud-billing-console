@@ -95,6 +95,7 @@ def verify_source(source, session=None, meter=None):
     if source.kind == BillingSource.PAYER and ('organizations' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL):
         try:
             org = meter.call(session.client('organizations'), 'describe_organization')['Organization']
+            meter.call(session.client('organizations'),'list_accounts',MaxResults=1)
             capabilities['organizations'] = True
             capabilities['management_account'] = org.get('MasterAccountId', '')
             if capabilities['management_account'] and capabilities['management_account'] != source.account_id:
@@ -125,6 +126,12 @@ def verify_source(source, session=None, meter=None):
                 try:
                     meter.call(ce, operation, **args)
                     capabilities[name] = True
+                    if name=='tags':
+                        from .models import CustomerApproval
+                        approval=CustomerApproval.objects.filter(customer=source.customer).first()
+                        permitted=set(approval.metadata if approval else [])
+                        active=paginate(meter,ce,'list_cost_allocation_tags','CostAllocationTags',Status='Active')
+                        capabilities['active_tag_keys']=[tag['TagKey'] for tag in active if 'tag:'+tag['TagKey'] in permitted]
                 except ClientError as exc:
                     capabilities[name + '_error'] = safe_error(exc)
     now = timezone.now()
@@ -185,7 +192,8 @@ def discover_accounts(source, session=None, meter=None, today=None):
             approved_account = not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
             if approved_account and not source.shared and not account.assignments.filter(end__isnull=True).exists():
                 ensure_assignment(account, source.customer, note='Auto-assigned from non-shared connection')
-        AwsAccount.objects.filter(source=source, missing_since__isnull=True).exclude(account_id__in=list(found)).update(missing_since=now)
+        if mode=='organizations':
+            AwsAccount.objects.filter(source=source, missing_since__isnull=True).exclude(account_id__in=list(found)).update(missing_since=now)
         BillingSource.objects.filter(pk=source.pk).update(discovered_at=now, discovery_mode=mode, onboarding_step=max(source.onboarding_step, 6), last_error='')
     source.discovered_at, source.discovery_mode = now, mode
     return found

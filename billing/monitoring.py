@@ -12,7 +12,7 @@ def observe(customer,kind,key,message,severity='warning',now=None):
     now=now or timezone.now()
     event,created=OperationalAlert.objects.get_or_create(dedup_key=key,defaults={'customer':customer,'kind':kind,'message':message,'severity':severity,'last_seen':now,'first_seen':now})
     if not created:
-        OperationalAlert.objects.filter(pk=event.pk).update(last_seen=now)
+        OperationalAlert.objects.filter(pk=event.pk).update(last_seen=now,count=F('count')+1)
     return event,created
 
 
@@ -51,12 +51,14 @@ def deliver(test=False,now=None):
     with transaction.atomic():
         for event in OperationalAlert.objects.select_for_update().filter(acknowledged_at__isnull=True):
             routes=AlertRoute.objects.filter(customer=event.customer,enabled=True,kind__in=['*',event.kind])
-            for route in routes:
-                escalate=now>=event.first_seen+timedelta(minutes=route.escalation_minutes)
-                if event.delivered_at and (not escalate or event.escalated_at):continue
-                if not route.recipients:continue
-                send_mail(('Escalated: ' if escalate else '')+f'Billing alert: {event.kind}',event.message,settings.DEFAULT_FROM_EMAIL,route.recipients)
-                event.delivered_at=now
-                if escalate:event.escalated_at=now
-                event.save(update_fields=['delivered_at','escalated_at']);sent+=1
+            levels={'info':0,'warning':1,'critical':2}
+            routes=[r for r in routes if r.recipients and levels.get(event.severity,1)>=levels.get(r.severity,1)]
+            if not routes:continue
+            escalate=now>=event.first_seen+timedelta(minutes=min(r.escalation_minutes for r in routes))
+            if event.delivered_at and (not escalate or event.escalated_at):continue
+            recipients=sorted({email for route in routes for email in route.recipients})
+            send_mail(('Escalated: ' if escalate else '')+f'Billing alert: {event.kind}',event.message,settings.DEFAULT_FROM_EMAIL,recipients)
+            event.delivered_at=now
+            if escalate:event.escalated_at=now
+            event.save(update_fields=['delivered_at','escalated_at']);sent+=1
     return sent

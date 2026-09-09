@@ -32,6 +32,15 @@ def customer_rules(customer, exclude_pk=None):
 
 def validate_rule(rule, customer):
     """Raise ValueError when ``rule`` could allocate the same spend as an existing rule."""
+    from django.conf import settings
+    if settings.REQUIRE_CONNECTION_APPROVAL and rule.kind in (AllocationRule.TAG,AllocationRule.ACCOUNT_TAG):
+        from .models import CustomerApproval
+        approval=CustomerApproval.objects.filter(customer=customer,status='approved').first()
+        if not approval or 'tag:'+rule.key not in approval.metadata:
+            raise ValueError('This cost allocation tag needs recorded customer approval.')
+        sources=BillingSource.objects.filter(customer=customer,enabled=True)
+        if not sources.exists() or any(rule.key not in s.capabilities.get('active_tag_keys',[]) for s in sources):
+            raise ValueError('The approved tag must be activated in AWS and verified for each applicable connection.')
     if rule.uses_accounts:
         owned = set(scoping.customer_accounts(customer)) | set(scoping.customer_accounts(customer, on=rule.effective_start))
         foreign = sorted(set(rule.account_ids) - owned)

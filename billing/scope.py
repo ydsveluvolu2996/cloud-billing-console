@@ -89,7 +89,7 @@ def resolve(params, require_customer=False):
         raise ValueError('Choose a customer.')
     sid = params.get('source', '') or ''
     if sid:
-        scope.source = BillingSource.objects.filter(pk=parse_uuid(sid, 'Choose a valid connection.')).select_related('customer').first()
+        scope.source = BillingSource.objects.filter(pk=parse_uuid(sid, 'Choose a valid connection.')).first()
         if scope.source is None:
             raise ValueError('This connection could not be found.')
         if scope.customer and scope.source.customer_id != scope.customer.pk and not scope.source.shared:
@@ -147,9 +147,9 @@ def source_account_filter(source, customer):
 
 def report_units(customer=None, active_only=True):
     """(source, customer, account_filter) tuples describing which AWS queries serve a scope."""
-    sources = BillingSource.objects.filter(kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).select_related('customer')
+    sources = BillingSource.objects.filter(kind__in=[BillingSource.PAYER, BillingSource.STANDALONE])
     if active_only:
-        sources = sources.filter(enabled=True, customer__active=True, last_success__isnull=False).exclude(role_arn='')
+        sources = sources.filter(enabled=True, last_success__isnull=False).exclude(role_arn='')
     units = []
     if customer is None:
         from .access import current_access

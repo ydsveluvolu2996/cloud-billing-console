@@ -429,3 +429,20 @@ if(reportForm){
     };setTimeout(poll,5000);
   }
 }
+document.querySelectorAll('[data-customer-tree]').forEach(details => {
+  details.addEventListener('toggle', async () => {
+    if (!details.open || details.dataset.loaded) return;
+    details.dataset.loaded = 'loading';
+    const content = details.querySelector('[data-tree-content]');
+    content.textContent = 'Loading assigned accounts…';
+    try {
+      const response = await fetch(details.dataset.customerTree, {credentials: 'same-origin'});
+      if (!response.ok || response.redirected) throw new Error('Scope unavailable');
+      content.innerHTML = await response.text();
+      details.dataset.loaded = 'true';
+    } catch (error) {
+      content.textContent = 'Account details are unavailable. Close and reopen to retry, or sign in again.';
+      delete details.dataset.loaded;
+    }
+  });
+});

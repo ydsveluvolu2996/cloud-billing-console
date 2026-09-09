@@ -55,19 +55,27 @@ def set_paused(source, paused, actor=''):
     AuditEvent.objects.create(actor=actor, action='Collection paused' if paused else 'Collection resumed', customer=source.customer, source=source)
 
 
+@transaction.atomic
 def offboard_customer(customer, actor=''):
-    """Stop collection for every connection but retain all historical records."""
+    """Stop publication, close ownership, then revoke access in one transaction."""
     from .governance import stop_customer
+    from .authentication import security_event
+    from .models import CustomerMembership
+    from django.db import connection
+    from django.conf import settings
     stop_customer(customer, actor)
     now = timezone.now()
-    with transaction.atomic():
-        Customer.objects.filter(pk=customer.pk).update(active=False, offboarded_at=now)
-        BillingSource.objects.filter(customer=customer).update(enabled=False, sync_requested=False)
-        Job.objects.filter(source__customer=customer, status=Job.QUEUED).delete()
-        for assignment in customer.assignments.filter(end__isnull=True):
-            assignment.end = max(now.date(), assignment.start + timezone.timedelta(days=1))
-            assignment.save(update_fields=['end'])
-        AuditEvent.objects.create(actor=actor, action='Customer offboarded (history retained)', customer=customer)
+    for assignment in customer.assignments.filter(end__isnull=True):
+        assignment.end = max(now.date(), assignment.start + timezone.timedelta(days=1))
+        assignment.save(update_fields=['end'])
+    security_event(actor,'Customer offboarded (history retained)',customer=customer)
+    if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED and settings.RUNTIME_ROLE=='web':
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT billing_revoke_customer_access(%s)',[customer.pk])
+    else:
+        Customer.objects.filter(pk=customer.pk).update(active=False,offboarded_at=now)
+        for membership in CustomerMembership.objects.filter(customer=customer,active=True):
+            membership.active=False;membership.save(update_fields=['active'])
 
 
 def reactivate_customer(customer, actor=''):

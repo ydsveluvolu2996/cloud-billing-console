@@ -7,6 +7,7 @@ from billing import views_management as manage
 from billing import views_alliance as alliance
 
 urlpatterns = [
+    path('customers/<uuid:pk>/tree/', manage.customer_tree, name='customer_tree'),
     path('customers/<uuid:pk>/invite/', views_security.portal_invite, name='portal_invite'),
     path('portal/accept/', views_security.portal_accept, name='portal_accept'),
     path('customers/<uuid:pk>/governance/', views_security.customer_governance, name='customer_governance'),

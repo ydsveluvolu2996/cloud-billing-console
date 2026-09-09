@@ -118,8 +118,9 @@ class Command(BaseCommand):
             source = BillingSource.objects.create(customer=customer, kind='payer', account_id=payer_id, role_arn=f'arn:aws:iam::{payer_id}:role/BillingConsole/CostReadOnly',
                                                   verified_at=timezone.now(), discovered_at=timezone.now(), initial_import_done=True, last_success=timezone.now(),
                                                   discovery_mode='organizations', onboarding_step=6, capabilities={'organizations': True, 'cost_explorer': True})
+            customer_account_count = [2,15,101][i%3] if self.__module__.endswith('security_load') else per_customer
             accounts = [payer_id]
-            for _ in range(per_customer - 1):
+            for _ in range(customer_account_count - 1):
                 accounts.append(f'{account_counter:012d}')
                 account_counter += 1
             aws_accounts = [AwsAccount(account_id=a, name=f'acct-{a[-4:]}', state='ACTIVE', payer_account_id=payer_id, source=source, discovery='organizations') for a in accounts]
@@ -183,7 +184,7 @@ class Command(BaseCommand):
                 'estimated_ce_cost_usd_per_cycle_at_0_01': round(cycle_requests * per_request_usd, 2),
                 'estimated_ce_cost_usd_per_day_4_cycles': round(cycle_requests * per_request_usd * 4, 2),
                 'projected_full_cycle_seconds_single_worker': round(total / max(len(sources), 1) * BillingSource.objects.filter(customer__name__startswith='Synthetic ').count(), 1),
-                'note': 'Fake client has zero network latency; live AWS adds roughly 0.5-2 s per request and throttles at a few requests per second per account.'}
+                'note': 'Fake client has zero network latency. Live AWS latency, quotas and throttling need separate authorized measurement.'}
 
     def evaluate_budgets(self):
         started = time.monotonic()

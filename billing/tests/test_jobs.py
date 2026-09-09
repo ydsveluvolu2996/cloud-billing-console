@@ -48,6 +48,7 @@ class JobQueueTests(TestCase):
         second, created_again = jobs.enqueue('collect', key='collect:x', source=self.source, run_after=timezone.now() - timedelta(minutes=5))
         self.assertTrue(created); self.assertFalse(created_again); self.assertEqual(first.pk, second.pk)
         self.assertEqual(Job.objects.count(), 1)
+        first=jobs.lease('coalescing-test')
         jobs.complete(first)
         third, created_third = jobs.enqueue('collect', key='collect:x', source=self.source)
         self.assertTrue(created_third)

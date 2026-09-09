@@ -42,10 +42,7 @@ def stop_customer(customer, actor):
             source.save(update_fields=['enabled','sync_requested','connection_version','verified_at'])
         Job.objects.filter(source__in=sources, status__in=[Job.QUEUED,Job.LEASED]).update(status=Job.FAILED, last_error='Cancelled by offboarding', finished_at=now)
         ExplorerQuery.objects.filter(source__in=sources).update(requested=False)
-        memberships = list(CustomerMembership.objects.filter(customer=customer, active=True))
-        for membership in memberships:
-            membership.active = False
-            membership.save(update_fields=['active'])
+        ExplorerQuery.objects.filter(customer=customer).update(requested=False, data={})
         approval = CustomerApproval.objects.filter(customer=customer).first()
         retention_until = now + timedelta(days=approval.retention_days) if approval and approval.retention_days else None
         record = OffboardingRecord.objects.create(customer=customer, requested_by=actor,

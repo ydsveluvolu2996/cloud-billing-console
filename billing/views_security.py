@@ -5,16 +5,17 @@ from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, render, redirect
 from django.views.decorators.http import require_POST
 from django.views.decorators.cache import never_cache
-from .models import Customer, CustomerApproval, RolloutReadiness, OperationalAlert, BillingSource
+from .models import Customer, CustomerApproval, RolloutReadiness, OperationalAlert, BillingSource, AlertRoute
 from .web import staff_required
 from .authentication import security_event
 from .governance import readiness, add_manual_accounts
 
 
 class ApprovalForm(forms.ModelForm):
+    optional_capabilities=forms.MultipleChoiceField(required=False,choices=[(v,v.replace("_"," ").title()) for v in ("organizations","tags","cost_categories","forecasts","resources","budgets")],widget=forms.CheckboxSelectMultiple)
     class Meta:
         model = CustomerApproval
-        fields = ['contacts','authorized_users','expected_accounts','billing_fields','metadata','storage_region','retention_days','evidence']
+        fields = ['contacts','authorized_users','expected_accounts','billing_fields','metadata','optional_capabilities','storage_region','retention_days','evidence']
         widgets = {field: forms.Textarea(attrs={'rows':3}) for field in ['contacts','authorized_users','expected_accounts','billing_fields','metadata']}
     def clean_expected_accounts(self):
         import re
@@ -89,10 +90,18 @@ def manual_inventory(request, pk):
 def operations(request):
     from .web import paginate
     alerts = OperationalAlert.objects.all().order_by('-last_seen')
+    route_form=AlertRouteForm()
     if request.method == 'POST':
         from .scope import can_edit
         if not can_edit(request.user):
             raise PermissionDenied
+        if request.POST.get('action')=='route':
+            route_form=AlertRouteForm(request.POST)
+            if route_form.is_valid():
+                route=route_form.save()
+                security_event(request.user.username,'Alert route configured',customer=route.customer,target=str(route.pk))
+                return redirect('operations')
+            return render(request,'billing/operations.html',{'page':paginate(request,alerts),'route_form':route_form,'routes':AlertRoute.objects.all(),'active_page':'activity'})
         alert = get_object_or_404(alerts, pk=request.POST.get('alert'))
         from django.utils import timezone
         alert.acknowledged_at = timezone.now()
@@ -100,7 +109,26 @@ def operations(request):
         alert.save()
         security_event(request.user.username,'Operational alert acknowledged',customer=alert.customer,target=str(alert.pk))
         return redirect('operations')
-    return render(request,'billing/operations.html',{'page':paginate(request,alerts),'active_page':'activity'})
+    from .scope import can_edit
+    return render(request,'billing/operations.html',{'page':paginate(request,alerts),'route_form':route_form,'routes':AlertRoute.objects.all(),'can_edit':can_edit(request.user),'active_page':'activity'})
+
+
+class AlertRouteForm(forms.ModelForm):
+    recipients=forms.CharField(help_text='Comma-separated email addresses. Live delivery remains gated.')
+    kind=forms.ChoiceField(choices=[('*','All events')]+[(x,x.replace('_',' ').title()) for x in ('collection_failure','stale_collection','source_delay','access_failure','privilege_change','unusual_exports','budget_threshold')])
+    severity=forms.ChoiceField(choices=[(x,x.title()) for x in ('info','warning','critical')])
+    class Meta:
+        model=AlertRoute
+        fields=['customer','kind','recipients','severity','escalation_minutes','enabled']
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        from .access import editing
+        with editing():self.fields['customer'].queryset=Customer.objects.filter(active=True)
+    def clean_recipients(self):
+        from django.core.validators import validate_email
+        values=sorted(set(x.strip() for x in self.cleaned_data['recipients'].split(',') if x.strip()))
+        for value in values:validate_email(value)
+        return values
 
 
 class InviteForm(forms.Form):

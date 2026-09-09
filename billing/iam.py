@@ -71,7 +71,8 @@ def approval_ready(source):
     if not approval or not all([approval.evidence, approval.contacts, approval.billing_fields, approval.storage_region,
                                 approval.retention_days, approval.approved_at, approval.approved_by]):
         return False
-    if approval.storage_region != settings.AWS_REGION or source.account_id not in approval.expected_accounts:
+    if (approval.storage_region != settings.AWS_REGION or source.account_id not in approval.expected_accounts
+            or not set(source.approved_capabilities).issubset(set(approval.optional_capabilities))):
         return False
     return RoleApproval.objects.filter(source=source, role_arn=source.role_arn, connection_version=source.connection_version,
                                        status='approved', approved_at__isnull=False).exclude(evidence='').exists()

@@ -32,17 +32,28 @@ class Access:
 
 def for_user(user, write=False):
     from .models import CustomerMembership, UserSecurity
-    if not user.is_authenticated:
+    if not user.is_authenticated or not user.is_active:
         return Access(None, '', False, (), (), {}, write)
-    profile = UserSecurity.objects.filter(user=user).first()
+    profile = UserSecurity.objects.only('portfolio_access','external','session_version').filter(user=user).first()
     portfolio = bool(user.is_superuser and profile and profile.portfolio_access)
     from django.utils import timezone
     memberships = list(CustomerMembership.objects.filter(user=user, active=True, customer__active=True).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now())))
+    if profile and profile.external:
+        portfolio = False
+        memberships = [m for m in memberships if m.role == 'customer']
     if not settings.EXTERNAL_PORTAL_ENABLED:
         memberships = [m for m in memberships if m.role != 'customer']
     return Access(user.pk, user.username, portfolio, tuple(m.customer_id for m in memberships),
                   tuple(m.customer_id for m in memberships if m.role == 'operator'),
                   {m.customer_id: m.account_ids for m in memberships}, write)
+
+
+def scope_fingerprint(access):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps([access.user_id, access.portfolio,
+        sorted(str(x) for x in access.customers), sorted(str(x) for x in access.editable),
+        sorted((str(k), sorted(v)) for k, v in access.accounts.items())]).encode()).hexdigest()
 
 
 @contextmanager
@@ -92,13 +103,8 @@ def restriction(model, access=None):
         owned_sources=AccountAssignment.objects.filter(customer_id__in=access.ids).values_list('account__source_id',flat=True)
         return Q(customer_id__in=[cid for cid in access.ids if not access.accounts.get(cid)]) | Q(pk__in=owned_sources)
     if name == 'AwsAccount':
-        q = Q(assignments__customer_id__in=access.ids)
-        restricted = Q(pk__in=[])
-        for cid in access.ids:
-            part = Q(assignments__customer_id=cid)
-            ids = access.accounts.get(cid)
-            restricted |= part & Q(account_id__in=ids) if ids else part
-        return q & restricted
+        from .models import AccountAssignment
+        return Q(pk__in=AccountAssignment.objects.filter(customer_id__in=access.ids).values('account_id'))
     path = CUSTOMER_PATHS.get(name)
     if not path:
         return Q(pk__in=[])
@@ -110,7 +116,7 @@ def restriction(model, access=None):
             account_path = ACCOUNT_PATHS.get(name)
             if account_path:
                 part &= Q(**{account_path + '__in': accounts})
-            elif name not in ('Customer', 'AuditEvent'):
+            elif name not in ('Customer', 'AuditEvent', 'ExplorerQuery', 'SavedReport'):
                 # Never expose precomputed whole-customer caches, project/budget
                 # totals or connection metadata to an account-restricted identity.
                 continue
@@ -118,7 +124,7 @@ def restriction(model, access=None):
                 continue
         q |= part
     if name == 'ExplorerQuery':
-        q &= Q(requested_by_id=access.user_id)
+        q &= Q(requested_by_id=access.user_id, scope_fingerprint=scope_fingerprint(access))
     if name == 'SavedReport':
         q &= Q(created_by=access.username)
     return q
@@ -162,7 +168,7 @@ class ScopedQuerySet(models.QuerySet):
 class ScopedManager(models.Manager.from_queryset(ScopedQuerySet)):
     def get_queryset(self):
         qs = super().get_queryset().filter(restriction(self.model))
-        return qs.distinct() if self.model.__name__ == 'AwsAccount' and current_access.get() else qs
+        return qs
 
 
 def validate_object(obj):
@@ -176,6 +182,10 @@ def validate_object(obj):
     if access.portfolio:
         return
     name = obj.__class__.__name__
+    if name == 'Job' and obj.kind=='explorer_refresh' and obj.payload.get('actor_id')==access.user_id:
+        from .models import ExplorerQuery
+        if ExplorerQuery.objects.filter(source_id=obj.source_id,requested_by_id=access.user_id).exists():
+            return
     if name == 'BulkImport':
         if obj.uploaded_by != access.username or not access.editable:
             raise PermissionDenied('This import belongs to another operator.')
@@ -207,6 +217,10 @@ def validate_object(obj):
             if not related.objects.filter(pk=getattr(obj, field.attname)).exists():
                 raise PermissionDenied('A related object is outside your authorized scope.')
     if access.accounts.get(current):
+        if name == 'ExplorerQuery' and obj.requested_by_id == access.user_id and obj.scope_fingerprint == scope_fingerprint(access):
+            return
+        if name == 'SavedReport' and obj.created_by == access.username:
+            return
         path = ACCOUNT_PATHS.get(name)
         if not path:
             raise PermissionDenied('This operation needs whole-customer authorization.')

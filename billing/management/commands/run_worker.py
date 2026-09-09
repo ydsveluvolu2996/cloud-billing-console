@@ -2,7 +2,7 @@
 import signal
 import threading
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from billing import jobs, scheduler
 
 
@@ -15,6 +15,8 @@ class Command(BaseCommand):
         parser.add_argument('--limit', type=int, default=None, help='With --once: maximum jobs to run.')
 
     def handle(self, *args, **options):
+        if settings.RUNTIME_ROLE != 'collector':
+            raise CommandError('Start this command on the isolated collector runtime.')
         if options['once']:
             jobs.recover_expired()
             created = scheduler.schedule_due()

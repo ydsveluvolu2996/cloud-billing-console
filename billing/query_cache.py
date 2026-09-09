@@ -47,19 +47,47 @@ def get_query(source, operation, parameters, customer=None, account_filter=None)
         raise ValueError('Unsupported billing operation.')
     parameters = scoped_parameters(parameters, account_filter)
     from django.conf import settings
-    from .access import current_access
+    from .access import current_access, scope_fingerprint
     access = current_access.get()
     if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
         if customer is None or customer.pk not in access.customers or account_filter is None:
             raise ValueError('An explicit authorized customer and account scope is required.')
+        from .models import AccountAssignment
+        owned=set(AccountAssignment.objects.filter(customer=customer,account__source=source).values_list('account__account_id',flat=True))
+        if not set(account_filter).issubset(owned):
+            raise ValueError('The requested accounts are outside the authorized assignment scope.')
     optional = {'get_tags':'tags','get_cost_categories':'cost_categories','get_cost_forecast':'forecasts','get_cost_and_usage_with_resources':'resources'}
     capability = optional.get(operation)
+    if operation=='get_dimension_values' and parameters.get('Dimension')=='RESOURCE_ID':capability='resources'
     if settings.REQUIRE_CONNECTION_APPROVAL and capability and not source.capabilities.get(capability):
         raise ValueError(f'{capability}: this optional capability is not approved and available. Core daily/monthly billing is available.')
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        from .models import CustomerApproval
+        needed=set()
+        def inspect(value):
+            if isinstance(value,dict):
+                for key,item in value.items():
+                    if key in ('Tags','CostCategories') and isinstance(item,dict):
+                        needed.add(('tags' if key=='Tags' else 'cost_categories',item.get('Key','')))
+                    inspect(item)
+                if value.get('Type') in ('TAG','COST_CATEGORY'):
+                    needed.add(('tags' if value['Type']=='TAG' else 'cost_categories',value.get('Key','')))
+            elif isinstance(value,list):
+                for item in value:inspect(item)
+        inspect(parameters)
+        if operation=='get_tags' and parameters.get('TagKey'):needed.add(('tags',parameters['TagKey']))
+        if operation=='get_cost_categories' and parameters.get('CostCategoryName'):needed.add(('cost_categories',parameters['CostCategoryName']))
+        if needed:
+            approval=CustomerApproval.objects.filter(customer=customer or source.customer,status='approved').first()
+            for cap,key in needed:
+                approved_key=('tag:' if cap=='tags' else 'category:')+key
+                if not source.capabilities.get(cap) or not approval or approved_key not in approval.metadata:
+                    raise ValueError('The selected metadata key requires customer approval and a verified optional capability.')
     identity = connection_key(source)
-    fingerprint = digest([identity, operation, parameters, str(customer.pk) if customer else '', access.user_id if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else None])
+    acl = scope_fingerprint(access) if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else ''
+    fingerprint = digest([identity, operation, parameters, str(customer.pk) if customer else '', acl])
     query, _ = ExplorerQuery.objects.get_or_create(source=source, fingerprint=fingerprint,
-        defaults={'operation': operation, 'parameters': parameters, 'connection_fingerprint': identity, 'customer': customer, 'requested_by_id':access.user_id if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else None})
+        defaults={'operation': operation, 'parameters': parameters, 'connection_fingerprint': identity, 'scope_fingerprint':acl, 'customer': customer, 'requested_by_id':access.user_id if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else None})
     now = timezone.now()
     # New requests queue once. Failed requests have a cooldown to avoid costly reload loops.
     due = not query.last_attempt or query.last_attempt < now - timedelta(hours=6)
@@ -114,15 +142,27 @@ def fetch_pages(client, operation, parameters, meter=None):
     raise ValueError('Report exceeds the page limit; narrow its date range or filters.')
 
 
+def request_authorized(query):
+    from django.conf import settings
+    from .models import CustomerApproval
+    if settings.REQUIRE_CONNECTION_APPROVAL and query.customer_id and not CustomerApproval.objects.filter(customer_id=query.customer_id,status='approved').exists():
+        return False
+    if query.requested_by_id:
+        from .access import for_user, scope_fingerprint
+        from django.contrib.auth.models import User
+        user=User.objects.only('id','username','is_active','is_superuser','is_staff').filter(pk=query.requested_by_id).first()
+        if not user or not user.is_active:
+            return False
+        access=for_user(user)
+        return query.scope_fingerprint == scope_fingerprint(access) and (access.portfolio or query.customer_id in access.customers)
+    return query.customer_id is None or query.customer.active
+
+
 def run_query(query, client=None, meter=None):
     source = query.source
-    if query.requested_by_id:
-        from .access import for_user
-        user=query.requested_by
-        access=for_user(user)
-        if not user.is_active or (not access.portfolio and query.customer_id not in access.customers):
-            ExplorerQuery.objects.filter(pk=query.pk).update(requested=False,error='Requesting user access was revoked.')
-            return
+    if not request_authorized(query):
+        ExplorerQuery.objects.filter(pk=query.pk).update(requested=False,data={},error='Requesting user access changed or was revoked.')
+        return
     if source is None or not source.enabled or not source.role_arn or connection_key(source) != query.connection_fingerprint:
         ExplorerQuery.objects.filter(pk=query.pk).update(requested=False, error='Connection changed or collection is paused.')
         return
@@ -130,9 +170,19 @@ def run_query(query, client=None, meter=None):
     ExplorerQuery.objects.filter(pk=query.pk).update(last_attempt=started)
     try:
         data = fetch_pages(client or Session(source).client('ce'), query.operation, query.parameters, meter)
+        if query.operation in ('get_tags','get_cost_categories'):
+            from .models import CustomerApproval
+            from django.conf import settings
+            if settings.REQUIRE_CONNECTION_APPROVAL:
+                approval=CustomerApproval.objects.filter(customer=query.customer or source.customer,status='approved').first()
+                allowed=approval.metadata if approval else []
+                if query.operation=='get_tags' and not query.parameters.get('TagKey'):
+                    data['Tags']=[k for k in data.get('Tags',[]) if 'tag:'+k in allowed]
+                if query.operation=='get_cost_categories' and not query.parameters.get('CostCategoryName'):
+                    data['CostCategoryNames']=[k for k in data.get('CostCategoryNames',[]) if 'category:'+k in allowed]
         with transaction.atomic():
             current = BillingSource.objects.select_for_update().get(pk=source.pk)
-            if not current.enabled or connection_key(current) != query.connection_fingerprint:
+            if not current.enabled or connection_key(current) != query.connection_fingerprint or not request_authorized(query):
                 raise ValueError('Connection changed during collection.')
             ExplorerQuery.objects.filter(pk=query.pk).update(data=data, last_success=timezone.now(), error='', requested=False)
     except Exception as exc:
@@ -154,6 +204,9 @@ def refresh_queries(source=None, scheduled=False, client=None, limit=100):
     # Bound a batch so one connection cannot starve others. Remaining work stays queued.
     for query in active.filter(requested=True).select_related('source').order_by('last_attempt', 'pk')[:limit]:
         try:
+            if not request_authorized(query):
+                ExplorerQuery.objects.filter(pk=query.pk).update(requested=False,data={},error='Requesting user access changed or was revoked.')
+                continue
             ce = client or clients.get(query.source_id)
             if ce is None:
                 ce = Session(query.source).client('ce')

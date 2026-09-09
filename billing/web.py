@@ -40,7 +40,8 @@ def paginate(request, items, per_page=25):
 
 
 def audit(request, action, customer=None, source=None, **details):
-    AuditEvent.objects.create(actor=request.user.username, action=action, customer=customer, source=source, details=details)
+    from .authentication import security_event
+    security_event(request.user.username,action,customer=customer,source=source,**details)
 
 
 @never_cache
@@ -230,7 +231,7 @@ def explorer_metadata(request):
         q = get_query(source, operation, req, customer=customer, account_filter=accounts)
         pending = pending or q.requested
         if q.error:
-            errors.append(source.customer.name + ': ' + q.error)
+            errors.append((customer or source.customer).name + ': ' + q.error)
         if q.last_success:
             dates.append(q.last_success.isoformat())
         if q.data:

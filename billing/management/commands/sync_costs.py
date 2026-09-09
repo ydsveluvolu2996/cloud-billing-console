@@ -6,7 +6,9 @@ before so overlapping cron invocations never double-collect.
 """
 import fcntl
 from pathlib import Path
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
+from django.conf import settings
+import os
 from billing import jobs, scheduler
 from billing.models import BillingSource, SavedReport
 
@@ -20,7 +22,12 @@ class Command(BaseCommand):
         parser.add_argument('--queued', action='store_true')
 
     def handle(self, *args, **options):
-        with Path('/tmp/cloud-billing-sync.lock').open('w') as lock:
+        if settings.RUNTIME_ROLE != 'collector':
+            raise CommandError('Collection runs only in the isolated collector runtime.')
+        directory = settings.BASE_DIR / '.deployment' if settings.DEBUG else Path('/run/cloud-billing')
+        directory.mkdir(mode=0o700,exist_ok=True)
+        descriptor=os.open(directory/'sync.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        with os.fdopen(descriptor,'w') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
