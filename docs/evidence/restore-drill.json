@@ -1,0 +1,214 @@
+{
+  "synthetic": true,
+  "source": "billing_security_checks",
+  "target": "billing_security_restore_verified",
+  "matched": true,
+  "dump_sha256": "4cd11b1bf38fe710f8e91cd0f9732f193fe69923fa15b2b65104f85eb55a4791",
+  "dump_bytes": 182306,
+  "recovery_seconds": 1.517,
+  "tables": {
+    "auth_group": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "auth_group_permissions": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "auth_permission": {
+      "rows": 176,
+      "sha256": "402bef7bf11f65e744d8972d5d9a36512debcb64d1f653021e456c1d8f1900df"
+    },
+    "auth_user": {
+      "rows": 1,
+      "sha256": "f52d0cc4ad6176070898859941a087838238f72fe3698a483920560f35dddf39"
+    },
+    "auth_user_groups": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "auth_user_user_permissions": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "axes_accessattempt": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "axes_accessattemptexpiration": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "axes_accessfailurelog": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "axes_accesslog": {
+      "rows": 4,
+      "sha256": "641ef87611a3651cf7762d95e166d18a8edad69246219690a43d3305bbb42671"
+    },
+    "billing_accountassignment": {
+      "rows": 3,
+      "sha256": "7a8e75ee5f2fe6abf84afd2f12a45091e4be1da550647b806ebca821f297821e"
+    },
+    "billing_alert": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_alertroute": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_alliancerecord": {
+      "rows": 1,
+      "sha256": "b1ce35d230fd9c66d355c1b09aaee98aa96529c39fc12e0de45621300ef64bea"
+    },
+    "billing_alliancerevision": {
+      "rows": 1,
+      "sha256": "4543d0bc2ec902075da54f7187b34fb4d02636eccf2b72f0c67c43ffe36d48e0"
+    },
+    "billing_allianceservicenote": {
+      "rows": 1,
+      "sha256": "576add201d3036dee8a8db5ba9ee5b64ae1156935e96e61de1711067dc6482a2"
+    },
+    "billing_allocationrule": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_auditevent": {
+      "rows": 9,
+      "sha256": "7c3a401a5d4952a88e8df5e1232621a536175c0760af283656bb06e357c19103"
+    },
+    "billing_awsaccount": {
+      "rows": 3,
+      "sha256": "e9c1d8dc398ba649e5068b8438821518561cfea0a38ffe32cfd749c2fd346e59"
+    },
+    "billing_billingsource": {
+      "rows": 1,
+      "sha256": "f4ea73de9950f746c9bf52786dc8364354d7ff082f8449afc75ac172915f73ca"
+    },
+    "billing_budget": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_budgetamount": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_budgetevaluation": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_bulkimport": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_collectionperiod": {
+      "rows": 2,
+      "sha256": "5230c0156ca1b6691620577006f61207f467b9e237450088a4214dca7ddd3918"
+    },
+    "billing_cost": {
+      "rows": 240,
+      "sha256": "cf99d428d277b3c091db696034325195d444b73b0669743622998a2d18b03270"
+    },
+    "billing_customer": {
+      "rows": 1,
+      "sha256": "de01ed7b162959a6f13672c4ff36b2f4fd6730fbe1025a85e20eb62782076855"
+    },
+    "billing_customerapproval": {
+      "rows": 1,
+      "sha256": "53378851c98b66361383edc371283e6e8243c7fde5cc3d1ae6b2fbd56075aeaf"
+    },
+    "billing_customermembership": {
+      "rows": 1,
+      "sha256": "8654a63ad4fcff9887264b8ec2aa3aa32158d6b2593b387bf92e0e80d8980ac5"
+    },
+    "billing_explorerquery": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_importedbudget": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_job": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_offboardingrecord": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_operationalalert": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_portalinvitation": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_project": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_projectcost": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_reconciliationrun": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_roleapproval": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_rolloutreadiness": {
+      "rows": 1,
+      "sha256": "df086feddb140ac0c57fdb32c06cb66fd6acba3c1b718096f660b5de3486ecd8"
+    },
+    "billing_savedreport": {
+      "rows": 1,
+      "sha256": "f0ec46698475f728f6323eb49c082fef1d0a76b5cb30e89afbee591fb4873e78"
+    },
+    "billing_syncrun": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "billing_usersecurity": {
+      "rows": 1,
+      "sha256": "0abbc245a6257d024477b43407ab4dbb32bd3b9e660aef9c532c7956c5f93376"
+    },
+    "django_admin_log": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "django_content_type": {
+      "rows": 44,
+      "sha256": "208e1f551fbb026fe482c55529ac3064775827ba8ed1fb5d0b1267b8195aa4c7"
+    },
+    "django_migrations": {
+      "rows": 50,
+      "sha256": "1b85bc101a450a33debfef14f73297db9ff9fd0ec4d3555074b436ffc61f581c"
+    },
+    "django_session": {
+      "rows": 4,
+      "sha256": "a6ac916abef009715ceaaa89dab3af7b8d527c9b87221f486aa556752712ca83"
+    },
+    "otp_totp_totpdevice": {
+      "rows": 1,
+      "sha256": "5cff3366e0382e52c69978e0edfd33316aa33cd6f783d99a6f1b3cc593c26dcc"
+    },
+    "_schema": {
+      "sha256": "1edd6e4d0e2e4bbfd8c0ec41b983311407bc3e64fea3213b8017764501c0040f",
+      "columns": 466,
+      "constraints": 166,
+      "indexes": 165,
+      "all_constraints_validated": true
+    }
+  },
+  "production_backup_verified": false,
+  "agreed_rpo": null,
+  "agreed_rto": null,
+  "note": "Local synthetic drill only. Production backup access, retention and agreed recovery objectives remain pending."
+}

@@ -1,0 +1,161 @@
+{
+  "synthetic": true,
+  "browser": "Installed Chrome, isolated headless profile",
+  "flows": [
+    {
+      "flow": "connection",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 591
+    },
+    {
+      "flow": "bulk-onboarding",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 532
+    },
+    {
+      "flow": "budgets",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 546
+    },
+    {
+      "flow": "customers",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 675
+    },
+    {
+      "flow": "customer",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 603
+    },
+    {
+      "flow": "manual-iam",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 536
+    },
+    {
+      "flow": "approval",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 547
+    },
+    {
+      "flow": "alliance",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 545
+    },
+    {
+      "flow": "alliance-history",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 598
+    },
+    {
+      "flow": "operations",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 539
+    },
+    {
+      "flow": "cost-explorer",
+      "width": 1440,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 569
+    },
+    {
+      "flow": "connection",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 575
+    },
+    {
+      "flow": "bulk-onboarding",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 527
+    },
+    {
+      "flow": "budgets",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 541
+    },
+    {
+      "flow": "customers",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 604
+    },
+    {
+      "flow": "customer",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 534
+    },
+    {
+      "flow": "manual-iam",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 530
+    },
+    {
+      "flow": "approval",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 550
+    },
+    {
+      "flow": "alliance",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 536
+    },
+    {
+      "flow": "alliance-history",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 593
+    },
+    {
+      "flow": "operations",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 533
+    },
+    {
+      "flow": "cost-explorer",
+      "width": 390,
+      "status": 200,
+      "overflow": false,
+      "milliseconds": 559
+    }
+  ],
+  "page_errors": []
+}

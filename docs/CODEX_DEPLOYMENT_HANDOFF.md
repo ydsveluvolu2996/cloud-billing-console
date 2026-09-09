@@ -1,3 +1,5 @@
+> Historical release handoff. Deployment and identity instructions in this document are superseded by [the security deployment runbook](deployment-runbook.md). Do not use the old shared-host worker, broad role policy or deployment shortcuts for this release.
+
 # Codex deployment handoff — customer/account/project/budget dashboard and blue monochrome redesign
 
 Status: **implemented, tested and pushed. Deployment has not been performed.** Codex reviews,

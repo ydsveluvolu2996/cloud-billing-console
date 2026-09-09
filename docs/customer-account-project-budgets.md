@@ -1,3 +1,5 @@
+> Budget calculation definitions are retained. Authorization now requires explicit customer memberships and MFA; operational role/onboarding instructions are superseded by [security architecture](security-architecture.md) and [manual IAM onboarding](manual-iam-onboarding.md).
+
 # Customer, account, project and budget management
 
 This document describes the data model, collection pipeline, allocation and budget rules
