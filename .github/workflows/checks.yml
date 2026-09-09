@@ -73,9 +73,12 @@ jobs:
       - run: docker build --pull -f deploy/Dockerfile -t billing-review:${{ github.sha }} .
       - name: Scan images; critical/high findings fail
         run: |
-          .deployment/tools/trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output /tmp/security-evidence/app-image.json billing-review:${{ github.sha }}
-          .deployment/tools/trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 postgres:17-alpine
-          .deployment/tools/trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 caddy:2-alpine
+          scan_status=0
+          for image in billing-review:${{ github.sha }} postgres:17-alpine caddy:2-alpine; do
+            report=$(printf '%s' "$image" | tr ':/' '_')
+            .deployment/tools/trivy image --timeout 10m --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output "/tmp/security-evidence/$report.json" "$image" || scan_status=1
+          done
+          exit "$scan_status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

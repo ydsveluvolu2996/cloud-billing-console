@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,17 @@ def manifest(name):
    for (row,) in c.execute(sql.SQL('SELECT row_to_json(t)::text FROM {} t ORDER BY row_to_json(t)::text').format(sql.Identifier(table))):
     digest.update(row.encode());digest.update(b'\n');count+=1
    result[table]={'rows':count,'sha256':digest.hexdigest()}
+  schema={
+   'columns':c.execute("SELECT table_name,column_name,row_number() OVER (PARTITION BY table_name ORDER BY ordinal_position),data_type,character_maximum_length,numeric_precision,numeric_scale,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' ORDER BY table_name,ordinal_position").fetchall(),
+   'constraints':c.execute("SELECT c.relname,k.conname,pg_get_constraintdef(k.oid),k.convalidated FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' ORDER BY c.relname,k.conname").fetchall(),
+   'indexes':c.execute("SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY tablename,indexname").fetchall(),
+  }
+  # pg_dump compacts dropped-column ordinal gaps and PostgreSQL reparses
+  # equivalent ANY(text[]) casts. Canonicalize only that exact cast shape.
+  def index_form(value):
+   return re.sub(r"\(ARRAY\[([^]]+)\]\)::text\[\]",lambda match:'ARRAY['+re.sub(r"('(?:[^']|'')*'::character varying)",r"(\1)::text",match[1])+']',value)
+  schema['indexes']=[(table,name,index_form(definition)) for table,name,definition in schema['indexes']]
+  result['_schema']={'sha256':hashlib.sha256(json.dumps(schema,sort_keys=True,default=str).encode()).hexdigest(),'columns':len(schema['columns']),'constraints':len(schema['constraints']),'indexes':len(schema['indexes']),'all_constraints_validated':all(row[3] for row in schema['constraints'])}
  return result
 before=manifest(a.source);started=time.perf_counter()
 env=dict(os.environ,PGHOST=config['host'],PGPORT=config['port'],PGUSER=config['user'],PGPASSWORD=config['password'])
