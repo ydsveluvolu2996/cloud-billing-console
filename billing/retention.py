@@ -23,6 +23,7 @@ def data_sets(customer):
         'project_costs':m.ProjectCost.objects.filter(project__customer=customer),
         'saved_reports':m.SavedReport.objects.filter(customer=customer),
         'cached_reports':m.ExplorerQuery.objects.filter(customer=customer),
+        'alliance_revisions':m.AllianceRevision.objects.filter(record__customer=customer),
         'alliance_notes':m.AllianceServiceNote.objects.filter(record__customer=customer),
         'alliance_records_and_snapshots':m.AllianceRecord.objects.filter(customer=customer),
         'budget_evaluations':m.BudgetEvaluation.objects.filter(budget__customer=customer),

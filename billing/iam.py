@@ -26,7 +26,7 @@ OPTIONAL = {
 
 def validate_role_arn(arn, account_id=None):
     match = ROLE_RE.fullmatch(arn or '')
-    if not match or any(c in arn for c in '*?') or not re.fullmatch(r'[\w+=,.@-]{1,64}', match[3].split('/')[-1], re.ASCII):
+    if not match or len(arn)>2048 or any(c in arn for c in '*?') or not re.fullmatch(r'[\w+=,.@-]{1,64}', match[3].split('/')[-1], re.ASCII):
         raise ValidationError({'role_arn': 'Enter an exact IAM role ARN with a valid role name and path; wildcards are not allowed.'})
     if account_id and match[2] != account_id:
         raise ValidationError({'role_arn': 'The role ARN must match the registered 12-digit AWS account.'})
@@ -49,6 +49,8 @@ def policy_bundle(source):
     required = {'Version': '2012-10-17', 'Statement': [
         {'Sid': 'CoreBilling', 'Effect': 'Allow', 'Action': ['ce:GetCostAndUsage', 'ce:GetDimensionValues'], 'Resource': '*'},
         {'Sid': 'VerifyOwnTrust', 'Effect': 'Allow', 'Action': 'iam:GetRole', 'Resource': arn}]}
+    if source.kind==source.MEMBER_BUDGETS:
+        required['Statement']=[statement for statement in required['Statement'] if statement['Sid']=='VerifyOwnTrust']
     optional = {}
     for capability, actions in OPTIONAL.items():
         resource = f'arn:{parsed[1]}:budgets::{source.account_id}:budget/*' if capability == 'budgets' else '*'
@@ -99,7 +101,7 @@ def verify_trust(source, session, sts, meter):
     """Strict supported trust form, plus successful and explicit-negative STS probes."""
     validate_role_arn(source.role_arn, source.account_id)
     identity = meter.call(session.client('sts'), 'get_caller_identity')
-    expected_prefix = f'arn:{source.role_arn.split(":")[1]}:sts::{source.account_id}:assumed-role/'
+    expected_prefix = f'arn:{source.role_arn.split(":")[1]}:sts::{source.account_id}:assumed-role/{source.role_arn.rsplit("/",1)[-1]}/'
     if identity.get('Account') != source.account_id or not identity.get('Arn', '').startswith(expected_prefix):
         raise ValueError('Assumed caller identity does not match the registered customer account.')
     result = meter.call(session.client('iam'), 'get_role', RoleName=source.role_arn.rsplit('/', 1)[-1])['Role']

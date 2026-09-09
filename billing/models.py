@@ -100,7 +100,7 @@ class BillingSource(ScopedModel):
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='sources')
     kind = models.CharField(max_length=20, choices=KINDS, default=PAYER)
     account_id = models.CharField(max_length=12, validators=[ACCOUNT_ID])
-    role_arn = models.CharField(max_length=300, blank=True)
+    role_arn = models.CharField(max_length=2048, blank=True)
     external_id = models.CharField(max_length=64, default=new_external_id, editable=False, unique=True)
     shared = models.BooleanField(default=False, help_text='Payer serves several customers; accounts need explicit assignment.')
     enabled = models.BooleanField(default=True)
@@ -194,6 +194,7 @@ class AwsAccount(ScopedModel):
 
 
 class AccountAssignment(ScopedModel):
+    metadata=models.JSONField(default=dict,blank=True,help_text='Approved customer-specific alias, owner and environment; retained with this ownership interval.')
     """Effective-dated ownership of an account by a customer."""
     account = models.ForeignKey(AwsAccount, on_delete=models.PROTECT, related_name='assignments')
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='assignments')
@@ -669,7 +670,7 @@ class CustomerApproval(ScopedModel):
 
 class RoleApproval(ScopedModel):
     source = models.ForeignKey(BillingSource, on_delete=models.PROTECT, related_name='role_approvals')
-    role_arn = models.CharField(max_length=300)
+    role_arn = models.CharField(max_length=2048)
     connection_version = models.PositiveIntegerField()
     status = models.CharField(max_length=20, default='requested')
     evidence = models.CharField(max_length=500, blank=True)
@@ -704,6 +705,8 @@ class UserSecurity(models.Model):
     recovery_hashes = models.JSONField(default=list, blank=True)
     recovery_failed = models.PositiveIntegerField(default=0)
     recovery_locked_until = models.DateTimeField(null=True, blank=True)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=['oidc_issuer','oidc_subject'],condition=~Q(oidc_issuer='') & ~Q(oidc_subject=''),name='unique_oidc_identity')]
 
 
 class RolloutReadiness(ScopedModel):
@@ -771,6 +774,7 @@ class AlertRoute(ScopedModel):
 
 
 class PortalInvitation(ScopedModel):
+    target_user=models.ForeignKey('auth.User',null=True,blank=True,on_delete=models.PROTECT)
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
     email = models.EmailField()
     token_hash = models.CharField(max_length=64, unique=True)
@@ -779,3 +783,17 @@ class PortalInvitation(ScopedModel):
     expires_at = models.DateTimeField()
     accepted_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+
+
+class AllianceRevision(ScopedModel):
+    """Customer-scoped handoff history; sensitive content stays out of central logs."""
+    record=models.ForeignKey(AllianceRecord,on_delete=models.PROTECT,related_name='revisions')
+    revision=models.PositiveIntegerField()
+    actor=models.CharField(max_length=150)
+    created_at=models.DateTimeField(default=timezone.now)
+    snapshot=models.JSONField(default=dict)
+    fields=models.JSONField(default=dict)
+    service_notes=models.JSONField(default=dict)
+    class Meta:
+        ordering=['-revision']
+        constraints=[models.UniqueConstraint(fields=['record','revision'],name='unique_alliance_revision')]

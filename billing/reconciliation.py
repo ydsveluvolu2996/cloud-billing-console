@@ -56,14 +56,16 @@ def reconcile(customer, reference_text, start, end, metric, currency, source=Non
         while cursor<=end:
             months.append(cursor);cursor+=relativedelta(months=1)
         periods=list(CollectionPeriod.objects.filter(source_id__in=account_sources,month__in=months))
-        complete=len(periods)==len(account_sources)*len(months) and bool(account_sources) and all(p.status=='complete' and p.last_success for p in periods)
+        complete=len(periods)==len(account_sources)*len(months) and bool(account_sources) and all(p.status=='complete' and p.last_success and p.first_day and p.last_day and p.first_day<=max(start,p.month) and p.last_day>=min(end,p.month+relativedelta(months=1)-timedelta(days=1)) for p in periods)
         # Zero requires both published coverage and evidence of the selected currency.
         if actual is None and complete and Cost.objects.filter(source_id__in=account_sources,currency=currency,day__gte=start,day__lte=end).exists():actual=Decimal(0)
         delta=actual-expected['amount'] if actual is not None and expected else None
         state='matched' if delta is not None and abs(delta)<=tolerance else 'difference' if delta is not None else 'missing reference' if not expected else 'missing data'
-        if expected and expected['estimated']!=(account in estimated):state='estimate status differs'
+        is_estimated=account in estimated or (account not in totals and any(p.estimated for p in periods))
+        if expected and expected['estimated']!=is_estimated:state='estimate status differs'
         if not complete and state=='matched':state='incomplete coverage'
-        rows.append({'account_id':account,'dashboard':str(actual) if actual is not None else None,'reference':str(expected['amount']) if expected else None,'difference':str(delta) if delta is not None else None,'state':state,'estimated':account in estimated})
-    return {'passed':bool(rows) and all(r['state']=='matched' for r in rows),'customer':str(customer.pk),'source':str(source.pk) if source else None,
+        rows.append({'account_id':account,'dashboard':str(actual) if actual is not None else None,'reference':str(expected['amount']) if expected else None,'difference':str(delta) if delta is not None else None,'state':state,'estimated':is_estimated,'ownership_windows':[{'start':str(max(start,a.start)),'end_exclusive':str(min(end+timedelta(days=1),a.end or end+timedelta(days=1)))} for a in assignments.filter(account__account_id=account)]})
+    from .governance import configuration
+    return {'configuration':configuration(customer),'passed':bool(rows) and all(r['state']=='matched' for r in rows),'customer':str(customer.pk),'source':str(source.pk) if source else None,
             'start':str(start),'end_inclusive':str(end),'aws_end_exclusive':str(end+timedelta(days=1)),
             'metric':metric,'currency':currency,'timezone':'UTC','services':services,'credits_refunds':'included','accounts':rows,'tolerance':str(tolerance)}

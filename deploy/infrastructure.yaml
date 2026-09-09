@@ -29,7 +29,7 @@ Parameters:
   ApprovedCustomerRoleArns:
     Type: CommaDelimitedList
     Default: ''
-    AllowedPattern: ^$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/\-]+$
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:role/(?!.*[?*])[!-~]+/[A-Za-z0-9_+=,.@-]{1,64}$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@-]{1,64}$'
     Description: Exact approved customer role ARNs. Empty disables all customer AssumeRole.
   WebSecretArn:
     Type: String

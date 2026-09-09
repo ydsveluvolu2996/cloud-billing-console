@@ -77,7 +77,7 @@ CUSTOMER_PATHS = {
     'AccountAssignment': 'customer_id', 'Project': 'customer_id', 'AllocationRule': 'project__customer_id',
     'ProjectCost': 'project__customer_id', 'Budget': 'customer_id', 'BudgetAmount': 'budget__customer_id',
     'BudgetEvaluation': 'budget__customer_id', 'Alert': 'budget__customer_id',
-    'AllianceRecord': 'customer_id', 'AllianceServiceNote': 'record__customer_id',
+    'AllianceRevision':'record__customer_id', 'AllianceRecord': 'customer_id', 'AllianceServiceNote': 'record__customer_id',
     'CustomerApproval': 'customer_id', 'RolloutReadiness': 'customer_id', 'ReconciliationRun': 'customer_id',
     'OffboardingRecord': 'customer_id', 'OperationalAlert': 'customer_id', 'AlertRoute': 'customer_id',
     'PortalInvitation': 'customer_id', 'SavedReport': 'customer_id', 'AuditEvent': 'customer_id',
@@ -86,7 +86,7 @@ CUSTOMER_PATHS = {
     'Job': 'source__customer_id', 'ImportedBudget': 'source__customer_id',
 }
 ACCOUNT_PATHS = {'Cost':'account_id', 'AccountAssignment':'account__account_id', 'AllianceRecord':'account__account_id',
-                 'AllianceServiceNote':'record__account__account_id', 'ProjectCost':'account_id', 'ImportedBudget':'owning_account_id'}
+                 'AllianceServiceNote':'record__account__account_id', 'AllianceRevision':'record__account__account_id', 'ProjectCost':'account_id', 'ImportedBudget':'owning_account_id'}
 
 
 def restriction(model, access=None):
@@ -141,7 +141,7 @@ class ScopedQuerySet(models.QuerySet):
             return
         if self.model.__name__ in ('RoleApproval', 'CustomerApproval') and any(k in kwargs for k in ('status','approved_by','approved_at','evidence')):
             raise PermissionDenied('Approval changes require the administration command and evidence.')
-        if self.model.__name__ == 'AuditEvent':
+        if self.model.__name__ in ('AuditEvent','AllianceRevision'):
             raise PermissionDenied('Audit records are append-only.')
         # Scope-changing updates must use checked model saves. SQL expressions and
         # bulk foreign-key changes could otherwise bypass containment validation.
@@ -149,7 +149,7 @@ class ScopedQuerySet(models.QuerySet):
             raise PermissionDenied('Use the validated ownership workflow to change object scope.')
 
     def delete(self):
-        if current_access.get() and self.model.__name__ == 'AuditEvent':
+        if current_access.get() and self.model.__name__ in ('AuditEvent','AllianceRevision'):
             raise PermissionDenied('Audit records are append-only.')
         return super().delete()
 
@@ -177,7 +177,7 @@ def validate_object(obj):
         return
     if obj.__class__.__name__ in ('CustomerApproval','RoleApproval') and getattr(obj, 'status', 'pending') not in ('pending','requested'):
         raise PermissionDenied('Only the administration runtime can approve roles or customer consent.')
-    if obj.__class__.__name__ == 'AuditEvent' and not obj._state.adding:
+    if obj.__class__.__name__ in ('AuditEvent','AllianceRevision') and not obj._state.adding:
         raise PermissionDenied('Audit records are append-only.')
     if access.portfolio:
         return
@@ -191,7 +191,7 @@ def validate_object(obj):
             raise PermissionDenied('This import belongs to another operator.')
         return
     if name == 'Customer':
-        if obj.pk not in access.ids:
+        if obj.pk not in access.editable or access.accounts.get(obj.pk):
             raise PermissionDenied('Customer creation requires explicit portfolio administration.')
         return
     path = CUSTOMER_PATHS.get(name)

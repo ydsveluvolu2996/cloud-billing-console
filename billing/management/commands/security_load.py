@@ -20,17 +20,27 @@ class Command(Base):
     help='100 synthetic customers with 2/15/101 base accounts, multiple payers, standalone/shared sources and scoped concurrent readers.'
     def add_arguments(self,p):
         super().add_arguments(p)
+        p.add_argument('--recheck',action='store_true',help='Repeat measurements on an existing isolated billing_security_* synthetic database')
         p.set_defaults(customers=100,accounts=3932,months=7,services=3,readers=8,requests=80,collect_sources=130,output='docs/evidence/security-load.json',keep=True)
     def handle(self,*args,**o):
-        if not settings.DEBUG or Customer.objects.exists():raise CommandError('Requires DEBUG and an empty isolated database; existing records are never removed.')
+        if not settings.DEBUG or (Customer.objects.exists() and not o['recheck']):raise CommandError('Requires DEBUG and an empty isolated database; existing records are never removed.')
         if o['customers']<100:raise CommandError('This workload requires at least 100 synthetic customers.')
         o['keep']=True
-        super().handle(*args,**o)
-        path=Path(o['output']);results=json.loads(path.read_text());results['scoped_concurrency']=self.scoped_concurrency(o)
+        path=Path(o['output'])
+        if o['recheck']:
+            if not settings.DATABASES['default']['NAME'].startswith('billing_security_') or Customer.objects.exclude(name__startswith='Synthetic ').exists():raise CommandError('Recheck requires an isolated synthetic database')
+            results=json.loads(path.read_text())
+            results.update(rechecked_at=timezone.now().isoformat(),collection_cycle=self.simulate_collection(o),dashboard=self.measure_dashboard(o),table_sizes=self.table_sizes())
+        else:
+            super().handle(*args,**o)
+            results=json.loads(path.read_text())
+        results['scoped_concurrency']=self.scoped_concurrency(o)
         results['workload']={'base_account_counts':[2,15,101],'standalone_sources':BillingSource.objects.filter(kind='standalone').count(),'shared_sources':BillingSource.objects.filter(shared=True).count(),'total_sources':BillingSource.objects.count(),'customers':Customer.objects.count(),'account_count':AwsAccount.objects.count()}
         results['targets']={'scoped_p95_ms':2000,'collection_cycle_seconds':21600,'cross_customer_disclosures':0,'http_errors':0}
-        results['targets_met']={'scoped_p95':results['scoped_concurrency']['p95_ms']<=2000,'isolation':not results['scoped_concurrency']['failures'],'collection_cycle':results['collection_cycle']['wall_seconds']<21600}
+        results['targets_met']={'scoped_p95':results['scoped_concurrency']['p95_ms']<=2000,'isolation':not results['scoped_concurrency']['failures'],'collection_cycle':results['collection_cycle']['wall_seconds']<21600,'http_errors':not results['dashboard']['failures']}
+        results['hardware_note']='Record CPU, RAM, OS and database version in the adjacent performance report.'
         path.write_text(json.dumps(results,indent=2)+'\n')
+        if not all(results['targets_met'].values()):raise CommandError('Synthetic acceptance target failed; inspect evidence')
         self.stdout.write(json.dumps({'workload':results['workload'],'scoped_concurrency':results['scoped_concurrency'],'targets_met':results['targets_met']},indent=2))
     def generate(self,o):
         result=super().generate(o)
@@ -60,8 +70,8 @@ class Command(Base):
     def scoped_concurrency(self,o):
         customers=list(Customer.objects.order_by('name')[:o['readers']]);clients=[]
         for i,customer in enumerate(customers):
-            user=User.objects.create_user(f'synthetic-scoped-{i}')
-            CustomerMembership.objects.create(user=user,customer=customer,role='viewer')
+            user,_=User.objects.get_or_create(username=f'synthetic-scoped-{i}')
+            CustomerMembership.objects.update_or_create(user=user,customer=customer,defaults={'role':'viewer','active':True})
             c=Client();c.force_login(user);session=c.session;session['mfa_at']=timezone.now().timestamp();session.save();clients.append((c,customer))
         latencies=[];failures=[];lock=threading.Lock()
         def read(index):

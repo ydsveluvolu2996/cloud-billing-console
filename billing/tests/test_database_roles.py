@@ -51,6 +51,28 @@ class DatabaseRoleTests(TransactionTestCase):
                 with self.subTest(statement=statement):
                     with self.assertRaises(psycopg.errors.InsufficientPrivilege):
                         with c.transaction():c.execute(statement)
+
+    def test_effective_transfer_requires_both_scopes_and_keeps_historical_facts(self):
+        from billing.models import AccountAssignment
+        from billing.collector import ensure_assignment
+        from django.db import IntegrityError, transaction
+        assignment=AccountAssignment.objects.get(customer=self.a)
+        old=Cost.objects.get(customer=self.a);old.day=date(2026,1,1);old.save()
+        recent=cost(self.sa,date.today(),25)
+        ensure_assignment(assignment.account,self.b,start=date(2026,2,1),actor='synthetic-admin')
+        with self.assertRaises(IntegrityError),transaction.atomic():
+            AccountAssignment.objects.create(account=assignment.account,customer=self.a,start=date(2026,3,1))
+        with self.connect('billing_web') as c:
+            c.execute("SELECT set_config('billing.user_id',%s,true)",[str(self.user.pk)])
+            with self.assertRaises(psycopg.errors.RaiseException),c.transaction():
+                c.execute('SELECT billing_restamp_ownership(%s,%s)',[self.sa.account_id,date(2026,2,1)])
+        CustomerMembership.objects.create(user=self.user,customer=self.b,role='operator')
+        with self.connect('billing_web') as c:
+            c.execute("SELECT set_config('billing.user_id',%s,true)",[str(self.user.pk)])
+            self.assertEqual(c.execute('SELECT billing_restamp_ownership(%s,%s)',[self.sa.account_id,date(2026,2,1)]).fetchone()[0],1)
+        old.refresh_from_db();recent.refresh_from_db()
+        self.assertEqual(old.customer_id,self.a.pk);self.assertEqual(recent.customer_id,self.b.pk)
+        self.assertEqual(recent.unblended,25)
     @override_settings(SECURE_SSL_REDIRECT=False,ALLOWED_HOSTS=['testserver'],STORAGES=TEST_STORAGES,DATABASE_RLS_ENABLED=True)
     def test_django_requests_use_actual_web_login(self):
         cfg=connection.settings_dict;old_user,old_password=cfg['USER'],cfg['PASSWORD']
@@ -103,12 +125,13 @@ class DatabaseRoleTests(TransactionTestCase):
         external=User.objects.create_user('rls-external',email='rls@example.invalid')
         UserSecurity.objects.create(user=external)
         token=secrets.token_urlsafe(48);digest=hashlib.sha256(token.encode()).hexdigest()
-        PortalInvitation.objects.create(customer=self.a,email=external.email,token_hash=digest,created_by='test',account_ids=[self.sa.account_id],expires_at=timezone.now()+__import__('datetime').timedelta(hours=1))
-        CustomerApproval.objects.create(customer=self.a,status='approved',evidence='synthetic-test')
+        PortalInvitation.objects.create(customer=self.a,target_user=external,email=external.email,token_hash=digest,created_by='test',account_ids=[self.sa.account_id],expires_at=timezone.now()+__import__('datetime').timedelta(hours=1))
+        CustomerApproval.objects.create(customer=self.a,status='approved',evidence='synthetic-test',contacts=['synthetic'],authorized_users=['synthetic'],billing_fields=['cost'],expected_accounts=[self.sa.account_id],storage_region='ap-south-1',retention_days=30,approved_at=timezone.now(),approved_by='test')
         RolloutReadiness.objects.create(customer=self.a,owner='test',planned_date=date.today(),security_evidence='synthetic-test',independent_review='synthetic-test',checklist={'rollback_readiness':True,'rollback_evidence':'synthetic-test'})
-        ReconciliationRun.objects.create(customer=self.a,start=date.today(),end=date.today(),metric='unblended',currency='USD',scope={},result={'passed':True},reference='synthetic-test-fixture',synthetic=False,created_by='test')
-        self.sa.trust_checks={'exact_collector_principal':'passed','connection_version':self.sa.connection_version};self.sa.save()
-        RoleApproval.objects.create(source=self.sa,role_arn=self.sa.role_arn,connection_version=self.sa.connection_version,status='approved',requested_by='test')
+        self.sa.refresh_from_db()
+        ReconciliationRun.objects.create(customer=self.a,start=date.today(),end=date.today(),metric='unblended',currency='USD',scope={},result={'passed':True,'configuration':{str(self.sa.pk):[self.sa.connection_version,self.sa.ownership_version]}},reference='synthetic-test-fixture',synthetic=False,created_by='test')
+        self.sa.refresh_from_db();self.sa.trust_checks={'correct_external_id':'passed','missing_external_id':'denied','wrong_external_id':'denied','account_identity':'passed','exact_collector_principal':'passed','connection_version':self.sa.connection_version};self.sa.save()
+        RoleApproval.objects.create(source=self.sa,role_arn=self.sa.role_arn,connection_version=self.sa.connection_version,status='approved',requested_by='test',approved_at=timezone.now(),approved_by='test',evidence='synthetic-test')
         with self.connect('billing_web') as c:
             c.execute("SELECT set_config('billing.user_id',%s,true)",[str(external.pk)])
             with self.assertRaises(psycopg.errors.RaiseException),c.transaction():c.execute('SELECT billing_accept_invitation(%s)',[digest])
@@ -117,3 +140,28 @@ class DatabaseRoleTests(TransactionTestCase):
             self.assertEqual(c.execute('SELECT billing_accept_invitation(%s)',[digest]).fetchone()[0],self.a.pk)
             self.assertEqual(c.execute('SELECT DISTINCT customer_id FROM billing_cost').fetchall(),[(self.a.pk,)])
             with self.assertRaises(psycopg.errors.RaiseException),c.transaction():c.execute('SELECT billing_accept_invitation(%s)',[digest])
+
+    @override_settings(REQUIRE_CONNECTION_APPROVAL=False)
+    def test_concurrent_sources_cannot_publish_duplicate_account_days(self):
+        import threading
+        from decimal import Decimal
+        from django.db import connections
+        from billing.collector import publish_month,OverlappingBillingScope
+        from billing.aws import Meter
+        Cost.objects.all().delete()
+        barrier=threading.Barrier(2);outcomes=[]
+        today=date.today()
+        records=[{'day':today,'account_id':self.sa.account_id,'service':'Synthetic service','currency':'USD','unblended':Decimal('10'),'amortized':Decimal('10'),'estimated':True}]
+        def publish(source):
+            try:
+                barrier.wait(timeout=5)
+                publish_month(source,today.replace(day=1),records,[today],True,Meter(),timezone.now())
+                outcomes.append('published')
+            except OverlappingBillingScope:outcomes.append('overlap denied')
+            except Exception as exc:outcomes.append(type(exc).__name__)
+            finally:connections.close_all()
+        threads=[threading.Thread(target=publish,args=(s,)) for s in (self.sa,self.sb)]
+        for t in threads:t.start()
+        for t in threads:t.join(timeout=10)
+        self.assertEqual(sorted(outcomes),['overlap denied','published'])
+        self.assertEqual(Cost.objects.count(),1)

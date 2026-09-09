@@ -146,6 +146,8 @@ class AllocationRuleForm(forms.ModelForm):
 
 
 class AssignmentForm(forms.Form):
+    alias=forms.CharField(max_length=200,required=False)
+    owner=forms.CharField(max_length=120,required=False)
     customer = forms.ModelChoiceField(queryset=Customer.objects.filter(active=True))
     start = forms.DateField(initial=lambda: date.today().replace(day=1), help_text='First day the customer owns this account’s spend.')
     environment = forms.ChoiceField(choices=[('', 'Unlabelled'), ('production', 'Production'), ('development', 'Development'), ('other', 'Other')], required=False)

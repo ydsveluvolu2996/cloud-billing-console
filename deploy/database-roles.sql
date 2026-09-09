@@ -365,6 +365,23 @@ DROP TRIGGER IF EXISTS guard_customer_approval ON billing_customerapproval;
 CREATE TRIGGER guard_customer_approval BEFORE INSERT OR UPDATE ON billing_customerapproval FOR EACH ROW EXECUTE FUNCTION billing_guard_approval();
 DROP TRIGGER IF EXISTS guard_role_approval ON billing_roleapproval;
 CREATE TRIGGER guard_role_approval BEFORE INSERT OR UPDATE ON billing_roleapproval FOR EACH ROW EXECUTE FUNCTION billing_guard_approval();
+-- Narrow effective-ownership restamp; the web role cannot update cost amounts.
+CREATE OR REPLACE FUNCTION billing_restamp_ownership(aid text, first_day date) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE changed bigint;
+BEGIN
+ PERFORM 1 FROM billing_awsaccount WHERE account_id=aid FOR UPDATE;
+ IF NOT EXISTS(SELECT 1 FROM billing_accountassignment a JOIN billing_awsaccount x ON x.id=a.account_id WHERE x.account_id=aid AND billing_can_access(a.customer_id,aid,true))
+ OR EXISTS(SELECT 1 FROM billing_cost WHERE account_id=aid AND day>=first_day AND NOT billing_can_access(customer_id,aid,true))
+ OR EXISTS(SELECT 1 FROM billing_accountassignment a JOIN billing_awsaccount x ON x.id=a.account_id WHERE x.account_id=aid AND (a."end" IS NULL OR a."end">first_day) AND NOT billing_can_access(a.customer_id,aid,true))
+ THEN RAISE EXCEPTION 'Ownership transfer requires authorized old and new customer scopes'; END IF;
+ UPDATE billing_cost c SET customer_id=(SELECT a.customer_id FROM billing_accountassignment a JOIN billing_awsaccount x ON x.id=a.account_id WHERE x.account_id=aid AND a.start<=c.day AND (a."end" IS NULL OR a."end">c.day))
+ WHERE c.account_id=aid AND c.day>=first_day;
+ GET DIAGNOSTICS changed=ROW_COUNT;
+ RETURN changed;
+END $$;
+REVOKE ALL ON FUNCTION billing_restamp_ownership(text,date) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION billing_restamp_ownership(text,date) TO billing_web;
 -- Boolean/configuration-only helpers keep shared-payer approval documents private.
 CREATE OR REPLACE FUNCTION billing_customer_configuration(cid uuid) RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -392,7 +409,7 @@ BEGIN
  IF current_setting('billing.external_enabled',true) IS DISTINCT FROM 'true' THEN RAISE EXCEPTION 'Portal disabled'; END IF;
  SELECT id INTO uid FROM auth_user WHERE id::text=current_setting('billing.user_id',true) AND is_active;
  SELECT i.* INTO invitation FROM billing_portalinvitation i JOIN auth_user u ON u.id=uid
- WHERE i.token_hash=digest AND lower(i.email)=lower(u.email) AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() FOR UPDATE OF i;
+ WHERE i.token_hash=digest AND i.target_user_id=uid AND lower(i.email)=lower(u.email) AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() FOR UPDATE OF i;
  IF invitation.id IS NULL THEN RAISE EXCEPTION 'Invalid invitation'; END IF;
  cid:=invitation.customer_id;
  IF NOT EXISTS(SELECT 1 FROM billing_customer c JOIN billing_customerapproval a ON a.customer_id=c.id

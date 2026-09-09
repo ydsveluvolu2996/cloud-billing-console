@@ -122,12 +122,12 @@ def heartbeat(job, progress=None):
     if progress is not None:
         job.progress = progress
         fields['progress'] = progress
-    Job.objects.filter(pk=job.pk, status=Job.LEASED).update(**fields)
+    Job.objects.filter(pk=job.pk, status=Job.LEASED,worker=job.worker,attempts=job.attempts).update(**fields)
 
 
 def complete(job, progress=None):
     now = timezone.now()
-    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker).update(status=Job.DONE, finished_at=now, last_error='', lease_expires=None,
+    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker,attempts=job.attempts).update(status=Job.DONE, finished_at=now, last_error='', lease_expires=None,
                                          progress=progress if progress is not None else job.progress,
                                          duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
 
@@ -137,7 +137,7 @@ def fail(job, error, permanent=False):
     from .redaction import redact
     message = redact(error)[:500]
     exhausted = permanent or job.attempts >= job.max_attempts
-    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker).update(
+    Job.objects.filter(pk=job.pk,status=Job.LEASED,worker=job.worker,attempts=job.attempts).update(
         status=Job.FAILED if exhausted else Job.QUEUED, last_error=message, lease_expires=None,
         run_after=now if exhausted else now + backoff(job.attempts), finished_at=now if exhausted else None,
         progress=job.progress, duration_ms=max(0, int((now - (job.started_at or now)).total_seconds() * 1000)))
@@ -152,7 +152,7 @@ def recover_expired(now=None):
     recovered = 0
     for job in Job.objects.filter(status=Job.LEASED, lease_expires__lt=now):
         exhausted = job.attempts >= job.max_attempts
-        Job.objects.filter(pk=job.pk, status=Job.LEASED).update(
+        Job.objects.filter(pk=job.pk, status=Job.LEASED,lease_expires__lt=now,worker=job.worker,attempts=job.attempts).update(
             status=Job.FAILED if exhausted else Job.QUEUED, lease_expires=None,
             last_error='Worker lease expired; the job was interrupted.' + ('' if exhausted else ' Retry queued.'),
             run_after=now + backoff(job.attempts))

@@ -242,3 +242,26 @@ class OIDCTests(TestCase):
             UserSecurity.objects.create(user=user,oidc_issuer=payload['iss'],oidc_subject=payload['sub'])
             self.assertEqual(backend.get_or_create_user(None,None,payload),user)
             self.assertIsNone(backend.get_or_create_user(None,None,{**payload,'sub':'different','email':user.email}))
+
+@secure_settings
+class PublicationTests(TestCase):
+    def test_billing_discovery_does_not_assign_unapproved_accounts(self):
+        from billing.collector import owner_lookup
+        c,s=make_customer('Inventory approval','123456789012')
+        CustomerApproval.objects.create(customer=c,status='approved',expected_accounts=[s.account_id])
+        rows=[{'account_id':'555555555555','day':date.today()}]
+        result=owner_lookup(s,rows)
+        self.assertIsNone(result[('555555555555',date.today())])
+        self.assertFalse(AccountAssignment.objects.filter(account__account_id='555555555555').exists())
+    def test_cancelled_lease_cannot_publish_or_renew_replacement(self):
+        from billing import jobs
+        from billing.collector import publish_month,ConnectionChanged
+        c,s=make_customer('Lease safety','123456789012')
+        job,_=jobs.enqueue('collect',source=s);old=jobs.lease('worker-old')
+        Job.objects.filter(pk=old.pk).update(status=Job.QUEUED)
+        new=jobs.lease('worker-new')
+        previous=new.lease_expires
+        jobs.heartbeat(old,{'bad':'old-worker'})
+        with self.assertRaises(ConnectionChanged):publish_month(s,date.today().replace(day=1),[],[],True,Meter(),timezone.now(),job=old)
+        new.refresh_from_db();self.assertEqual(new.progress,{})
+        self.assertEqual(new.lease_expires,previous)

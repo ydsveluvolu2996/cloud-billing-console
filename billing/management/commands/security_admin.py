@@ -15,8 +15,10 @@ from billing.iam import validate_role_arn
 class Command(BaseCommand):
     help = 'Admin-only grant/revoke, approve/revoke customer or role, allowlist export, and audited MFA recovery.'
     def add_arguments(self, parser):
-        parser.add_argument('action', choices=['grant','revoke','portfolio','approve-customer','revoke-customer','approve-role','revoke-role','export-allowlist','recover-mfa','support-access'])
+        parser.add_argument('action', choices=['grant','revoke','portfolio','revoke-portfolio','bind-oidc','approve-customer','revoke-customer','approve-role','revoke-role','export-allowlist','recover-mfa','support-access'])
         parser.add_argument('--username')
+        parser.add_argument('--issuer')
+        parser.add_argument('--subject')
         parser.add_argument('--customer')
         parser.add_argument('--source')
         parser.add_argument('--role', choices=['operator','viewer','customer'], default='viewer')
@@ -48,10 +50,15 @@ class Command(BaseCommand):
             if not set(accounts).issubset(owned):
                 raise CommandError('Every restricted account must be assigned to this customer.')
             CustomerMembership.objects.update_or_create(user=user,customer=customer,defaults={'role':opts['role'],'active':action=='grant','account_ids':accounts})
-        elif action == 'portfolio':
-            if not user or not user.is_superuser:
+        elif action in ('portfolio','revoke-portfolio'):
+            if not user or (action=='portfolio' and not user.is_superuser):
                 raise CommandError('Explicit portfolio access requires an individual superuser identity.')
-            UserSecurity.objects.update_or_create(user=user,defaults={'portfolio_access':True})
+            UserSecurity.objects.update_or_create(user=user,defaults={'portfolio_access':action=='portfolio'})
+            revoke_sessions(user,actor,opts['evidence'])
+        elif action=='bind-oidc':
+            if not user or not opts['subject'] or opts['issuer']!=settings.OIDC_ISSUER or not (opts['issuer'] or '').startswith('https://'):
+                raise CommandError('Individual user, exact configured HTTPS issuer and immutable IdP subject are required.')
+            UserSecurity.objects.update_or_create(user=user,defaults={'oidc_issuer':opts['issuer'],'oidc_subject':opts['subject']})
             revoke_sessions(user,actor,opts['evidence'])
         elif action in ('approve-customer','revoke-customer'):
             if not customer:

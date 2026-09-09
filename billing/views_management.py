@@ -85,7 +85,7 @@ def customers(request):
     elif show == 'offboarded':
         items = items.filter(active=False)
     if query:
-        items = items.filter(Q(name__icontains=query) | Q(reference__icontains=query) | Q(owner__icontains=query) | Q(sources__account_id__icontains=query) | Q(assignments__account__account_id__icontains=query)).distinct()
+        items = items.filter(Q(name__icontains=query) | Q(reference__icontains=query) | Q(owner__icontains=query) | Q(sources__account_id__icontains=query) | Q(assignments__account__account_id__icontains=query) | Q(assignments__metadata__alias__icontains=query)).distinct()
     mtd = {r['customer_id']: r['v'] for r in Cost.objects.filter(customer__in=items, currency='USD', day__gte=month, day__lte=today).values('customer_id').annotate(v=Sum('unblended'))}
     accounts = {r['customer_id']: r['n'] for r in AccountAssignment.objects.filter(customer__in=items, end__isnull=True).values('customer_id').annotate(n=Count('account_id', distinct=True))}
     evaluations = {e.budget.customer_id: e for e in BudgetEvaluation.objects.filter(month=month, budget__scope=Budget.CUSTOMER, budget__active=True, budget__customer__in=items).select_related('budget')}
@@ -169,6 +169,8 @@ def account_tree(customer, month, today, currency):
     for a in assignments:
         entry = accounts.setdefault(a.account.account_id, {'account': a.account, 'current': False, 'history': []})
         entry['history'].append(a)
+        if len(entry['history'])==1:
+            account_metadata(entry['account'],a)
         if a.end is None:
             entry['current'] = True
     sources = {s.pk: s for s in customer.sources.all()}
@@ -368,7 +370,7 @@ def source_action(request, pk, action):
 @never_cache
 @login_required
 def account_detail(request, account_id):
-    account = AwsAccount.objects.filter(account_id=account_id).select_related('source', 'source__customer').first()
+    account = AwsAccount.objects.filter(account_id=account_id).select_related('source').first()
     try:
         scope = scoping.resolve({'customer': request.GET.get('customer', ''), 'account': account_id})
     except ValueError as exc:
@@ -388,12 +390,14 @@ def account_detail(request, account_id):
     else:
         series = list(in_month.values('day').annotate(u=Sum('unblended'), a=Sum('amortized')).order_by('day'))
     assignments = AccountAssignment.objects.filter(account__account_id=account_id).select_related('customer').order_by('-start')
+    assignments=list(assignments)
+    if account and assignments:account_metadata(account,assignments[0])
     budgets = Budget.objects.filter(scope=Budget.ACCOUNT, account_id=account_id, active=True)
     return render(request, 'billing/account_detail.html', {
         'account': account, 'account_id': account_id, 'scope': scope, 'today': today, 'month': month, 'month_end': month_end, 'currency': currency,
         'granularity': granularity, 'services': services, 'series': series, 'assignments': assignments, 'budgets': budgets,
         'total': in_month.aggregate(v=Sum('unblended'))['v'], 'estimated': in_month.filter(estimated=True).exists(),
-        'form': AssignmentForm(initial={'customer': scope.customer.pk if scope.customer else None, 'environment': account.environment if account else ''}),
+        'form': AssignmentForm(initial={'customer': scope.customer.pk if scope.customer else None, 'environment': account.environment if account else '', 'alias':getattr(account,'alias',''), 'owner':getattr(account,'owner','')}),
         'active_page': 'customers', 'can_edit': scoping.can_edit(request.user), 'customer': scope.customer,
         'currencies': sorted(set(Cost.objects.filter(account_id=account_id).values_list('currency', flat=True).distinct()) | {currency})})
 
@@ -407,13 +411,19 @@ def account_assign(request, account_id):
         messages.error(request, 'Choose a customer and a valid start date.')
         return redirect('account_detail', account_id=account_id)
     customer = form.cleaned_data['customer']
+    from django.conf import settings
+    from .models import CustomerApproval
+    metadata={key:form.cleaned_data.get(key,'') for key in ('alias','owner','environment')}
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        approval=CustomerApproval.objects.filter(customer=customer,status='approved').first()
+        if any(value and (not approval or key not in approval.metadata) for key,value in metadata.items()):
+            return HttpResponseBadRequest('Record approval for the selected optional account metadata before saving it.')
     try:
-        ensure_assignment(account, customer, start=form.cleaned_data['start'], note=form.cleaned_data['note'], actor=request.user.username)
+        assignment=ensure_assignment(account, customer, start=form.cleaned_data['start'], note=form.cleaned_data['note'], actor=request.user.username)
     except (ValueError, ValidationError) as exc:
         messages.error(request, str(exc) if isinstance(exc, ValueError) else '; '.join(exc.messages))
         return redirect('account_detail', account_id=account_id)
-    if form.cleaned_data.get('environment') is not None:
-        AwsAccount.objects.filter(pk=account.pk).update(environment=form.cleaned_data['environment'])
+    assignment.metadata={**assignment.metadata,**metadata};assignment.save(update_fields=['metadata'])
     restamp(account, form.cleaned_data['start'])
     audit(request, 'Account assigned', customer=customer, details={'account_id': account_id, 'start': form.cleaned_data['start'].isoformat()})
     messages.success(request, f'Account {account_id} assigned to {customer.name} from {form.cleaned_data["start"]}. Earlier spend keeps its previous owner.')
@@ -423,14 +433,33 @@ def account_assign(request, account_id):
     return redirect('account_detail', account_id=account_id)
 
 
+def account_metadata(account,assignment):
+    data=assignment.metadata or {}
+    account.alias=data.get('alias','');account.owner=data.get('owner','')
+    account.name=account.alias or data.get('name') or (account.name if assignment.end is None else 'Historical account')
+    account.environment=data.get('environment',account.environment if assignment.end is None else '')
+
+
 def restamp(account, start):
-    """Re-stamp stored facts from ``start`` onward with the assignment active on each day."""
-    assignments = list(account.assignments.all())
-    for row in Cost.objects.filter(account_id=account.account_id, day__gte=start).only('id', 'day', 'customer_id'):
-        match = next((a for a in assignments if a.covers(row.day)), None)
-        owner = match.customer_id if match else None
-        if owner != row.customer_id:
-            Cost.objects.filter(pk=row.pk).update(customer_id=owner)
+    """Validate both sides, then change only effective ownership, never cost values."""
+    from django.conf import settings
+    from django.db import connection
+    from .access import current_access,context
+    from django.core.exceptions import PermissionDenied
+    if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED:
+        with connection.cursor() as cursor:cursor.execute('SELECT billing_restamp_ownership(%s,%s)',[account.account_id,start])
+        return
+    access=current_access.get()
+    with context(None):
+        assignments=list(account.assignments.all())
+        rows=list(Cost.objects.filter(account_id=account.account_id,day__gte=start).only('id','day','customer_id'))
+        changes=[(row,next((a.customer_id for a in assignments if a.covers(row.day)),None)) for row in rows]
+        if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
+            ids={cid for row,new in changes for cid in (row.customer_id,new)}
+            if any(cid not in access.editable or (access.accounts.get(cid) and account.account_id not in access.accounts[cid]) for cid in ids):
+                raise PermissionDenied('Ownership transfer requires authorized old and new customer scopes.')
+        for row,owner in changes:
+            if owner!=row.customer_id:Cost.objects.filter(pk=row.pk).update(customer_id=owner)
 
 
 @never_cache

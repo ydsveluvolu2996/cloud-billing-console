@@ -6,7 +6,7 @@ BEGIN
  IF current_setting('billing.external_enabled',true) IS DISTINCT FROM 'true' THEN RAISE EXCEPTION 'Portal disabled'; END IF;
  SELECT id INTO uid FROM auth_user WHERE id::text=current_setting('billing.user_id',true) AND is_active;
  SELECT i.* INTO invitation FROM billing_portalinvitation i JOIN auth_user u ON u.id=uid
- WHERE i.token_hash=digest AND lower(i.email)=lower(u.email) AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() FOR UPDATE OF i;
+ WHERE i.token_hash=digest AND i.target_user_id=uid AND lower(i.email)=lower(u.email) AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() FOR UPDATE OF i;
  IF invitation.id IS NULL THEN RAISE EXCEPTION 'Invalid invitation'; END IF;
  cid:=invitation.customer_id;
  IF NOT EXISTS(SELECT 1 FROM billing_customer c JOIN billing_customerapproval a ON a.customer_id=c.id

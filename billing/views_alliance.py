@@ -1,3 +1,4 @@
+from django.core.paginator import Paginator
 import csv
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -158,11 +159,13 @@ def detail(request, customer_id, account_id):
                 saved.save()
                 for service,name in form.service_fields:
                     AllianceServiceNote.objects.update_or_create(record=saved,service=service,defaults={'commentary':form.cleaned_data[name]})
+                from .models import AllianceRevision
+                AllianceRevision.objects.create(record=saved,revision=saved.revision,actor=request.user.username,snapshot=saved.snapshot,fields={name:str(form.cleaned_data.get(name,'')) for name in form.Meta.fields},service_notes={service:form.cleaned_data[name] for service,name in form.service_fields})
                 audit(request,'Alliance figures recorded' if action=='capture' else 'Alliance tracking updated',customer=customer,
                       account=account_id,month=str(month),currency=currency,revision=saved.revision,apn_marked=saved.apn_marked,
                       snapshot=saved.snapshot,fields={name:str(form.cleaned_data.get(name,'')) for name in form.Meta.fields},
                       service_notes={service:form.cleaned_data[name] for service,name in form.service_fields})
-                messages.success(request,'AWS figures recorded. Handoff history is preserved in the audit log.' if action=='capture' else 'Alliance tracking saved.')
+                messages.success(request,'AWS figures recorded. Handoff history is preserved in the customer revision history.' if action=='capture' else 'Alliance tracking saved.')
                 return redirect(reverse('alliance_detail',args=[customer.pk,account_id])+'?'+urlencode({'month':month.strftime('%Y-%m'),'currency':currency,'threshold':str(threshold)}))
     notes = dict(record.service_notes.values_list('service','commentary')) if record.pk else {}
     for row,(_,name) in zip(data['services'],form.service_fields):
@@ -179,6 +182,7 @@ def detail(request, customer_id, account_id):
     return render(request,'billing/alliance_detail.html',{**data,'record':record,'form':form,'metadata_fields':[form[name] for name in form.Meta.fields],
         'customer':customer,'account':account,'month':month,'prior_month':month-alliance.relativedelta(months=1),'currency':currency,'threshold':threshold,
         'query':urlencode({'month':month.strftime('%Y-%m'),'currency':currency,'threshold':str(threshold)}),
+        'history_page':Paginator(record.revisions.all() if record.pk else [],20).get_page(request.GET.get('history_page')),
         'recorded_spend':Decimal(record.snapshot['current']) if record.snapshot.get('current') is not None else None,
         'recorded_percent':Decimal(record.snapshot['percent']) if record.snapshot.get('percent') is not None else None,
         'captured_at':parse_datetime(record.snapshot['captured_at']) if record.snapshot.get('captured_at') else None,

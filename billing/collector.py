@@ -212,7 +212,7 @@ def ensure_assignment(account, customer, start=None, note='', actor=''):
                 raise ValueError('The transfer date must be after the current assignment started.')
             open_assignment.end = start
             open_assignment.save(update_fields=['end'])
-        assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor)
+        assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor,metadata={'name':account.name})
         assignment.full_clean()
         assignment.save()
         return assignment
@@ -269,7 +269,10 @@ def owner_lookup(source, records):
             account = AwsAccount.objects.create(account_id=account_id, source=source, payer_account_id=source.account_id,
                                                 state='UNKNOWN', discovery='billing', first_seen=now, last_seen=now)
             accounts[account_id] = account
-        if not source.shared and not account.assignments.filter(end__isnull=True).exists():
+        from .models import CustomerApproval
+        approval=CustomerApproval.objects.filter(customer=source.customer,status='approved').first() if settings.REQUIRE_CONNECTION_APPROVAL else None
+        approved=not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
+        if approved and not source.shared and not account.assignments.filter(end__isnull=True).exists():
             ensure_assignment(account, source.customer, note='Auto-assigned from billing data')
         assignments = list(account.assignments.all())
         for record in (r for r in records if r['account_id'] == account_id):
@@ -290,14 +293,27 @@ def check_overlap(source, records, first, last):
             raise OverlappingBillingScope(account_id, f'connection {other_account}')
 
 
-def publish_month(source, month, records, days, estimated, meter, started, attempts=1):
+def publish_month(source, month, records, days, estimated, meter, started, attempts=1, job=None):
     """Atomically replace one month for one source. Old rows survive any failure."""
     first, last = month, month + relativedelta(months=1)
     period, _ = CollectionPeriod.objects.get_or_create(source=source, month=month)
     with transaction.atomic():
+        if isinstance(getattr(job,'pk',None),int):
+            from .models import Job
+            if not Job.objects.select_for_update().filter(pk=job.pk,status=Job.LEASED,worker=job.worker,attempts=job.attempts,lease_expires__gt=timezone.now()).exists():
+                raise ConnectionChanged()
         locked = BillingSource.objects.select_for_update().get(pk=source.pk)
         if not locked.enabled or locked.connection_version != source.connection_version or locked.role_arn != source.role_arn:
             raise ConnectionChanged()
+        from django.db import connection
+        if connection.vendor=='postgresql':
+            import hashlib
+            # Different source leases still must not publish the same account/day.
+            # Stable ordered account locks cover first-ever imports as well.
+            with connection.cursor() as cursor:
+                for account in sorted({r['account_id'] for r in records}):
+                    key=int.from_bytes(hashlib.sha256(account.encode()).digest()[:8],'big',signed=True)
+                    cursor.execute('SELECT pg_advisory_xact_lock(%s)',[key])
         check_overlap(source, records, first, last)
         owners = owner_lookup(source, records)
         rows = [Cost(source=source, customer_id=owners[(r['account_id'], r['day'])], **r) for r in records]
@@ -337,7 +353,7 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
             before = meter.requests
             try:
                 records, days, estimated = fetch_month(ce, meter, first, last)
-                total_rows += publish_month(source, month, records, days, estimated, meter, started)
+                total_rows += publish_month(source, month, records, days, estimated, meter, started,job=job)
             except Exception as exc:
                 CollectionPeriod.objects.filter(pk=period.pk).update(status='failed' if period.status != 'complete' else 'partial',
                     attempts=period.attempts + 1, last_attempt=timezone.now(), last_error=safe_error(exc),

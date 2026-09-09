@@ -150,6 +150,7 @@ CREATE TRIGGER guard_customer_approval BEFORE INSERT OR UPDATE ON billing_custom
 DROP TRIGGER IF EXISTS guard_role_approval ON billing_roleapproval;
 CREATE TRIGGER guard_role_approval BEFORE INSERT OR UPDATE ON billing_roleapproval FOR EACH ROW EXECUTE FUNCTION billing_guard_approval();
 """
+sql += Path('deploy/ownership.sql').read_text()
 sql += Path('deploy/readiness.sql').read_text()
 sql += Path('deploy/portal-admission.sql').read_text()
 Path('deploy/database-roles.sql').write_text(sql)

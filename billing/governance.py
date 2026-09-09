@@ -1,7 +1,7 @@
 """Customer consent, rollout and offboarding operations with explicit evidence."""
 from datetime import timedelta
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Q
 from django.utils import timezone
 from .models import (CustomerApproval, RolloutReadiness, ReconciliationRun, CustomerMembership,
                      OffboardingRecord, BillingSource, Job, ExplorerQuery, RoleApproval, UserSecurity)
@@ -10,15 +10,41 @@ from .authentication import security_event
 CHECKS = ('iam_approval','discovery_ownership','user_access','reconciliation','security_prerequisites','rollback_readiness')
 
 
+def customer_sources(customer):
+    from django.db.models import Q
+    from .models import AccountAssignment
+    ids=AccountAssignment.objects.filter(customer=customer,end__isnull=True).values_list('account__source_id',flat=True)
+    return BillingSource.objects.filter(Q(customer=customer)|Q(pk__in=ids))
+
+
+def configuration(customer):
+    return {str(s.pk):[s.connection_version,s.ownership_version] for s in customer_sources(customer)}
+
+
+def connection_ready(source):
+    from django.db import connection
+    from django.conf import settings
+    if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT billing_connection_ready(%s)',[source.pk])
+            return cursor.fetchone()[0]
+    from .iam import approval_ready
+    from .access import context
+    # Only called for sources already selected through the customer's scoped manager;
+    # return an approval boolean, never the shared custodian's documents.
+    with context(None):
+        return source.enabled and approval_ready(source) and source.trust_checks.get('connection_version')==source.connection_version and all(source.trust_checks.get(k)==v for k,v in {'correct_external_id':'passed','missing_external_id':'denied','wrong_external_id':'denied','account_identity':'passed','exact_collector_principal':'passed'}.items())
+
+
 def readiness(customer):
     approval = CustomerApproval.objects.filter(customer=customer).first()
     record = RolloutReadiness.objects.filter(customer=customer).first()
-    sources = list(BillingSource.objects.filter(customer=customer))
+    sources = list(customer_sources(customer))
     checks = {
-        'iam_approval': bool(approval and approval.status == 'approved' and approval.evidence and sources and all(s.verified_at and s.trust_checks.get('exact_collector_principal') == 'passed' for s in sources)),
+        'iam_approval': bool(approval and approval.status == 'approved' and approval.evidence and sources and all(s.verified_at and connection_ready(s) for s in sources)),
         'discovery_ownership': bool(sources and all(s.discovered_at for s in sources) and customer.assignments.filter(end__isnull=True).exists()),
-        'user_access': CustomerMembership.objects.filter(customer=customer, active=True).exists(),
-        'reconciliation': ReconciliationRun.objects.filter(customer=customer, synthetic=False, result__passed=True).exists(),
+        'user_access': CustomerMembership.objects.filter(customer=customer, active=True).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now())).exists(),
+        'reconciliation': ReconciliationRun.objects.filter(customer=customer, source__isnull=True, synthetic=False, result__passed=True,result__configuration=configuration(customer)).exists(),
         'security_prerequisites': bool(record and record.security_evidence and record.independent_review),
         'rollback_readiness': bool(record and record.checklist.get('rollback_readiness') and record.checklist.get('rollback_evidence')),
     }
