@@ -576,3 +576,55 @@ class BulkImport(models.Model):
     @property
     def valid(self):
         return not self.errors
+
+
+class AllianceRecord(models.Model):
+    """Internal handoff history for one customer's linked account and billing month."""
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='alliance_records')
+    account = models.ForeignKey(AwsAccount, on_delete=models.PROTECT, related_name='alliance_records')
+    month = models.DateField()
+    currency = models.CharField(max_length=3, default='USD', validators=[CURRENCY])
+    account_name = models.CharField('Account name', max_length=200, blank=True)
+    legal_entity = models.CharField('Customer legal entity (as in Partner Central)', max_length=250, blank=True)
+    ace_opportunity_id = models.CharField('ACE opportunity ID', max_length=100, blank=True)
+    bill_pulled_on = models.DateField(null=True, blank=True)
+    prepared_by = models.CharField(max_length=150, blank=True)
+    shared_with = models.CharField('Shared with (Alliance)', max_length=200, blank=True)
+    date_shared = models.DateField(null=True, blank=True)
+    apn_marked = models.BooleanField('APN marked', default=False)
+    apn_marked_date = models.DateField(null=True, blank=True)
+    notes = models.TextField('Notes / blocker', blank=True, max_length=4000)
+    blocked = models.BooleanField('Has an unresolved blocker', default=False)
+    summary_note = models.TextField('Summary note for alliance team', blank=True, max_length=4000)
+    snapshot = models.JSONField(default=dict, blank=True, editable=False)
+    revision = models.PositiveIntegerField(default=0)
+    updated_by = models.CharField(max_length=150, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-month', 'customer__name', 'account__account_id']
+        constraints = [models.UniqueConstraint(fields=['customer', 'account', 'month', 'currency'], name='unique_alliance_account_month')]
+
+    @property
+    def status(self):
+        if self.apn_marked:
+            return 'Closed'
+        if self.blocked:
+            return 'Blocked'
+        if self.date_shared:
+            return 'Awaiting APN marking'
+        if self.snapshot:
+            return 'Ready to share'
+        if self.bill_pulled_on or self.prepared_by:
+            return 'Preparing'
+        return 'Not started'
+
+
+class AllianceServiceNote(models.Model):
+    record = models.ForeignKey(AllianceRecord, on_delete=models.CASCADE, related_name='service_notes')
+    service = models.CharField(max_length=200)
+    commentary = models.TextField(max_length=2000, blank=True)
+
+    class Meta:
+        ordering = ['service']
+        constraints = [models.UniqueConstraint(fields=['record', 'service'], name='unique_alliance_service_note')]

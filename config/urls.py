@@ -4,6 +4,7 @@ from django.urls import path
 from django.contrib.auth import views as auth_views
 from billing import web
 from billing import views_management as manage
+from billing import views_alliance as alliance
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -15,6 +16,8 @@ urlpatterns = [
     path('reports/<int:pk>/', web.open_report, name='open_report'),
     path('portfolio/', web.portfolio, name='portfolio'),
     path('overview/', manage.overview, name='overview'),
+    path('alliance/', alliance.overview, name='alliance'),
+    path('alliance/<uuid:customer_id>/<str:account_id>/', alliance.detail, name='alliance_detail'),
     path('export/report/', web.export_report, name='export_report'),
     path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
