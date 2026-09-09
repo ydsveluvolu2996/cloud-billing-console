@@ -28,6 +28,7 @@ services:
         max-size: 10m
         max-file: '3'
     networks:
+    - database_ingress
     - database
     ports:
     - ${PRIVATE_DB_IP:?Set private interface address}:5432:5432
@@ -122,6 +123,10 @@ secrets:
     file: ./.deployment/secrets/admin_db_password
 networks:
   frontend: {}
+  # Docker cannot publish a port from a container attached only to an internal
+  # network. This database-only bridge serves the private-interface binding above;
+  # AWS ingress rules and PostgreSQL TLS/SCRAM restrict it to the collector.
+  database_ingress: {}
   database:
     internal: true
     ipam:

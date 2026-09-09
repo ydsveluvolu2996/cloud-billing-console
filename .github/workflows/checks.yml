@@ -78,15 +78,19 @@ jobs:
       - name: Test the actual application and PostgreSQL images
         run: |
           docker network create billing-checks
+          docker network create --internal billing-checks-private
           docker run -d --name billing-checks-db --network billing-checks \
+            -p 127.0.0.1:55432:5432 \
             -e POSTGRES_USER=billing -e POSTGRES_DB=billing \
             -e POSTGRES_PASSWORD=ci-isolated-database-only cloud-billing-postgres:${{ github.sha }}
+          docker network connect billing-checks-private billing-checks-db
           for attempt in $(seq 1 30); do
             if docker exec billing-checks-db pg_isready -U billing -d billing; then break; fi
             sleep 2
           done
           docker exec billing-checks-db pg_isready -U billing -d billing
-          docker run --rm --network billing-checks \
+          python -c "import socket; socket.create_connection(('127.0.0.1', 55432), timeout=5).close()"
+          docker run --rm --network billing-checks-private \
             -e DEBUG=true -e AWS_EC2_METADATA_DISABLED=true \
             -e DB_HOST=billing-checks-db -e DB_PASSWORD=ci-isolated-database-only \
             --entrypoint python cloud-billing-app:${{ github.sha }} manage.py test billing.tests --noinput
