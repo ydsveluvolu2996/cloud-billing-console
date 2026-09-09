@@ -4,6 +4,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # (docker compose service), which schedules the 00:00/06:00/12:00/18:00 UTC slots itself.
 # The line below is a safety net: if the worker container is down it still schedules and
 # runs due jobs once per hour under the shared process lock (idempotent job keys).
-15 * * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py sync_costs --queued >> /var/log/cloud-billing-sync.log 2>&1
+15 * * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py sync_costs >> /var/log/cloud-billing-sync.log 2>&1
 30 2 * * * root /opt/cloud-billing/deploy/backup.sh >> /var/log/cloud-billing-backup.log 2>&1
 15 3 * * * root cd /opt/cloud-billing && docker compose exec -T app python manage.py clearsessions >> /var/log/cloud-billing-sync.log 2>&1

@@ -1,11 +1,39 @@
 """Durable job queue: coalescing, leases, crash recovery, backoff, fairness and scheduling."""
 from datetime import datetime, timedelta, timezone as dt_tz
 from unittest.mock import patch
-from django.test import TestCase
+from unittest import skipUnless
+from concurrent.futures import ThreadPoolExecutor
+from django.db import close_old_connections, connection, transaction
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from billing import jobs, scheduler
 from billing.models import BillingSource, Job
 from .helpers import make_customer
+
+
+@skipUnless(connection.vendor == 'postgresql', 'Requires PostgreSQL row locking')
+class ConcurrentLeaseTests(TransactionTestCase):
+    def test_claim_skips_source_locked_by_another_transaction(self):
+        _, source = make_customer('Locked', '111111111111')
+        _, other = make_customer('Available', '222222222222')
+        blocked, _ = jobs.enqueue('collect', key='locked', source=source)
+        available, _ = jobs.enqueue('collect', key='available', source=other)
+
+        def claim():
+            close_old_connections()
+            try:
+                job = jobs.lease('concurrent-worker')
+                return job.pk if job else None
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction.atomic():
+                BillingSource.objects.select_for_update().get(pk=source.pk)
+                self.assertEqual(pool.submit(claim).result(timeout=10), available.pk)
+        blocked.refresh_from_db()
+        self.assertEqual(blocked.status, Job.QUEUED)
+        self.assertEqual(jobs.lease('next-worker').pk, blocked.pk)
 
 
 class JobQueueTests(TestCase):

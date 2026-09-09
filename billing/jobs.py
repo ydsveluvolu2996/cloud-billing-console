@@ -14,7 +14,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import IntegrityError, close_old_connections, connection, transaction
 from django.utils import timezone
-from .models import Job
+from .models import BillingSource, Job
 
 logger = logging.getLogger(__name__)
 HANDLERS = {}
@@ -79,7 +79,19 @@ def lease(worker, now=None, kinds=None):
             candidates = candidates.select_for_update(skip_locked=True)
         else:
             candidates = candidates.select_for_update()
-        job = candidates.first()
+        job = None
+        for candidate in candidates.iterator(chunk_size=1):
+            if candidate.source_id:
+                sources = BillingSource.objects.filter(pk=candidate.source_id)
+                sources = sources.select_for_update(skip_locked=True) if connection.vendor == 'postgresql' else sources.select_for_update()
+                # Different job rows can share a source. Serialize the claim on the
+                # source row, then recheck after any other claimant committed.
+                if sources.first() is None:
+                    continue
+                if Job.objects.filter(source_id=candidate.source_id, status=Job.LEASED).exists():
+                    continue
+            job = candidate
+            break
         if not job:
             return None
         job.status = Job.LEASED

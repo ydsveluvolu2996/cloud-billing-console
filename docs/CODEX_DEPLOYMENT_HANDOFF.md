@@ -12,7 +12,7 @@ customer IAM roles, the published S3 template or AWS billing settings.
 | Branch | `claude/billing-console-dashboard-expansion-pbohul` (contains both the dashboard expansion and the UI redesign) |
 | Pull request | Draft PR targeting `main`; URL in the delivery message and in the GitHub PR list for the branch |
 | Release commit | The head of the branch at merge time. The exact SHA is reported in the delivery message; verify with `git rev-parse origin/claude/billing-console-dashboard-expansion-pbohul` before building. |
-| Base | `main` at `6a399a6` (Use UTC timestamps for hourly reports and explain granular data opt-in) |
+| Base | `main` at `6118383` (canonical dashboard hostname and HTTPS alias redirects) |
 
 ## Implemented features
 
@@ -137,7 +137,7 @@ and iterates customers; on the current data volume it completes in seconds. Take
 ## Worker / scheduler cutover
 
 1. The cron file `deploy/cloud-billing.cron` replaces the two `sync_costs` lines with one hourly
-   safety net (`sync_costs --queued` at minute 15). Install it over `/etc/cron.d/cloud-billing`.
+   safety net (`sync_costs` at minute 15). Install it over `/etc/cron.d/cloud-billing`.
 2. `compose.yaml` adds the `worker` service (`python manage.py run_worker`, same image,
    `stop_grace_period: 120s`). Start it with `docker compose up -d`.
 3. On first start the worker schedules the current slot for every verified, enabled connection
@@ -196,7 +196,7 @@ by WhiteNoise with hashed names; no CDN or external font is required.
 ## Rollback and data recovery
 
 1. `docker compose stop app worker`.
-2. Check out the previous release commit (`6a399a6`) and `docker compose build`.
+2. Check out the previous release commit (`6118383`) and `docker compose build`.
 3. Preferred: restore the pre-upgrade dump (`pg_restore --clean --if-exists`, see README) so the
    schema matches the old release exactly. Alternative when no data changed since the upgrade:
    `docker compose run --rm app python manage.py migrate billing 0002` on the *new* image, then
@@ -223,3 +223,9 @@ by WhiteNoise with hashed names; no CDN or external font is required.
    are evaluated (worker `evaluate_budgets` job) and no "Within budget" appears with stale data.
 7. Accounts → Unassigned queue is empty for non-shared payers.
 8. Explorer: saved reports open and refresh; CSV exports include the "Scope" footer row.
+
+## Codex deployment review fixes
+
+* Preserve `DASHBOARD_ALIASES` in Compose, Caddy and the environment example so the old HTTPS address continues redirecting to the canonical hostname.
+* Lock the connection row when leasing work, and recheck active leases after locking. Separate job rows for one connection cannot be claimed concurrently; PostgreSQL concurrency regression coverage is included.
+* The hourly safety net now schedules due work before draining it, so it also works when the supervised worker is down.
