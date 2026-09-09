@@ -70,15 +70,49 @@ jobs:
       - run: bandit -r billing config scripts -ll -ii -f json -o /tmp/security-evidence/bandit.json
       - run: python scripts/install_scanners.py
       - run: .deployment/tools/gitleaks git --redact --report-format json --report-path /tmp/security-evidence/secrets.json
-      - run: docker build --pull -f deploy/Dockerfile -t billing-review:${{ github.sha }} .
+      - name: Build deployable runtime images
+        run: |
+          docker build --pull -f deploy/Dockerfile -t cloud-billing-app:${{ github.sha }} .
+          docker build --pull -f deploy/Dockerfile.postgres -t cloud-billing-postgres:${{ github.sha }} .
+          docker build --pull -f deploy/Dockerfile.caddy -t cloud-billing-caddy:${{ github.sha }} .
+      - name: Test the actual application and PostgreSQL images
+        run: |
+          docker network create billing-checks
+          docker run -d --name billing-checks-db --network billing-checks \
+            -e POSTGRES_USER=billing -e POSTGRES_DB=billing \
+            -e POSTGRES_PASSWORD=ci-isolated-database-only cloud-billing-postgres:${{ github.sha }}
+          for attempt in $(seq 1 30); do
+            if docker exec billing-checks-db pg_isready -U billing -d billing; then break; fi
+            sleep 2
+          done
+          docker exec billing-checks-db pg_isready -U billing -d billing
+          docker run --rm --network billing-checks \
+            -e DEBUG=true -e AWS_EC2_METADATA_DISABLED=true \
+            -e DB_HOST=billing-checks-db -e DB_PASSWORD=ci-isolated-database-only \
+            --entrypoint python cloud-billing-app:${{ github.sha }} manage.py test billing.tests --noinput
+          docker run --rm -e DASHBOARD_HOST=billing.example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            cloud-billing-caddy:${{ github.sha }} caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Scan images; critical/high findings fail
         run: |
           scan_status=0
-          for image in billing-review:${{ github.sha }} postgres:17-alpine caddy:2-alpine; do
+          for image in cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }}; do
             report=$(printf '%s' "$image" | tr ':/' '_')
             .deployment/tools/trivy image --timeout 10m --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output "/tmp/security-evidence/$report.json" "$image" || scan_status=1
           done
           exit "$scan_status"
+      - name: Package the tested and scanned images
+        run: |
+          mkdir -p /tmp/billing-release
+          docker image inspect cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }} > /tmp/billing-release/images.json
+          docker save cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }} | gzip -1 > /tmp/billing-release/images.tar.gz
+          cd /tmp/billing-release
+          sha256sum images.tar.gz > images.tar.gz.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: billing-release-${{ github.sha }}
+          path: /tmp/billing-release
+          retention-days: 3
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

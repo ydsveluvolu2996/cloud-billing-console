@@ -1,0 +1,14 @@
+FROM golang:1.27.1-alpine3.24 AS builder
+WORKDIR /build
+
+# Rebuild the stable Caddy release with the patched Go toolchain and modules.
+# The release scanner still checks the resulting binary and all runtime packages.
+RUN go mod init billing-caddy-runtime \
+    && go get github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4 \
+    && go get golang.org/x/crypto@v0.55.0 golang.org/x/net@v0.56.0 \
+        golang.org/x/text@v0.39.0 google.golang.org/grpc@v1.83.2 \
+    && CGO_ENABLED=0 go build -trimpath -o /out/caddy github.com/caddyserver/caddy/v2/cmd/caddy
+
+FROM caddy:2.11.4-alpine
+RUN apk upgrade --no-cache
+COPY --from=builder /out/caddy /usr/bin/caddy

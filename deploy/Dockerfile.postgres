@@ -1,0 +1,4 @@
+FROM postgres:17-alpine
+
+# Keep PostgreSQL 17 and its existing volume format; refresh patched OS packages.
+RUN apk upgrade --no-cache

@@ -1,7 +1,10 @@
 name: cloud-billing
 services:
   db:
-    image: postgres:17-alpine
+    image: ${BILLING_POSTGRES_IMAGE:-cloud-billing-postgres:local}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: billing
@@ -37,6 +40,7 @@ services:
     - -c
     - hba_file=/etc/postgresql/pg_hba.conf
   app:
+    image: ${BILLING_APP_IMAGE:-cloud-billing-app:local}
     build:
       context: .
       dockerfile: deploy/Dockerfile
@@ -85,7 +89,10 @@ services:
     - frontend
     - database
   proxy:
-    image: caddy:2-alpine
+    image: ${BILLING_CADDY_IMAGE:-cloud-billing-caddy:local}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.caddy
     restart: unless-stopped
     ports:
     - 80:80
