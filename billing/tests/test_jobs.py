@@ -25,7 +25,7 @@ class ConcurrentLeaseTests(TransactionTestCase):
                 job = jobs.lease('concurrent-worker')
                 return job.pk if job else None
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             with transaction.atomic():
