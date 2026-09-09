@@ -1,4 +1,10 @@
+FROM golang:1.27.1-alpine3.24 AS gosu-builder
+# Rebuild the upstream 1.19 helper with the patched Go standard library.
+RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath github.com/tianon/gosu@6456aaa0f3c854d199d0f037f068eb97515b7513
+
 FROM postgres:17-alpine
 
 # Keep PostgreSQL 17 and its existing volume format; refresh patched OS packages.
 RUN apk upgrade --no-cache
+COPY --from=gosu-builder /out/gosu /usr/local/bin/gosu
+RUN gosu --version && gosu nobody true
