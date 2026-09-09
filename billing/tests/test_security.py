@@ -70,6 +70,16 @@ class IsolationTests(TestCase):
         UserSecurity.objects.update_or_create(user=other,defaults={'portfolio_access':True})
         with context(for_user(other)):
             self.assertEqual(Customer.objects.count(),2)
+    def test_legacy_admin_cannot_bypass_controlled_identity_workflows(self):
+        self.assertEqual(self.client.get('/admin/').status_code,403)
+        administrator=User.objects.create_superuser('portfolio-admin',password='test-only-unique-password')
+        UserSecurity.objects.update_or_create(user=administrator,defaults={'portfolio_access':True})
+        self.client.force_login(administrator)
+        session=self.client.session;session['mfa_at']=timezone.now().timestamp();session.save()
+        self.assertRedirects(self.client.get('/admin/'),'/operations/',fetch_redirect_response=False)
+        for path in ['/admin/auth/user/','/admin/otp_totp/totpdevice/']:
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code,404)
     def test_scope_changing_create_and_update_denied(self):
         with context(for_user(self.user,write=True)):
             with self.assertRaises(PermissionDenied):

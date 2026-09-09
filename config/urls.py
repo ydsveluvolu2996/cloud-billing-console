@@ -1,7 +1,7 @@
 """URL configuration for the Cloud Billing Console."""
-from django.contrib import admin
 from django.urls import path, include
 from django.contrib.auth import views as auth_views
+from django.views.generic import RedirectView
 from billing import web, authentication, views_security
 from billing import views_management as manage
 from billing import views_alliance as alliance
@@ -15,7 +15,9 @@ urlpatterns = [
     path('operations/', views_security.operations, name='operations'),
     path('mfa/', authentication.mfa, name='mfa'),
     path('sessions/revoke/', authentication.revoke_own_sessions, name='revoke_sessions'),
-    path('admin/', admin.site.urls),
+    # Account provisioning and MFA recovery use evidence-backed administration;
+    # do not expose third-party model administration outside those workflows.
+    path('admin/', RedirectView.as_view(pattern_name='operations', permanent=False)),
     path('', web.dashboard, name='dashboard'),
     path('explorer/metadata/', web.explorer_metadata, name='explorer_metadata'),
     path('explorer/status/', web.explorer_status, name='explorer_status'),
