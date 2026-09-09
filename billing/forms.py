@@ -53,7 +53,7 @@ class ConnectionForm(forms.ModelForm):
     class Meta:
         model = BillingSource
         fields = ['role_arn']
-        labels = {'role_arn': 'Role ARN from CloudFormation Outputs'}
+        labels = {'role_arn': 'Customer-approved IAM role ARN'}
         widgets = {'role_arn': forms.TextInput(attrs={'placeholder': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})}
 
 
@@ -65,7 +65,7 @@ class BudgetForm(forms.ModelForm):
 
     class Meta:
         model = Budget
-        fields = ['name', 'scope', 'source', 'account_id', 'project', 'currency', 'metric', 'actual_threshold', 'forecast_threshold']
+        fields = ['owner', 'name', 'scope', 'source', 'account_id', 'project', 'currency', 'metric', 'actual_threshold', 'forecast_threshold']
 
     def __init__(self, *args, customer=None, **kwargs):
         super().__init__(*args, **kwargs)

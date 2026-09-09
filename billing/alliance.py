@@ -217,3 +217,24 @@ def snapshot(detail, threshold):
                          for item in result['services'] if any(item[k] is not None and Decimal(item[k]) != 0 for k in ('current','prior'))]
     result['fingerprint'] = sha256(json.dumps(basis,sort_keys=True).encode()).hexdigest()
     return result
+
+
+def customer_rollups(rows, threshold=Decimal('15')):
+    """Sum monetary cells only; recompute ratios and count non-additive statuses."""
+    groups={}
+    for row in rows:
+        groups.setdefault(row['customer'].pk,{'customer':row['customer'],'rows':[]})['rows'].append(row)
+    result=[]
+    for group in groups.values():
+        accounts=group['rows'];cells=[]
+        for index in range(len(accounts[0]['cells'])):
+            parts=[r['cells'][index] for r in accounts]
+            value=available_sum([c['value'] for c in parts])
+            cells.append({'value':value,'complete':all(c['state'] in ('Complete','Not owned') for c in parts),'estimated':any(c['estimated'] for c in parts)})
+        current=available_sum([r['current']['value'] for r in accounts]);prior=available_sum([r['prior']['value'] for r in accounts])
+        statuses={}
+        for row in accounts:statuses[row['status']]=statuses.get(row['status'],0)+1
+        total=available_sum([c['value'] for c in cells]);loaded=sum(c['value'] is not None for c in cells)
+        result.append({**group,'cells':cells,'count':len(accounts),'current':current,'prior':prior,'fy_total':total,
+                       'average':total/loaded if loaded else None,'statuses':statuses,**variance(current,prior,threshold)})
+    return result

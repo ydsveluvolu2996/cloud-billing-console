@@ -203,7 +203,10 @@ def account_tree(customer, month, today, currency):
 def customer_offboard(request, pk):
     customer = get_object_or_404(Customer, pk=pk)
     if customer.active:
-        onboarding.offboard_customer(customer, actor=request.user.username)
+        try:
+            onboarding.offboard_customer(customer, actor=request.user.username)
+        except ValueError as exc:
+            return HttpResponseBadRequest(str(exc))
         messages.success(request, 'Customer offboarded. Collection stopped; historical records are retained.')
     else:
         onboarding.reactivate_customer(customer, actor=request.user.username)
@@ -257,6 +260,8 @@ def source_detail(request, pk):
             source.onboarding_step = max(source.onboarding_step, 4)
             source.last_error = ''
             source.save()
+            from .iam import request_allowlist
+            request_allowlist(source, request.user.username)
             scheduler.request_verification(source, actor=request.user.username)
             audit(request, 'Role ARN saved; verification queued', customer=source.customer, source=source)
             messages.success(request, 'Role ARN saved. Verification runs in the background within a minute; reload to see the result.')
@@ -278,23 +283,26 @@ def source_template(request, pk):
         body = onboarding.source_template(source)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
-    response = HttpResponse(body, content_type='application/x-yaml')
-    response['Content-Disposition'] = f'attachment; filename="customer-billing-role-{source.account_id}.yaml"'
+    response = HttpResponse(body, content_type='application/json')
+    response['Content-Disposition'] = f'attachment; filename="customer-billing-role-{source.account_id}.json"'
     return response
 
 
 @staff_required
 def source_setup(request, pk):
     source = get_object_or_404(BillingSource.objects.select_related('customer'), pk=pk)
+    import json
+    from .iam import policy_bundle
     try:
-        url = onboarding.quick_create_url(source)
-    except Exception:
-        url = ''
-    if not url:
-        messages.error(request, 'Setup link is unavailable. Download the template and upload it in AWS CloudFormation.')
-        return redirect('source_detail', pk=pk)
-    BillingSource.objects.filter(pk=pk, onboarding_step__lt=3).update(onboarding_step=3)
-    return render(request, 'billing/setup_link.html', {'source': source, 'customer': source.customer, 'setup_url': url, 'active_page': 'customers'})
+        bundle = policy_bundle(source)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+    return render(request, 'billing/setup_link.html', {
+        'source': source, 'customer': source.customer, 'active_page': 'customers',
+        'trust_json': json.dumps(bundle['trust_policy'], indent=2),
+        'minimum_json': json.dumps(bundle['minimum_permission_policy'], indent=2),
+        'optional_json': {k: json.dumps(v, indent=2) for k, v in bundle['optional_permission_policies'].items()},
+    })
 
 
 @require_POST
@@ -320,7 +328,7 @@ def source_action(request, pk, action):
         messages.success(request, 'Refresh queued.')
     elif action == 'rotate':
         onboarding.rotate_external_id(source, actor=actor)
-        messages.success(request, 'New external ID issued. Share the new setup link so the customer updates their stack, then verify again.')
+        messages.success(request, 'New external ID issued. Share the new trust JSON so the customer updates their role, then verify again.')
     elif action == 'pause':
         onboarding.set_paused(source, True, actor=actor)
         messages.success(request, 'Collection paused for this connection.')
@@ -398,7 +406,7 @@ def account_assign(request, account_id):
     audit(request, 'Account assigned', customer=customer, details={'account_id': account_id, 'start': form.cleaned_data['start'].isoformat()})
     messages.success(request, f'Account {account_id} assigned to {customer.name} from {form.cleaned_data["start"]}. Earlier spend keeps its previous owner.')
     nxt = request.POST.get('next', '')
-    if nxt.startswith('/'):
+    if nxt.startswith('/') and not nxt.startswith('//'):
         return redirect(nxt)
     return redirect('account_detail', account_id=account_id)
 
@@ -616,7 +624,7 @@ def alert_ack(request, pk):
     alert = get_object_or_404(Alert.objects.select_related('budget'), pk=pk)
     Alert.objects.filter(pk=pk).update(acknowledged_by=request.user.username, acknowledged_at=timezone.now())
     audit(request, 'Budget alert acknowledged', customer=alert.budget.customer, details={'alert': pk})
-    return redirect(request.POST.get('next') if request.POST.get('next', '').startswith('/') else 'budget_list')
+    return redirect(request.POST.get('next') if (request.POST.get('next', '').startswith('/') and not request.POST.get('next', '').startswith('//')) else 'budget_list')
 
 
 @never_cache
@@ -645,7 +653,10 @@ def bulk_view(request, kind, parser, applier, template, title, columns, done_url
     form = CsvUploadForm()
     preview = None
     if request.method == 'POST' and request.POST.get('action') == 'apply':
-        preview = get_object_or_404(BulkImport, pk=request.POST.get('import_id'), kind=kind, applied_at__isnull=True)
+        preview = get_object_or_404(BulkImport.objects.select_for_update(), pk=request.POST.get('import_id'), kind=kind, uploaded_by=request.user.username)
+        if preview.applied_at:
+            messages.success(request, 'This preview was already applied; no records were duplicated.')
+            return redirect(done_url)
         if preview.errors:
             messages.error(request, 'Fix the validation problems and upload the file again.')
         else:

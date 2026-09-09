@@ -51,7 +51,8 @@ def safe_error(exc):
         }
         return f'{code}: {explanations.get(code, "AWS could not complete the request. Check account access and retry.")}'
     if isinstance(exc, ValueError):
-        return f'Validation failed: {str(exc)[:300]}'
+        from .redaction import redact
+        return f'Validation failed: {redact(str(exc))[:300]}'
     return 'Collection failed. Previous data has been retained; check application logs.'
 
 
@@ -74,6 +75,12 @@ def verify_source(source, session=None, meter=None):
     """Assume the role, confirm the account identity and probe optional capabilities."""
     meter = meter or Meter()
     session = session or Session(source)
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        import boto3
+        from .aws import AWS_CONFIG
+        from .iam import verify_trust
+        checks = verify_trust(source, session, boto3.client('sts', region_name=settings.AWS_REGION, config=AWS_CONFIG), meter)
+        BillingSource.objects.filter(pk=source.pk).update(trust_checks=checks)
     sts = session.client('sts')
     identity = meter.call(sts, 'get_caller_identity')
     if identity.get('Account') != source.account_id:
@@ -85,7 +92,7 @@ def verify_source(source, session=None, meter=None):
         meter.call(ce, 'get_cost_and_usage', TimePeriod={'Start': (today - timedelta(days=2)).isoformat(), 'End': today.isoformat()},
                    Granularity='DAILY', Metrics=['UnblendedCost'])
         capabilities['cost_explorer'] = True
-    if source.kind == BillingSource.PAYER:
+    if source.kind == BillingSource.PAYER and ('organizations' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL):
         try:
             org = meter.call(session.client('organizations'), 'describe_organization')['Organization']
             capabilities['organizations'] = True
@@ -95,14 +102,37 @@ def verify_source(source, session=None, meter=None):
                 capabilities['organizations'] = False
         except ClientError as exc:
             capabilities['organizations_error'] = exc.response.get('Error', {}).get('Code', 'AccessDenied')
-    try:
-        meter.call(session.client('budgets'), 'describe_budgets', AccountId=source.account_id, MaxResults=1)
-        capabilities['budgets'] = True
-    except ClientError as exc:
-        capabilities['budgets_error'] = exc.response.get('Error', {}).get('Code', 'AccessDenied')
+    if 'budgets' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL:
+        try:
+            meter.call(session.client('budgets'), 'describe_budgets', AccountId=source.account_id, MaxResults=1)
+            capabilities['budgets'] = True
+        except ClientError as exc:
+            capabilities['budgets_error'] = exc.response.get('Error', {}).get('Code', 'Unavailable')
+    for name in ('organizations', 'budgets', 'tags', 'cost_categories', 'forecasts', 'resources'):
+        capabilities.setdefault(name, False)
+        if name not in source.approved_capabilities:
+            capabilities.setdefault(name + '_error', 'Not approved; core billing remains available.')
+    if settings.REQUIRE_CONNECTION_APPROVAL and source.collects_costs:
+        window = {'Start': (today - timedelta(days=2)).isoformat(), 'End': today.isoformat()}
+        probes = {
+            'tags': ('get_tags', {'TimePeriod': window}),
+            'cost_categories': ('get_cost_categories', {'TimePeriod': window}),
+            'forecasts': ('get_cost_forecast', {'TimePeriod': {'Start': today.isoformat(), 'End': (today + timedelta(days=2)).isoformat()}, 'Metric':'UNBLENDED_COST', 'Granularity':'DAILY'}),
+            'resources': ('get_cost_and_usage_with_resources', {'TimePeriod': window, 'Granularity':'DAILY', 'Metrics':['UnblendedCost'], 'Filter': {'Dimensions': {'Key':'SERVICE', 'Values':['Amazon Elastic Compute Cloud - Compute']}}, 'GroupBy':[{'Type':'DIMENSION','Key':'RESOURCE_ID'}]}),
+        }
+        for name, (operation, args) in probes.items():
+            if name in source.approved_capabilities:
+                try:
+                    meter.call(ce, operation, **args)
+                    capabilities[name] = True
+                except ClientError as exc:
+                    capabilities[name + '_error'] = safe_error(exc)
     now = timezone.now()
-    BillingSource.objects.filter(pk=source.pk).update(capabilities=capabilities, verified_at=now, last_error='',
-                                                      onboarding_step=max(source.onboarding_step, 5))
+    with transaction.atomic():
+        current = BillingSource.objects.select_for_update().get(pk=source.pk)
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
+            raise ConnectionChanged()
+        BillingSource.objects.filter(pk=source.pk).update(capabilities=capabilities, verified_at=now, last_error='', onboarding_step=max(source.onboarding_step, 5))
     source.capabilities, source.verified_at, source.last_error = capabilities, now, ''
     return capabilities
 
@@ -135,13 +165,16 @@ def discover_accounts(source, session=None, meter=None, today=None):
         mode = 'billing_only'
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version:
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
             raise ConnectionChanged()
         for account_id, info in found.items():
             account, created = AwsAccount.objects.get_or_create(account_id=account_id, defaults={
                 'source': source, 'payer_account_id': source.account_id, 'first_seen': now})
             account.name = info.get('name') or account.name
-            account.email = info.get('email') or account.email
+            from .models import CustomerApproval
+            approval = CustomerApproval.objects.filter(customer=source.customer).first() if settings.REQUIRE_CONNECTION_APPROVAL else None
+            if not settings.REQUIRE_CONNECTION_APPROVAL or (approval and 'email' in approval.metadata):
+                account.email = info.get('email') or account.email
             account.state = info.get('state', account.state)
             account.joined_at = info.get('joined_at') or account.joined_at
             account.discovery = info.get('discovery', account.discovery)
@@ -149,7 +182,8 @@ def discover_accounts(source, session=None, meter=None, today=None):
             account.source = source
             account.last_seen, account.missing_since = now, None
             account.save()
-            if not source.shared and not account.assignments.filter(end__isnull=True).exists():
+            approved_account = not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
+            if approved_account and not source.shared and not account.assignments.filter(end__isnull=True).exists():
                 ensure_assignment(account, source.customer, note='Auto-assigned from non-shared connection')
         AwsAccount.objects.filter(source=source, missing_since__isnull=True).exclude(account_id__in=list(found)).update(missing_since=now)
         BillingSource.objects.filter(pk=source.pk).update(discovered_at=now, discovery_mode=mode, onboarding_step=max(source.onboarding_step, 6), last_error='')
@@ -159,19 +193,21 @@ def discover_accounts(source, session=None, meter=None, today=None):
 
 def ensure_assignment(account, customer, start=None, note='', actor=''):
     """Assign an account without overwriting history. A later start ends the prior assignment."""
-    start = start or EPOCH
-    open_assignment = account.assignments.filter(end__isnull=True).order_by('-start').first()
-    if open_assignment and open_assignment.customer_id == customer.pk:
-        return open_assignment
-    if open_assignment:
-        if start <= open_assignment.start:
-            raise ValueError('The transfer date must be after the current assignment started.')
-        open_assignment.end = start
-        open_assignment.save(update_fields=['end'])
-    assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor)
-    assignment.full_clean()
-    assignment.save()
-    return assignment
+    with transaction.atomic():
+        account = AwsAccount.objects.select_for_update().get(pk=account.pk)
+        start = start or EPOCH
+        open_assignment = account.assignments.filter(end__isnull=True).order_by('-start').first()
+        if open_assignment and open_assignment.customer_id == customer.pk:
+            return open_assignment
+        if open_assignment:
+            if start <= open_assignment.start:
+                raise ValueError('The transfer date must be after the current assignment started.')
+            open_assignment.end = start
+            open_assignment.save(update_fields=['end'])
+        assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor)
+        assignment.full_clean()
+        assignment.save()
+        return assignment
 
 
 # --- cost collection ----------------------------------------------------------------------
@@ -355,7 +391,7 @@ def import_budgets(source, session=None, meter=None):
             imported_at=now))
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version:
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
             raise ConnectionChanged()
         ImportedBudget.objects.filter(source=source).delete()
         ImportedBudget.objects.bulk_create(snapshots)

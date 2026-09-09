@@ -14,3 +14,6 @@ staticfiles/
 # Local architecture graph and extraction cache
 graphify-out/
 .graphify_cache/
+.venv
+playwright-report/
+test-results/

@@ -47,6 +47,14 @@ def backoff(attempts):
 
 def enqueue(kind, key=None, source=None, payload=None, priority=5, run_after=None, max_attempts=None, once=False):
     """Create or coalesce a job. Returns (job, created)."""
+    from .access import current_access
+    access = current_access.get()
+    payload = dict(payload or {})
+    if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION:
+        if source is None or (not access.portfolio and source.customer_id not in access.customers):
+            from django.core.exceptions import PermissionDenied
+            raise PermissionDenied('A customer-scoped approved connection is required.')
+        payload['actor_id'] = access.user_id
     key = key or f'{kind}:{source.pk if source else "global"}'
     run_after = run_after or timezone.now()
     with transaction.atomic():

@@ -9,7 +9,7 @@ from billing.models import AccountAssignment, AwsAccount, BillingSource, Cost, C
 ROLE = 'arn:aws:iam::{}:role/BillingConsole/CostReadOnly'
 TEST_STORAGES = {'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
                  'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'}}
-web_settings = override_settings(SECURE_SSL_REDIRECT=False, STORAGES=TEST_STORAGES, ALLOWED_HOSTS=['testserver', 'localhost'])
+web_settings = override_settings(MFA_REQUIRED=False, ENFORCE_CUSTOMER_AUTHORIZATION=False, REQUIRE_CONNECTION_APPROVAL=False, SECURE_SSL_REDIRECT=False, STORAGES=TEST_STORAGES, ALLOWED_HOSTS=['testserver', 'localhost'])
 
 
 def make_customer(name, account_id, kind='payer', connected=True, shared=False, currency='USD', accounts=()):

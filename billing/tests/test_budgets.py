@@ -1,3 +1,4 @@
+from django.test import override_settings
 """Budget evaluation: history, overrides, forecasts, data status, alerts, portfolio totals, CSV."""
 from datetime import date, timedelta
 from decimal import Decimal
@@ -10,6 +11,7 @@ from billing.query_cache import run_query
 from .helpers import cost, make_customer
 
 
+@override_settings(REQUIRE_CONNECTION_APPROVAL=False)
 class BudgetTests(TestCase):
     def setUp(self):
         self.customer, self.source = make_customer('Budget Co', '111111111111', accounts=('222222222222',))

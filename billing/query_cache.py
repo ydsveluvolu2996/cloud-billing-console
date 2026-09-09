@@ -25,7 +25,8 @@ def digest(value):
 
 
 def connection_key(source):
-    return digest([source.role_arn, str(source.external_id), source.connection_version])
+    current=BillingSource.objects.only('ownership_version').get(pk=source.pk)
+    return digest([source.role_arn,str(source.external_id),source.connection_version,current.ownership_version])
 
 
 def scoped_parameters(parameters, account_filter):
@@ -44,12 +45,21 @@ def scoped_parameters(parameters, account_filter):
 def get_query(source, operation, parameters, customer=None, account_filter=None):
     if operation not in ALLOWED:
         raise ValueError('Unsupported billing operation.')
-    if operation in ('get_cost_and_usage', 'get_cost_and_usage_with_resources', 'get_cost_forecast'):
-        parameters = scoped_parameters(parameters, account_filter)
+    parameters = scoped_parameters(parameters, account_filter)
+    from django.conf import settings
+    from .access import current_access
+    access = current_access.get()
+    if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
+        if customer is None or customer.pk not in access.customers or account_filter is None:
+            raise ValueError('An explicit authorized customer and account scope is required.')
+    optional = {'get_tags':'tags','get_cost_categories':'cost_categories','get_cost_forecast':'forecasts','get_cost_and_usage_with_resources':'resources'}
+    capability = optional.get(operation)
+    if settings.REQUIRE_CONNECTION_APPROVAL and capability and not source.capabilities.get(capability):
+        raise ValueError(f'{capability}: this optional capability is not approved and available. Core daily/monthly billing is available.')
     identity = connection_key(source)
-    fingerprint = digest([identity, operation, parameters, str(customer.pk) if customer else ''])
+    fingerprint = digest([identity, operation, parameters, str(customer.pk) if customer else '', access.user_id if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else None])
     query, _ = ExplorerQuery.objects.get_or_create(source=source, fingerprint=fingerprint,
-        defaults={'operation': operation, 'parameters': parameters, 'connection_fingerprint': identity, 'customer': customer})
+        defaults={'operation': operation, 'parameters': parameters, 'connection_fingerprint': identity, 'customer': customer, 'requested_by_id':access.user_id if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION else None})
     now = timezone.now()
     # New requests queue once. Failed requests have a cooldown to avoid costly reload loops.
     due = not query.last_attempt or query.last_attempt < now - timedelta(hours=6)
@@ -68,11 +78,11 @@ def request_error(exc):
         if code in ('ValidationException', 'ValidationError'):
             # AWS validation describes unsupported combinations and opt-in prerequisites;
             # never contains credentials and is escaped by Django/JSON textContent.
-            return f'{code}: ' + (message or 'Review the selected report parameters.')[:440]
+            return f'{code}: Review the selected report parameters and capability prerequisites.'
         if code in ('AccessDenied', 'AccessDeniedException') and 'opt-in' in message.lower():
             return 'AWS granular data is not enabled. Enable the requested hourly/resource data in the payer account Cost Explorer settings to use this report.'
         if code in ('AccessDenied', 'AccessDeniedException'):
-            return 'Billing permission missing. Update the customer CloudFormation role using the current dashboard template.'
+            return 'Billing permission missing. Review the missing capability with the customer administrator using the manual IAM guide.'
         if code == 'DataUnavailableException':
             return 'AWS has no data for this request yet. Forecasts need sufficient history; resource/hourly data needs AWS Cost Explorer opt-in.'
     return safe_error(exc)
@@ -106,6 +116,13 @@ def fetch_pages(client, operation, parameters, meter=None):
 
 def run_query(query, client=None, meter=None):
     source = query.source
+    if query.requested_by_id:
+        from .access import for_user
+        user=query.requested_by
+        access=for_user(user)
+        if not user.is_active or (not access.portfolio and query.customer_id not in access.customers):
+            ExplorerQuery.objects.filter(pk=query.pk).update(requested=False,error='Requesting user access was revoked.')
+            return
     if source is None or not source.enabled or not source.role_arn or connection_key(source) != query.connection_fingerprint:
         ExplorerQuery.objects.filter(pk=query.pk).update(requested=False, error='Connection changed or collection is paused.')
         return

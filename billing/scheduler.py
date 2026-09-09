@@ -71,6 +71,8 @@ def schedule_due(now=None):
     created += made
     _, made = jobs.enqueue('allocate_projects', key=f'allocate_projects:{stamp}', priority=9, once=True, run_after=slot + timedelta(minutes=40))
     created += made
+    _, made = jobs.enqueue('monitor_operations',key=f'monitor:{stamp}',priority=9,once=True,run_after=slot+timedelta(minutes=50))
+    created += made
     return created
 
 
@@ -111,6 +113,23 @@ def load_source(job):
         raise jobs.PermanentJobError('The connection is paused or the customer is offboarded.')
     if not source.role_arn:
         raise jobs.PermanentJobError('The connection has no role ARN yet.')
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        from .iam import assert_role_allowed
+        try:
+            assert_role_allowed(source)
+        except ValueError as exc:
+            raise jobs.PermanentJobError(str(exc)) from None
+        if job.kind != 'verify' and (not source.verified_at or source.trust_checks.get('connection_version') != source.connection_version):
+            raise jobs.PermanentJobError('Current connection trust validation is required.')
+    actor_id = job.payload.get('actor_id')
+    if actor_id:
+        from django.contrib.auth.models import User
+        from .access import for_user
+        actor = User.objects.filter(pk=actor_id,is_active=True).first()
+        access = for_user(actor) if actor else None
+        permitted = access.customers if access and job.kind=='explorer_refresh' else access.editable if access else ()
+        if access is None or (not access.portfolio and source.customer_id not in permitted):
+            raise jobs.PermanentJobError('The requesting operator no longer has customer access.')
     return source
 
 
@@ -178,3 +197,9 @@ def handle_evaluate_budgets(job):
 def handle_allocate_projects(job):
     from .allocation import allocate_all
     return {'projects': allocate_all()}
+
+
+@jobs.handler('monitor_operations')
+def handle_monitor(job):
+    from .monitoring import scan,deliver
+    return {'new_alerts':scan(),'delivered':deliver()}

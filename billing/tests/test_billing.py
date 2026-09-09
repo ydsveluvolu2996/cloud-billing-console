@@ -146,22 +146,19 @@ class BillingTests(TestCase):
         self.assertEqual(client.get(f'/customers/{self.customer.pk}/').status_code, 200)
         self.assertEqual(client.get('/portfolio/?customer=not-a-uuid').status_code, 400)
 
-    def test_template_and_quick_create_link_use_connection_identity(self):
-        with override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector', ARTIFACT_BUCKET='bucket', AWS_REGION='ap-south-1'):
-            template = yaml.safe_load(source_template(self.source))
-            self.assertEqual(template['Parameters']['ExternalId']['Default'], self.source.external_id)
-            self.assertEqual(template['Parameters']['ExpectedAccountId']['Default'], '123456789012')
-            self.assertEqual(template['Parameters']['EnableOrganizationsDiscovery']['Default'], 'true')
-            statements = template['Resources']['CostReadRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
-            self.assertEqual(len(statements[0]['Action']), 6)
-            self.assertIn('organizations:ListAccounts', statements[1]['Fn::If'][1]['Action'])
-            self.assertEqual(statements[2]['Fn::If'][1]['Action'], ['budgets:ViewBudget'])
-            with patch('billing.onboarding.boto3.client') as s3:
-                s3.return_value.generate_presigned_url.return_value = 'https://s3.ap-south-1.amazonaws.com/bucket/templates/customer-role.yaml?sig'
-                url = quick_create_url(self.source)
-            self.assertIn('param_ExternalId=' + self.source.external_id, url)
-            self.assertIn('param_EnableOrganizationsDiscovery=true', url)
-            self.assertTrue(url.startswith('https://ap-south-1.console.aws.amazon.com/cloudformation/'))
+    def test_manual_policy_bundle_uses_connection_identity(self):
+        with override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector'):
+            import json
+            bundle = json.loads(source_template(self.source))
+            self.assertEqual(bundle['external_id'], self.source.external_id)
+            trust = bundle['trust_policy']['Statement'][0]
+            self.assertEqual(trust['Principal'], {'AWS':'arn:aws:iam::111111111111:role/Collector'})
+            self.assertEqual(trust['Condition']['StringEquals']['sts:ExternalId'], self.source.external_id)
+            self.assertEqual(bundle['minimum_permission_policy']['Statement'][1]['Resource'], self.source.role_arn)
+            self.assertIn('organizations',bundle['optional_permission_policies'])
+            with patch('billing.onboarding.boto3.client') as client:
+                self.assertEqual(quick_create_url(self.source), f'/sources/{self.source.pk}/setup/')
+                client.assert_not_called()
 
     def test_verification_checks_identity_and_capabilities(self):
         sts = Mock(); sts.get_caller_identity.return_value = {'Account': '123456789012'}

@@ -51,6 +51,11 @@ def overview(request):
     elif status == 'missing':
         rows = [r for r in rows if r['missing_ids']]
     tab = 'handoff' if request.GET.get('tab') == 'handoff' else 'summary'
+    groups=alliance.customer_rollups(rows,threshold)
+    if request.GET.get('export') == 'customer_csv':
+        return csv_response('alliance-customers-'+month.strftime('%Y-%m'),
+            ['Customer','Accounts','Currency',*[m.strftime('%Y-%m') for m in data['months']],'FY Total','Average per available month','Reporting month','Prior month','MoM variance','MoM percent','Status counts'],
+            [[g['customer'].name,g['count'],currency,*[c['value'] for c in g['cells']],g['fy_total'],g['average'],g['current'],g['prior'],g['delta'],g['percent'],'; '.join(f'{k}: {v}' for k,v in g['statuses'].items())] for g in groups])
     if request.GET.get('export') == 'csv':
         if tab == 'summary':
             headers = ['S.No','Account','Customer Legal Entity (as in Partner Central)','AWS Account ID','ACE Opportunity ID',
@@ -74,7 +79,7 @@ def overview(request):
         params['customer'] = str(customer.pk)
     params.update({'q':search,'status':status})
     query = urlencode(params)
-    context = {**data,'page':paginate(request,rows),'row_count':len(rows),'month':month,'currency':currency,'threshold':threshold,
+    context = {**data,'customer_groups':groups,'page':paginate(request,rows),'row_count':len(rows),'month':month,'currency':currency,'threshold':threshold,
                'filter_customer':customer,'customers':Customer.objects.all(),'currencies':sorted(set(Cost.objects.values_list('currency',flat=True))|{'USD',currency}),
                'q':search,'filter_status':status,'tab':tab,'query':query,'detail_query':urlencode({k:params[k] for k in ('month','currency','threshold')}),
                'query_string':query+'&tab='+tab,'active_page':'alliance','can_edit':can_edit(request.user),

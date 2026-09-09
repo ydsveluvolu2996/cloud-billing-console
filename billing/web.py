@@ -24,7 +24,9 @@ def staff_required(view):
     def wrapped(request, *args, **kwargs):
         if not scoping.can_edit(request.user):
             return HttpResponseForbidden('An operator or administrator must perform this action.')
-        return view(request, *args, **kwargs)
+        from .access import editing
+        with editing():
+            return view(request, *args, **kwargs)
     return wrapped
 
 
@@ -260,12 +262,12 @@ def explorer_status(request):
 def save_report(request):
     try:
         p = contract.normalize(request.POST)
-        scoping.resolve(p)
+        resolved_scope = scoping.resolve(p)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
-    saved = SavedReport.objects.create(name=p['report_name'], parameters=p, created_by=request.user.username)
+    saved = SavedReport.objects.create(name=p['report_name'], parameters=p, customer=resolved_scope.customer, created_by=request.user.username)
     audit(request, 'Explorer report saved')
-    messages.success(request, 'Report saved to the shared library.')
+    messages.success(request, 'Report saved to your authorized customer library.')
     return redirect('/reports/' + str(saved.pk) + '/')
 
 

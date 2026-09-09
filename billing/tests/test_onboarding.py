@@ -29,14 +29,14 @@ class OnboardingTests(TestCase):
         self.assertEqual(source.state, 'Awaiting customer setup')
         self.assertEqual(len(source.external_id), 40)
         page = self.client.get(f'/sources/{source.pk}/')
-        self.assertContains(page, 'Generate setup link')
+        self.assertContains(page, 'View and copy IAM policies')
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})
         self.assertEqual(response.status_code, 302)
         job = Job.objects.get(kind='verify', source=source)
         self.assertEqual(job.status, Job.QUEUED)
         # wrong account in the ARN is rejected by validation
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::999999999999:role/BillingConsole/CostReadOnly'})
-        self.assertContains(response, 'onboarding template')
+        self.assertContains(response, 'registered 12-digit AWS account')
 
     def test_verification_job_records_states_then_discovery_then_import(self):
         customer, source = make_customer('Flow', '123456789012', connected=False)

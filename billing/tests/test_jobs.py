@@ -1,3 +1,4 @@
+from django.test import override_settings
 """Durable job queue: coalescing, leases, crash recovery, backoff, fairness and scheduling."""
 from datetime import datetime, timedelta, timezone as dt_tz
 from unittest.mock import patch
@@ -36,6 +37,7 @@ class ConcurrentLeaseTests(TransactionTestCase):
         self.assertEqual(jobs.lease('next-worker').pk, blocked.pk)
 
 
+@override_settings(REQUIRE_CONNECTION_APPROVAL=False)
 class JobQueueTests(TestCase):
     def setUp(self):
         self.customer, self.source = make_customer('One', '111111111111')

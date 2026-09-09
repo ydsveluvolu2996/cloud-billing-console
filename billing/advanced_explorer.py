@@ -105,9 +105,14 @@ def build_report(params):
         prior_periods=periods_between(date.fromisoformat(p['compare_start']),date.fromisoformat(p['compare_end']),p['granularity']) if p['report_mode']=='compare' else []
         for source,customer,accounts in units:
             if start<=actual_end:
-                op,req=contract.aws_request(p,end=str(actual_end));actual.append(get_query(source,op,req,customer=customer,account_filter=accounts))
+                for left,right,owned in scoping.ownership_windows(source,customer,start,actual_end+timedelta(days=1)):
+                    selected_accounts = sorted(set(owned)&set(accounts)) if owned is not None and accounts is not None else owned if owned is not None else accounts
+                    op,req=contract.aws_request(p,start=str(left),end=str(right-timedelta(days=1)))
+                    actual.append(get_query(source,op,req,customer=customer,account_filter=selected_accounts))
             if p['report_mode']=='compare':
-                op,req=contract.aws_request(p,start=p['compare_start'],end=p['compare_end']);previous.append(get_query(source,op,req,customer=customer,account_filter=accounts))
+                for left,right,owned in scoping.ownership_windows(source,customer,date.fromisoformat(p['compare_start']),date.fromisoformat(p['compare_end'])+timedelta(days=1)):
+                    op,req=contract.aws_request(p,start=str(left),end=str(right-timedelta(days=1)))
+                    previous.append(get_query(source,op,req,customer=customer,account_filter=owned))
             if end>today and p['forecast']=='1':
                 req={'TimePeriod':{'Start':str(today),'End':str(end+timedelta(days=1))},'Granularity':p['granularity'].upper(),'Metric':contract.FORECAST_METRICS[p['metric']],'PredictionIntervalLevel':80}
                 exp=contract.expression(p)

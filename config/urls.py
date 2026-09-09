@@ -1,12 +1,19 @@
 """URL configuration for the Cloud Billing Console."""
 from django.contrib import admin
-from django.urls import path
+from django.urls import path, include
 from django.contrib.auth import views as auth_views
-from billing import web
+from billing import web, authentication, views_security
 from billing import views_management as manage
 from billing import views_alliance as alliance
 
 urlpatterns = [
+    path('customers/<uuid:pk>/invite/', views_security.portal_invite, name='portal_invite'),
+    path('portal/accept/', views_security.portal_accept, name='portal_accept'),
+    path('customers/<uuid:pk>/governance/', views_security.customer_governance, name='customer_governance'),
+    path('sources/<uuid:pk>/inventory/', views_security.manual_inventory, name='manual_inventory'),
+    path('operations/', views_security.operations, name='operations'),
+    path('mfa/', authentication.mfa, name='mfa'),
+    path('sessions/revoke/', authentication.revoke_own_sessions, name='revoke_sessions'),
     path('admin/', admin.site.urls),
     path('', web.dashboard, name='dashboard'),
     path('explorer/metadata/', web.explorer_metadata, name='explorer_metadata'),
@@ -54,3 +61,7 @@ urlpatterns = [
     path('activity/', web.activity, name='activity'),
     path('health/', web.health, name='health'),
 ]
+
+from django.conf import settings
+if settings.OIDC_ENABLED:
+    urlpatterns += [path('oidc/', include('mozilla_django_oidc.urls'))]
