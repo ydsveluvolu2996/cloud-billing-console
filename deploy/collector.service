@@ -1,0 +1,34 @@
+[Unit]
+Description=Cloud Billing isolated collector
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=billing-collector
+Group=billing-collector
+WorkingDirectory=/opt/cloud-billing
+Environment=RUNTIME_ROLE=collector
+Environment=DATABASE_RLS_ENABLED=true
+EnvironmentFile=/etc/cloud-billing/collector.env
+ExecStartPre=/opt/cloud-billing/.venv/bin/python manage.py verify_runtime
+ExecStart=/opt/cloud-billing/.venv/bin/python manage.py run_worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RuntimeDirectory=cloud-billing
+RuntimeDirectoryMode=0700
+LogsDirectory=cloud-billing
+LogsDirectoryMode=0700
+StandardOutput=append:/var/log/cloud-billing/collector.log
+StandardError=append:/var/log/cloud-billing/collector.log
+UMask=0077
+[Install]
+WantedBy=multi-user.target

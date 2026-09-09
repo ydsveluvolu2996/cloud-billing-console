@@ -5,68 +5,115 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: billing
-      POSTGRES_USER: billing
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+      POSTGRES_USER: billing_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/admin_db_password
     volumes:
-      - pgdata:/var/lib/postgresql/data
+    - pgdata:/var/lib/postgresql/data
+    - ./deploy/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    - ./.deployment/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    - ./.deployment/postgres-tls:/run/postgres-tls:ro
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U billing -d billing']
+      test:
+      - CMD-SHELL
+      - pg_isready -U billing_admin -d billing
       interval: 10s
       timeout: 5s
       retries: 10
-    logging: &logging
+    logging: &id001
       driver: json-file
       options:
         max-size: 10m
         max-file: '3'
+    networks:
+    - database
+    ports:
+    - ${PRIVATE_DB_IP:?Set private interface address}:5432:5432
+    secrets:
+    - admin_db_password
+    command:
+    - postgres
+    - -c
+    - config_file=/etc/postgresql/postgresql.conf
+    - -c
+    - hba_file=/etc/postgresql/pg_hba.conf
   app:
     build:
       context: .
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
+      DEBUG: 'false'
+      RUNTIME_ROLE: web
       DB_HOST: db
       DB_NAME: billing
-      DB_USER: billing
+      DB_USER: billing_web
+      DB_SSLMODE: verify-full
+      DB_SSLROOTCERT: /run/postgres-tls/ca.crt
+      DB_PASSWORD_FILE: /run/secrets/web_db_password
+      SECRET_KEY_FILE: /run/secrets/django_secret
+      AWS_EC2_METADATA_DISABLED: 'true'
+      DATABASE_RLS_ENABLED: 'true'
+      ALLOWED_HOSTS: ${DASHBOARD_HOST},localhost,127.0.0.1
+      CSRF_TRUSTED_ORIGINS: https://${DASHBOARD_HOST}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      COLLECTOR_ROLE_ARN: ${COLLECTOR_ROLE_ARN:-}
+      EXTERNAL_PORTAL_ENABLED: 'false'
     depends_on:
       db:
         condition: service_healthy
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
-    logging: *logging
-  worker:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-    command: ["python", "manage.py", "run_worker"]
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DB_HOST: db
-      DB_NAME: billing
-      DB_USER: billing
-    depends_on:
-      db:
-        condition: service_healthy
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
-    stop_grace_period: 120s
-    logging: *logging
+    security_opt:
+    - no-new-privileges:true
+    cap_drop:
+    - ALL
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-ap-south-1}
+        awslogs-group: ${AUDIT_LOG_GROUP:?Set retained CloudWatch log group}
+        awslogs-stream: web
+        awslogs-create-group: 'false'
+    secrets:
+    - web_db_password
+    - django_secret
+    volumes:
+    - ./.deployment/postgres-tls/ca.crt:/run/postgres-tls/ca.crt:ro
+    command: ["sh", "-c", "python manage.py verify_runtime && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 120 --access-logfile - --error-logfile -"]
+    read_only: true
+    tmpfs:
+    - /tmp
+    networks:
+    - frontend
+    - database
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports: ['80:80', '443:443']
+    ports:
+    - 80:80
+    - 443:443
     environment:
       DASHBOARD_HOST: ${DASHBOARD_HOST:?Set DASHBOARD_HOST}
       DASHBOARD_ALIASES: ${DASHBOARD_ALIASES:-}
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddydata:/data
-      - caddyconfig:/config
-    depends_on: [app]
-    logging: *logging
+    - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+    - caddydata:/data
+    - caddyconfig:/config
+    depends_on:
+    - app
+    logging: *id001
+    networks:
+    - frontend
 volumes:
-  pgdata:
-  caddydata:
-  caddyconfig:
+  pgdata: null
+  caddydata: null
+  caddyconfig: null
+secrets:
+  web_db_password:
+    file: ./.deployment/secrets/web_db_password
+  django_secret:
+    file: ./.deployment/secrets/django_secret
+  admin_db_password:
+    file: ./.deployment/secrets/admin_db_password
+networks:
+  frontend: {}
+  database:
+    internal: true

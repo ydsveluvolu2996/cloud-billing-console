@@ -1,5 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Cloud Billing Console - one EC2 instance, private S3 backups, and a scoped collector role.
+Description: 'Cloud Billing Console: EC2 web and isolated EC2 collector, private TLS
+  database access, exact customer role allowlisting. Review change set before applying.'
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -10,7 +11,41 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.small
-    AllowedValues: [t3.small, t3.medium]
+    AllowedValues:
+    - t3.small
+    - t3.medium
+  PilotCidr:
+    Type: String
+    Description: Approved pilot IP or VPN egress CIDR; no default. Do not use 0.0.0.0/0.
+  CollectorSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet with outbound HTTPS to AWS APIs; no inbound access.
+  CollectorInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+    - t3.small
+    - t3.medium
+  ApprovedCustomerRoleArns:
+    Type: CommaDelimitedList
+    Default: ''
+    AllowedPattern: ^$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/\-]+$
+    Description: Exact approved customer role ARNs. Empty disables all customer AssumeRole.
+  WebSecretArn:
+    Type: String
+    Description: Exact Secrets Manager ARN for web-only configuration
+  CollectorSecretArn:
+    Type: String
+    Description: Exact Secrets Manager ARN for collector-only configuration
+  AuditRetentionDays:
+    Type: Number
+    Default: 365
+    AllowedValues:
+    - 90
+    - 180
+    - 365
+    - 731
+    - 1096
 Resources:
   Artifacts:
     Type: AWS::S3::Bucket
@@ -19,8 +54,8 @@ Resources:
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -28,24 +63,24 @@ Resources:
         RestrictPublicBuckets: true
       OwnershipControls:
         Rules:
-          - ObjectOwnership: BucketOwnerEnforced
+        - ObjectOwnership: BucketOwnerEnforced
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
         Rules:
-          - Id: BackupRetention
-            Prefix: backups/
-            Status: Enabled
-            ExpirationInDays: 35
-            NoncurrentVersionExpiration:
-              NoncurrentDays: 7
-          - Id: IncompleteUploads
-            Status: Enabled
-            AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 1
+        - Id: BackupRetention
+          Prefix: backups/
+          Status: Enabled
+          ExpirationInDays: 35
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 7
+        - Id: IncompleteUploads
+          Status: Enabled
+          AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 1
       Tags:
-        - Key: Project
-          Value: cloud-billing-console
+      - Key: Project
+        Value: cloud-billing-console
   ArtifactPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -54,16 +89,18 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: RequireTLS
-            Effect: Deny
-            Principal: '*'
-            Action: s3:*
-            Resource:
-              - Fn::GetAtt: [Artifacts, Arn]
-              - Fn::Sub: '${Artifacts.Arn}/*'
-            Condition:
-              Bool:
-                aws:SecureTransport: false
+        - Sid: RequireTLS
+          Effect: Deny
+          Principal: '*'
+          Action: s3:*
+          Resource:
+          - Fn::GetAtt:
+            - Artifacts
+            - Arn
+          - Fn::Sub: ${Artifacts.Arn}/*
+          Condition:
+            Bool:
+              aws:SecureTransport: false
   CollectorRole:
     Type: AWS::IAM::Role
     Properties:
@@ -71,59 +108,71 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: CustomerBillingConnections
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
+      - PolicyName: ExactCustomerRoleAllowlist
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Fn::If:
+            - HasApprovedRoles
+            - - Effect: Allow
                 Action: sts:AssumeRole
-                Resource: arn:aws:iam::*:role/BillingConsole/CostReadOnly
-        - PolicyName: OwnArtifactsAndBackups
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [s3:GetObject]
                 Resource:
-                  - Fn::Sub: '${Artifacts.Arn}/releases/*'
-                  - Fn::Sub: '${Artifacts.Arn}/templates/*'
-                  - Fn::Sub: '${Artifacts.Arn}/backups/*'
-              - Effect: Allow
-                Action: [s3:PutObject]
-                Resource:
-                  - Fn::Sub: '${Artifacts.Arn}/backups/*'
+                  Ref: ApprovedCustomerRoleArns
+            - - Effect: Deny
+                Action: sts:AssumeRole
+                Resource: '*'
+      - PolicyName: OwnRuntimeSecret
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Ref: CollectorSecretArn
+      - PolicyName: AppendSecurityAudit
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt: [AuditLogGroup, Arn]
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: CollectorRole
+      - Ref: CollectorRole
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: HTTPS dashboard and HTTP ACME validation only. Administration through SSM.
+      GroupDescription: HTTPS dashboard and HTTP ACME validation only. Administration
+        through SSM.
       VpcId:
         Ref: VpcId
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: Redirect to HTTPS and certificate validation
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: Authenticated billing dashboard
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+        Description: Redirect to HTTPS and certificate validation
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp:
+          Ref: PilotCidr
+        Description: Authenticated billing dashboard
       Tags:
-        - Key: Name
-          Value: cloud-billing-console-web
+      - Key: Name
+        Value: cloud-billing-console-web
   Server:
     Type: AWS::EC2::Instance
     DeletionPolicy: Retain
@@ -134,61 +183,223 @@ Resources:
       InstanceType:
         Ref: InstanceType
       IamInstanceProfile:
-        Ref: InstanceProfile
+        Ref: WebInstanceProfile
       CreditSpecification:
         CPUCredits: standard
       MetadataOptions:
         HttpTokens: required
-        HttpPutResponseHopLimit: 2
+        HttpPutResponseHopLimit: 1
         HttpEndpoint: enabled
       BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 30
-            VolumeType: gp3
-            Encrypted: true
-            DeleteOnTermination: false
+      - DeviceName: /dev/sda1
+        Ebs:
+          VolumeSize: 30
+          VolumeType: gp3
+          Encrypted: true
+          DeleteOnTermination: false
       NetworkInterfaces:
-        - DeviceIndex: 0
-          AssociatePublicIpAddress: true
-          SubnetId:
-            Ref: SubnetId
-          GroupSet:
-            - Ref: WebSecurityGroup
+      - DeviceIndex: 0
+        AssociatePublicIpAddress: true
+        SubnetId:
+          Ref: SubnetId
+        GroupSet:
+        - Ref: WebSecurityGroup
       Tags:
-        - Key: Name
-          Value: cloud-billing-console
-        - Key: Project
-          Value: cloud-billing-console
+      - Key: Name
+        Value: cloud-billing-console
+      - Key: Project
+        Value: cloud-billing-console
       UserData:
-        Fn::Base64: |
-          #!/bin/bash
+        Fn::Base64: '#!/bin/bash
+
           set -euxo pipefail
+
           export DEBIAN_FRONTEND=noninteractive
+
           timedatectl set-timezone UTC
+
           apt-get update
-          apt-get install -y docker.io docker-compose-v2 ca-certificates curl unzip unattended-upgrades
+
+          apt-get install -y docker.io docker-compose-v2 ca-certificates curl unzip
+          unattended-upgrades
+
           curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+
           unzip -q /tmp/awscli.zip -d /tmp/awscli-install
+
           /tmp/awscli-install/aws/install --update
+
           systemctl enable --now docker
+
           systemctl enable --now cron
+
           install -d -m 700 /opt/cloud-billing
+
           touch /opt/cloud-billing-bootstrap-ready
+
+          '
   Address:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
       Tags:
-        - Key: Name
-          Value: cloud-billing-console
+      - Key: Name
+        Value: cloud-billing-console
   AddressAssociation:
     Type: AWS::EC2::EIPAssociation
     Properties:
       AllocationId:
-        Fn::GetAtt: [Address, AllocationId]
+        Fn::GetAtt:
+        - Address
+        - AllocationId
       InstanceId:
         Ref: Server
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+      - PolicyName: NoCustomerAssumption
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Deny
+            Action:
+            - sts:AssumeRole
+            - iam:*
+            Resource: '*'
+      - PolicyName: OwnRuntimeSecret
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Ref: WebSecretArn
+      - PolicyName: AppendSecurityAudit
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt: [AuditLogGroup, Arn]
+      - PolicyName: WriteEncryptedBackupsOnly
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/backups/*
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: AES256
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - Ref: WebRole
+  CollectorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No inbound access; collector HTTPS and private PostgreSQL
+        only
+      VpcId:
+        Ref: VpcId
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        DestinationSecurityGroupId:
+          Ref: WebSecurityGroup
+  CollectorDatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Ref: WebSecurityGroup
+      SourceSecurityGroupId:
+        Ref: CollectorSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      Description: Collector only; bind PostgreSQL to the private interface and require
+        TLS
+  CollectorServer:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId:
+        Ref: AmiId
+      InstanceType:
+        Ref: CollectorInstanceType
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      CreditSpecification:
+        CPUCredits: standard
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs:
+          VolumeSize: 20
+          VolumeType: gp3
+          Encrypted: true
+          DeleteOnTermination: false
+      NetworkInterfaces:
+      - DeviceIndex: 0
+        AssociatePublicIpAddress: true
+        SubnetId:
+          Ref: CollectorSubnetId
+        GroupSet:
+        - Ref: CollectorSecurityGroup
+      Tags:
+      - Key: Name
+        Value: cloud-billing-collector
+      UserData:
+        Fn::Base64: '#!/bin/bash
+
+          set -euo pipefail
+
+          timedatectl set-timezone UTC
+
+          apt-get update
+
+          apt-get install -y python3-venv python3-pip unattended-upgrades
+
+          useradd --system --create-home billing-collector
+
+          install -d -m 0750 -o billing-collector /opt/cloud-billing
+
+          # Release installation, secret files and activation are separate reviewed
+          steps.
+
+          '
+  AuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /cloud-billing/security
+      RetentionInDays:
+        Ref: AuditRetentionDays
 Outputs:
   InstanceId:
     Value:
@@ -201,4 +412,36 @@ Outputs:
       Ref: Artifacts
   CollectorRoleArn:
     Value:
-      Fn::GetAtt: [CollectorRole, Arn]
+      Fn::GetAtt:
+      - CollectorRole
+      - Arn
+  WebRoleArn:
+    Value:
+      Fn::GetAtt:
+      - WebRole
+      - Arn
+  CollectorInstanceId:
+    Value:
+      Ref: CollectorServer
+  PrivateDatabaseAddress:
+    Value:
+      Fn::GetAtt:
+      - Server
+      - PrivateIp
+Rules:
+  RestrictedPilot:
+    Assertions:
+    - Assert:
+        Fn::Not:
+        - Fn::Equals:
+          - Ref: PilotCidr
+          - 0.0.0.0/0
+      AssertDescription: Pilot HTTPS must be restricted to approved IP/VPN egress.
+Conditions:
+  HasApprovedRoles:
+    Fn::Not:
+    - Fn::Equals:
+      - Fn::Join:
+        - ''
+        - Ref: ApprovedCustomerRoleArns
+      - ''
