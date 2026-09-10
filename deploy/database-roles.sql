@@ -342,7 +342,7 @@ GRANT SELECT ON billing_customermembership,billing_usersecurity,auth_user TO bil
 GRANT SELECT ON billing_customermembership TO billing_collector;
 GRANT SELECT(id,user_id,portfolio_access,external,session_version) ON billing_usersecurity TO billing_collector;
 GRANT SELECT(id,username,is_active,is_superuser,is_staff) ON auth_user TO billing_collector;
-GRANT SELECT,INSERT,UPDATE,DELETE ON django_session,axes_accessattempt,axes_accesslog,axes_accessfailurelog,otp_totp_totpdevice TO billing_web;
+GRANT SELECT,INSERT,UPDATE,DELETE ON django_session,axes_accessattempt,axes_accessattemptexpiration,axes_accesslog,axes_accessfailurelog,otp_totp_totpdevice TO billing_web;
 GRANT SELECT ON auth_group,auth_permission,auth_user_groups,auth_user_user_permissions,auth_group_permissions,django_content_type TO billing_web;
 GRANT UPDATE(password,last_login) ON auth_user TO billing_web;
 GRANT INSERT ON billing_usersecurity TO billing_web;

@@ -108,6 +108,28 @@ class DatabaseRoleTests(TransactionTestCase):
         finally:
             connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
 
+    @override_settings(SECURE_SSL_REDIRECT=False, ALLOWED_HOSTS=['testserver'], STORAGES=TEST_STORAGES,
+                       DATABASE_RLS_ENABLED=True, MFA_REQUIRED=True, AXES_RESET_ON_SUCCESS=True)
+    def test_password_login_after_failure_with_actual_web_role(self):
+        from axes.models import AccessAttempt
+        cfg=connection.settings_dict;old_user,old_password=cfg['USER'],cfg['PASSWORD']
+        connection.close();cfg['USER']='billing_web';cfg['PASSWORD']=self.password
+        try:
+            client=Client()
+            response=client.post('/login/', {'username':self.user.username, 'password':'incorrect-test-password'})
+            self.assertEqual(response.status_code,200)
+            self.assertTrue(AccessAttempt.objects.filter(username=self.user.username).exists())
+            self.assertNotIn('_auth_user_id',client.session)
+            response=client.post('/login/', {'username':self.user.username, 'password':'test-only-unique-password'})
+            self.assertEqual(response.status_code,302)
+            self.assertFalse(AccessAttempt.objects.filter(username=self.user.username).exists())
+            self.assertEqual(client.session['_auth_user_id'],str(self.user.pk))
+            self.assertNotIn('mfa_at',client.session)
+            self.assertRedirects(client.get('/customers/'),'/mfa/',fetch_redirect_response=False)
+            self.assertContains(client.get('/mfa/'),'Set up two-step verification')
+        finally:
+            connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
+
     def test_account_restricted_login_and_shared_source_container(self):
         from billing.tests.helpers import assign
         from billing.models import AccountAssignment,BillingSource
