@@ -46,7 +46,8 @@ def document():
     parameters = {
         'action': {'type': 'String', 'allowedValues': ['stage', 'activate', 'rollback', 'status']},
         'releaseId': {'type': 'String', 'allowedPattern': '^[a-f0-9]{40}-[0-9]+-[0-9]+$'},
-        'manifestVersion': {'type': 'String', 'allowedPattern': '^[A-Za-z0-9._+/=-]{1,1024}$'},
+        # SSM's RE2 parser caps an individual counted repetition at 1000.
+        'manifestVersion': {'type': 'String', 'allowedPattern': '^[A-Za-z0-9._+/=-]{1,512}[A-Za-z0-9._+/=-]{0,512}$'},
         'manifestSha256': {'type': 'String', 'allowedPattern': '^[a-f0-9]{64}$'}}
     for value in parameters.values():
         value['interpolationType'] = 'ENV_VAR'
