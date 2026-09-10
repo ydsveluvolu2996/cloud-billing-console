@@ -101,9 +101,12 @@ def customers(request):
     keyfn = {'name': lambda r: r['customer'].name.lower(), 'mtd': lambda r: (r['mtd'] is None, r['mtd'] or 0), 'accounts': lambda r: r['accounts'],
              'status': lambda r: r['status'], 'last_success': lambda r: (r['last_success'] is None, r['last_success'] or timezone.now())}[sort]
     rows.sort(key=keyfn, reverse=direction == 'desc')
-    page = paginate(request, rows, 25)
+    internal_rows = [r for r in rows if r['customer'].name.strip().casefold() == 'flentas']
+    external_rows = [r for r in rows if r['customer'].name.strip().casefold() != 'flentas']
+    page = paginate(request, external_rows, 25)
     all_statuses = [r['status'] for r in rows]
     return render(request, 'billing/customers.html', {
+        'internal_rows': internal_rows, 'customer_count': len(rows),
         'page': page, 'q': query, 'status_filter': status_filter, 'show': show, 'sort': sort, 'dir': direction, 'active_page': 'customers', 'month': month,
         'connected_count': all_statuses.count('Connected'), 'attention_count': sum(s in ('Stale data', 'Permission problem', 'Partial data', 'Awaiting setup', 'Awaiting customer setup') for s in all_statuses),
         'paused_count': all_statuses.count('Paused'), 'states': ['Awaiting setup'] + STATES,

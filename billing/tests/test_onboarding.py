@@ -181,6 +181,35 @@ class OnboardingTests(TestCase):
         response = self.client.get('/onboarding/?q=1234&sort=state&dir=desc')
         self.assertContains(response, 'Ready')
 
+    def test_customer_directory_internal_and_external_sections(self):
+        internal = Customer.objects.create(name='Flentas')
+        external = Customer.objects.create(name='Gametion')
+        Customer.objects.create(name='Flentas partner')
+        response = self.client.get('/customers/')
+        self.assertEqual([r['customer'] for r in response.context['internal_rows']], [internal])
+        self.assertEqual({r['customer'].name for r in response.context['page']}, {'Gametion', 'Flentas partner'})
+        html = response.content.decode()
+        internal_html, external_html = html.split('<section class="panel" aria-labelledby="external-customers">')
+        self.assertIn('<th>Customer budget</th>', internal_html)
+        self.assertNotIn('<th>Customer budget</th>', external_html)
+        self.assertIn(str(external.pk), external_html)
+        self.assertNotIn(str(internal.pk), external_html)
+        self.assertIn('colspan="6"', external_html)
+        filtered = self.client.get('/customers/?q=Gametion')
+        self.assertEqual(filtered.context['internal_rows'], [])
+        self.assertEqual(filtered.context['customer_count'], 1)
+
+    def test_internal_customer_remains_visible_on_external_pages(self):
+        internal = Customer.objects.create(name=' fLeNtAs ')
+        for i in range(26):
+            Customer.objects.create(name=f'External {i:02d}')
+        response = self.client.get('/customers/?page=2')
+        self.assertEqual([r['customer'] for r in response.context['internal_rows']], [internal])
+        self.assertEqual(response.context['page'].paginator.count, 26)
+        self.assertEqual(response.context['customer_count'], 27)
+        self.assertContains(response, 'External 25')
+        self.assertContains(response, internal.name)
+
     def test_customer_directory_search_sort_pagination(self):
         for i in range(30):
             make_customer(f'Customer {i:02d}', f'{100000000000 + i:012d}')
