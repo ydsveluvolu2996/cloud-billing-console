@@ -1,3 +1,5 @@
+> Review the current [single-EC2 topology](single-ec2-operations.md), including its shared-host compromise risk and metadata firewall. Earlier separate-host evidence does not establish isolation for this topology.
+
 # Independent review package
 
 **Independent review has not occurred.** Implementation-agent tests and scans are engineering evidence, not an independent security assessment or compliance certification. External portal access remains disabled. All critical/high findings block release.

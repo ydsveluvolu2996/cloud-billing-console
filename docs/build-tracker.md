@@ -1,3 +1,5 @@
+> Production topology update: the dashboard and collector now share one EC2 under the user-requested [single-EC2 design](single-ec2-operations.md). For B14/B16, the earlier separate-host implementation below is historical; current controls use a dedicated collector OS user, separate database roles, an exact customer IAM allowlist and IPv4/IPv6 metadata blocking for containers. Independent host isolation is no longer claimed.
+
 # B01–B34 implementation and evidence tracker
 
 Latest inspected `origin/main`: `68e322ae2d4663a13fc2030bae7ffebca2ab6fb8` (9 September 2026). Work is isolated on `codex/billing-security-portfolio`; the original checkout was preserved. No merge, deployment, live IAM/customer activation, external invitation or real notification is authorized or performed.
