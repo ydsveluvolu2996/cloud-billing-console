@@ -1,0 +1,2 @@
+{% load money %}
+{% if comparison.delta != None %}<span class="{% if comparison.delta > 0 %}text-amber{% endif %}">{% if comparison.delta > 0 %}+{% endif %}{{ comparison.delta|precise_money }}</span><small>{% if comparison.zero_baseline %}New from zero{% else %}{{ comparison.percent|percent }}{% endif %}{% if comparison.delta > 0 %} · Increase{% elif comparison.delta < 0 %} · Decrease{% else %} · No change{% endif %}</small>{% else %}<span class="muted">—</span><small>Complete months needed</small>{% endif %}
