@@ -27,6 +27,32 @@ class BillingTests(TestCase):
     def collect(self, pages, months=None):
         return collect_source(self.source, months=months or [date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)
 
+    def test_cost_overview_flentas_account_budget_and_mtd(self):
+        self.customer.name = 'Flentas'
+        self.customer.save()
+        month = timezone.now().date().replace(day=1)
+        cost(self.source, month, 10, service='Amazon EC2')
+        cost(self.source, month, 5, service='Amazon S3')
+        budget = Budget.objects.create(customer=self.customer, scope=Budget.ACCOUNT,
+                                       account_id=self.source.account_id, name='Account monthly limit')
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('300'), effective_from=month)
+        params = {'customer': str(self.customer.pk), 'start': str(month), 'end': str(month), 'service': 'Amazon EC2'}
+        result = report(params)
+        self.assertTrue(result['show_account_budgets'])
+        row = result['account_rows'][0]
+        self.assertEqual(row['amount'], Decimal('10'))
+        self.assertEqual(row['mtd'], Decimal('15'))
+        self.assertEqual(row['configured_budgets'][0]['amount'], Decimal('300'))
+        self.client.force_login(self.admin)
+        response = self.client.get('/portfolio/', params)
+        self.assertContains(response, 'Configured budget')
+        self.assertContains(response, '300.00 USD')
+        self.assertContains(response, 'MTD ·')
+        self.customer.name = 'External customer'
+        self.customer.save()
+        self.assertFalse(report(params)['show_account_budgets'])
+        self.assertNotContains(self.client.get('/portfolio/', params), 'Configured budget')
+
     def test_sync_replaces_revisions_without_duplicates(self):
         for amount in ('10.10', '11.25'):
             run = self.collect([ce_page([('123456789012', 'Amazon EC2', amount)], date(2026, 9, 1))])

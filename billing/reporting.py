@@ -83,6 +83,22 @@ def report(params):
         item.update(share=share(item['amount']), url=link(customer=str(item['customer_id']), account=item['account_id']),
                     name=account.name if account else '', is_management=bool(account and account.is_management),
                     environment=account.environment if account else '')
+    # Account MTD and budgets use the current month and all services, independently
+    # of the selected period/service filter, while retaining authorization scope.
+    account_mtd = {(r['customer_id'], r['account_id']): r['amount'] for r in
+                   scope.costs(Cost.objects.filter(customer__in=customers, currency=currency,
+                               day__gte=month_start, day__lte=today)).values('customer_id', 'account_id').annotate(amount=Sum(metric))}
+    internal_ids = {c.pk for c in customer_list if c.name.strip().casefold() == 'flentas'}
+    configured = {}
+    for budget in Budget.objects.filter(customer_id__in=internal_ids, scope=Budget.ACCOUNT,
+                                        active=True, currency=currency, metric=metric).prefetch_related('amounts'):
+        configured.setdefault((budget.customer_id, budget.account_id), []).append(
+            {'budget': budget, 'amount': budget.amount_for(month_start)})
+    for item in account_totals:
+        key = (item['customer_id'], item['account_id'])
+        item.update(mtd=account_mtd.get(key), is_internal=item['customer_id'] in internal_ids,
+                    configured_budgets=configured.get(key, []))
+    show_account_budgets = any(r['is_internal'] for r in account_totals)
     # Budgets and projections always use whole-customer costs in the current month.
     current = Cost.objects.filter(customer__in=customers, currency=currency, day__gte=month_start, day__lte=today)
     mtd = {x['customer_id']: x['amount'] for x in current.values('customer_id').annotate(amount=Sum(metric))}
@@ -124,7 +140,7 @@ def report(params):
             'granularity': granularity, 'total': total, 'previous': previous, 'previous_start': previous_start,
             'previous_end': previous_end, 'change': change, 'yesterday': yesterday, 'points': points,
             'services': [s for s in service_totals if s['amount'] > 0][:5], 'service_rows': service_totals,
-            'account_rows': account_totals, 'service_count': len(service_totals), 'rows': rows,
+            'month_start': month_start, 'show_account_budgets': show_account_budgets, 'account_rows': account_totals, 'service_count': len(service_totals), 'rows': rows,
             'over_budget': sum(row['over_budget'] for row in rows), 'forecast_risk': sum(row['forecast_over'] and not row['over_budget'] for row in rows),
             'forecast': sum(forecasts) if forecasts else None, 'forecast_customers': len(forecasts),
             'mtd_total': sum(mtd.values()) if mtd else None, 'customer_count': len(customer_list),

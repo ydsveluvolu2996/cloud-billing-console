@@ -275,3 +275,9 @@ th button,.sort-link{font:inherit;color:inherit;border:0;background:transparent;
 
 .executive-options{align-self:flex-end;padding:10px 0}.executive-options>summary{cursor:pointer;color:var(--primary);font-size:13px}.executive-options>div{display:flex;flex-wrap:wrap;gap:12px;padding-top:12px}
 @media(max-width:600px){.alliance-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.alliance-filters>label:first-of-type{grid-column:1/-1}.alliance-filters>label{min-width:0;width:100%}.alliance-filters input,.alliance-filters select{width:100%;max-width:none;min-width:0}.alliance-filters>button{align-self:end}.alliance-filters .executive-options{grid-column:1/-1}}
+
+/* Cost breakdown: align numeric labels with values, excluding sort arrows. */
+[data-table-panel="breakdown"] th,[data-table-panel="breakdown"] td{padding-left:16px;padding-right:16px}
+[data-table-panel="breakdown"] th.number button{position:relative;gap:0}
+[data-table-panel="breakdown"] th.number button span{position:absolute;right:-13px}
+.account-cost-table{min-width:1040px}.account-cost-table td:first-child{min-width:180px;max-width:250px}.account-cost-table td:first-child small{white-space:normal;overflow-wrap:anywhere}.account-cost-table td small{display:block}.account-cost-table .account-budget{min-width:155px}.account-cost-table .account-budget small{white-space:normal;max-width:200px;margin-left:auto}
