@@ -45,6 +45,11 @@ def normalize(params, today=None):
     today = today or timezone.now().date()
     p = {k:params.get(k, '') for k in ('customer','source','currency','start','end','granularity','group_by','group_key','chart_style','metric','report_mode','compare_start','compare_end','tag_key','cost_category_key','report_name','date_range','measure','forecast','untagged','uncategorized','normalized')}
     p.update(currency=p['currency'] or 'USD', granularity=p['granularity'] or 'monthly', group_by=p['group_by'] or 'service', chart_style=p['chart_style'] or 'stacked', metric=p['metric'] or 'unblended', report_mode=p['report_mode'] or 'standard', measure=p['measure'] or 'cost', report_name=p['report_name'] or 'Cost report')
+    p['compare_range']=params.get('compare_range') or ('custom' if p['compare_start'] or p['compare_end'] else 'previous_period')
+    if p['compare_range'] not in ('custom','previous_period','month_over_month'):
+        raise ValueError('Choose a valid comparison range.')
+    if p['report_mode']=='compare' and p['compare_range']=='month_over_month':
+        p.update(date_range='last_month',granularity='monthly',compare_start=str(today.replace(day=1)-relativedelta(months=2)),compare_end=str(today.replace(day=1)-relativedelta(months=1)-timedelta(days=1)))
     p['date_range'] = p['date_range'] or ('custom' if p['start'] and p['end'] else 'last_6_months')
     month = today.replace(day=1)
     if p['date_range'].startswith('last_') and p['date_range'] in ('last_3_months','last_6_months','last_12_months'):
@@ -81,8 +86,8 @@ def normalize(params, today=None):
         if p[key] and not p[key+'_key']:
             raise ValueError(f'Choose the {FILTERS[key][0].lower()} key for this filter.')
         if p[key] and p[flag]=='1': raise ValueError('Clear the selected values before choosing only untagged or uncategorized resources.')
-    if p['measure']=='usage' and not (len(p['usage_type'])==1 and p['usage_type_mode']=='include'):
-        raise ValueError('Select one usage type before viewing usage so different units are not added together.')
+    if p['measure']=='usage' and not any(len(p[k])==1 and p[k+'_mode']=='include' for k in ('usage_type','usage_type_group')):
+        raise ValueError('Select one usage type or usage type group before viewing usage so different units are not added together.')
     if p['normalized']=='1' and p['measure']!='usage':
         raise ValueError('Choose Usage quantity to view normalized units.')
     resource = p['resource'] or p['group_by']=='resource'
@@ -91,6 +96,9 @@ def normalize(params, today=None):
     if (resource or p['granularity']=='hourly') and (start<today-timedelta(days=13) or end>today):
         raise ValueError('Resource and hourly reports require dates within the last 14 days and enabled AWS granular data.')
     if p['report_mode']=='compare':
+        if p['compare_range']=='previous_period':p.update(compare_start='',compare_end='')
+        if bool(p['compare_start']) != bool(p['compare_end']):
+            raise ValueError('Enter both comparison dates, or leave both blank for the preceding period.')
         if not p['compare_start'] or not p['compare_end']:
             if start.day==1 and (end+timedelta(days=1)).day==1:
                 months=(end.year-start.year)*12+end.month-start.month+1
@@ -153,19 +161,37 @@ def import_console_url(url):
         raise ValueError('Paste an HTTPS AWS Cost Explorer report URL.')
     raw=parse_qs(parsed.fragment.split('?',1)[1],keep_blank_values=True)
     get=lambda key,default='':raw.get(key,[default])[0]
-    p={'start':get('startDate'),'end':get('endDate'),'date_range':'custom',
+    compare=get('reportMode','STANDARD')=='COMPARE'
+    p={'start':get('comparisonStartDate') if compare else get('startDate'),'end':get('comparisonEndDate') if compare else get('endDate'),'date_range':'custom',
+       'compare_start':get('baselineStartDate') if compare else '', 'compare_end':get('baselineEndDate') if compare else '',
        'granularity':get('granularity','Monthly').lower(),'report_mode':get('reportMode','STANDARD').lower(),
        'report_name':get('reportName','Cost report'),'chart_style':{'STACK':'stacked','BAR':'bar','LINE':'line'}.get(get('chartStyle','STACK'),'invalid'),
        'metric':{'unBlendedCost':'unblended','amortizedCost':'amortized','blendedCost':'blended','netUnblendedCost':'net_unblended','netAmortizedCost':'net_amortized'}.get(get('costAggregate','unBlendedCost'),'invalid'),
        'forecast':'0' if truth(get('excludeForecasting','false')) else '1','untagged':get('showOnlyUntagged','false'),
        'uncategorized':get('showOnlyUncategorized','false'),'normalized':get('useNormalizedUnits','false')}
-    group_alias={label.lower().replace(' ',''):key for key,label in GROUPS.items()}
+    if compare and get('compareRelativeRange')=='MONTH_OVER_MONTH':p['compare_range']='month_over_month'
+    if not compare:
+        relative={'LAST_3_MONTHS':'last_3_months','LAST_6_MONTHS':'last_6_months','LAST_12_MONTHS':'last_12_months','THIS_MONTH':'this_month','LAST_MONTH':'last_month','LAST_7_DAYS':'last_7_days','LAST_14_DAYS':'last_14_days'}
+        if get('historicalRelativeRange') in relative:p['date_range']=relative[get('historicalRelativeRange')]
+    canonical=lambda value:''.join(c for c in value.lower() if c.isalnum())
+    group_alias={canonical(label):key for key,label in GROUPS.items()}
+    aliases={canonical(label):key for key,(label,_) in FILTERS.items()}
+    aliases.update({canonical(dim):key for key,(_,dim) in DIMENSIONS.items()})
+    aliases.update({'linkedaccount':'account','availabilityzone':'az','purchasetype':'purchase_option','recordtype':'charge_type'})
+    group_alias.update({k:v for k,v in aliases.items() if v in GROUPS})
     try:
         groups=json.loads(get('groupBy','["Service"]'));filters=json.loads(get('filter','[]'))
     except (ValueError,TypeError):raise ValueError('The console URL has invalid filter or grouping data.')
     if not isinstance(groups,list) or len(groups)>1:raise ValueError('Import one grouping dimension at a time.')
-    p['group_by']=group_alias.get(str(groups[0]).lower().replace(' ',''),'invalid') if groups else 'none'
-    if filters:
-        raise ValueError('This console link contains encoded filters. Import an unfiltered link, then select the same filters in this dashboard; none have been silently discarded.')
+    p['group_by']=group_alias.get(canonical(str(groups[0])),'invalid') if groups else 'none'
+    if not isinstance(filters,list) or len(filters)>len(FILTERS):raise ValueError('The console URL has invalid filters.')
+    for item in filters:
+        if not isinstance(item,dict) or not isinstance(item.get('dimension'),dict):raise ValueError('Unsupported AWS filter format. No filters were imported.')
+        key=aliases.get(canonical(str(item['dimension'].get('id',''))))
+        mode={'INCLUDES':'include','EXCLUDES':'exclude'}.get(item.get('operator'))
+        if key not in DIMENSIONS or not mode or key in p:raise ValueError('Unsupported or repeated AWS filter. Select this filter in the dashboard; no filters were discarded.')
+        vals=item.get('values')
+        if not isinstance(vals,list) or any(not isinstance(v,dict) or not isinstance(v.get('value'),str) for v in vals):raise ValueError('The console URL has invalid filter values.')
+        p[key]=[v['value'] or EMPTY_VALUE for v in vals];p[key+'_mode']=mode
     if get('usageAggregate','undefined') not in ('','undefined','null'):p['measure']='usage'
     return normalize(p)

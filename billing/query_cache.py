@@ -16,8 +16,8 @@ from .collector import safe_error
 from .models import BillingSource, ExplorerQuery
 
 logger = logging.getLogger(__name__)
-ALLOWED = {'get_cost_and_usage', 'get_cost_and_usage_with_resources', 'get_cost_forecast', 'get_dimension_values', 'get_tags', 'get_cost_categories'}
-LIST_KEYS = ('ResultsByTime', 'DimensionValues', 'Tags', 'CostCategoryNames', 'CostCategoryValues', 'ForecastResultsByTime')
+ALLOWED = {'get_cost_and_usage', 'get_cost_and_usage_with_resources', 'get_cost_forecast', 'get_dimension_values', 'get_tags', 'get_cost_categories', 'get_cost_comparison_drivers'}
+LIST_KEYS = ('ResultsByTime', 'DimensionValues', 'Tags', 'CostCategoryNames', 'CostCategoryValues', 'ForecastResultsByTime', 'CostComparisonDrivers')
 
 
 def digest(value):
@@ -56,7 +56,7 @@ def get_query(source, operation, parameters, customer=None, account_filter=None)
         owned=set(AccountAssignment.objects.filter(customer=customer,account__source=source).values_list('account__account_id',flat=True))
         if not set(account_filter).issubset(owned):
             raise ValueError('The requested accounts are outside the authorized assignment scope.')
-    optional = {'get_tags':'tags','get_cost_categories':'cost_categories','get_cost_forecast':'forecasts','get_cost_and_usage_with_resources':'resources'}
+    optional = {'get_tags':'tags','get_cost_categories':'cost_categories','get_cost_forecast':'forecasts','get_cost_and_usage_with_resources':'resources','get_cost_comparison_drivers':'comparison_drivers'}
     capability = optional.get(operation)
     if operation=='get_dimension_values' and parameters.get('Dimension')=='RESOURCE_ID':capability='resources'
     if settings.REQUIRE_CONNECTION_APPROVAL and capability and not source.capabilities.get(capability):

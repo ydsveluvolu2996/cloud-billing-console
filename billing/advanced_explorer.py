@@ -16,7 +16,7 @@ def is_local(p):
         and p['granularity'] in ('daily','monthly') and p['group_by'] in ('service','account','customer')
         and date.fromisoformat(p['end'])<=timezone.now().date() and p['untagged']=='0' and p['uncategorized']=='0'
         and all(not p[k] for k in contract.FILTERS if k not in ('service','account'))
-        and all(len(p[k])<=1 and contract.EMPTY_VALUE not in p[k] and p[k+'_mode']=='include' for k in ('service','account')))
+        and all(len(p[k])<=1 and contract.EMPTY_VALUE not in p[k] and (not p[k] or p[k+'_mode']=='include') for k in ('service','account')))
 
 
 def periods_between(start,end,granularity):
@@ -40,7 +40,7 @@ def unpack(queries,p,periods):
             if label not in periods:raise ValueError('AWS returned a period outside the selected report.')
             estimated=estimated or period.get('Estimated',False)
             groups=period.get('Groups',[])
-            if not groups and metric in period.get('Total',{}):groups=[{'Keys':[(q.customer.name if q.customer else q.source.customer.name) if p['group_by']=='customer' else 'Total'],'Metrics':period['Total']}]
+            if not groups and p['group_by'] in ('none','customer') and metric in period.get('Total',{}):groups=[{'Keys':[(q.customer.name if q.customer else q.source.customer.name) if p['group_by']=='customer' else 'Total'],'Metrics':period['Total']}]
             for group in groups:
                 m=group['Metrics'][metric];units.add(m['Unit']);amount=Decimal(m['Amount'])
                 if not amount.is_finite():raise ValueError('AWS returned a non-finite amount.')
@@ -85,21 +85,36 @@ def build_report(params):
         local_params.update({k:next(iter(p[k]),'') for k in ('service','account')});local_params.update(group_by=p['group_by'],chart_style=p['chart_style'])
     else:local_params.update(group_by='service',chart_style=p['chart_style'])
     context=explorer_report(report(local_params),local_params)
-    queries=[];actual=[];previous=[];forecast=[];warnings=[]
+    queries=[];actual=[];previous=[];forecast=[];warnings=[];blocked=[]
+    def queue(target, source, operation, request, customer, accounts):
+        try:
+            target.append(get_query(source,operation,request,customer=customer,account_filter=accounts))
+        except ValueError as exc:
+            message=f'{(customer or source.customer).name}: {exc}'
+            blocked.append(message)
+            if message not in warnings:warnings.append(message)
     if not is_local(p):
         scope=scoping.resolve(p)
         selected=Customer.objects.filter(active=True) if not scope.customer else Customer.objects.filter(pk=scope.customer.pk)
         # One AWS request per (connection, customer scope). Shared payers carry a LINKED_ACCOUNT
         # restriction derived from account assignments; portfolio reports query each connection once.
+        range_start=min(start,date.fromisoformat(p['compare_start'])) if p['report_mode']=='compare' else start
+        range_end=max(end,date.fromisoformat(p['compare_end'])) if p['report_mode']=='compare' else end
         if scope.customer or p['group_by']=='customer':
-            units=[u for c in selected for u in scoping.report_units(c)]
+            units=[u for c in selected for u in scoping.report_units(c,start=range_start,end=range_end+timedelta(days=1))]
         else:
-            units=scoping.report_units(None)
+            units=scoping.report_units(None,start=range_start,end=range_end+timedelta(days=1))
         if scope.source:units=[u for u in units if u[0].pk==scope.source.pk]
-        if scope.account_id:units=[(s,c,[scope.account_id]) for s,c,a in units if a is None or scope.account_id in a]
+        # Account selections are report filters, including NOT and multiselect. Ownership
+        # restrictions come only from report_units/ownership_windows and apply to both periods.
+        # Turning an excluded account into the query scope produces A AND NOT A (zero costs).
         covered={u[0].customer_id for u in units}|{u[1].pk for u in units if u[1]}
-        unavailable=sum(1 for c in selected if c.pk not in covered)
-        if unavailable:warnings.append(f'{unavailable} customer(s) are paused or have not completed a successful import and are excluded from this AWS report.')
+        from .models import BillingSource
+        expected=set(BillingSource.objects.exclude(role_arn='').values_list('customer_id',flat=True))
+        unavailable=sum(1 for c in selected if c.pk not in covered and (c.pk in expected or scope.customer)) if not scope.source else int(not units)
+        setup=sum(1 for c in selected if c.pk not in covered and c.pk not in expected) if not scope.source else 0
+        if unavailable:warnings.append(f'{unavailable} customer(s) have unavailable billing connections. This report cannot yet cover their costs.')
+        if setup:warnings.append(f'{setup} customer(s) awaiting onboarding are excluded. This report covers connected customers only.')
         actual_end=min(end,today-timedelta(days=1) if end>today else today)
         period_labels=periods_between(start,actual_end,p['granularity'])
         prior_periods=periods_between(date.fromisoformat(p['compare_start']),date.fromisoformat(p['compare_end']),p['granularity']) if p['report_mode']=='compare' else []
@@ -108,16 +123,18 @@ def build_report(params):
                 for left,right,owned in scoping.ownership_windows(source,customer,start,actual_end+timedelta(days=1)):
                     selected_accounts = sorted(set(owned)&set(accounts)) if owned is not None and accounts is not None else owned if owned is not None else accounts
                     op,req=contract.aws_request(p,start=str(left),end=str(right-timedelta(days=1)))
-                    actual.append(get_query(source,op,req,customer=customer,account_filter=selected_accounts))
+                    queue(actual,source,op,req,customer,selected_accounts)
             if p['report_mode']=='compare':
                 for left,right,owned in scoping.ownership_windows(source,customer,date.fromisoformat(p['compare_start']),date.fromisoformat(p['compare_end'])+timedelta(days=1)):
                     op,req=contract.aws_request(p,start=str(left),end=str(right-timedelta(days=1)))
-                    previous.append(get_query(source,op,req,customer=customer,account_filter=owned))
+                    selected_accounts = sorted(set(owned)&set(accounts)) if owned is not None and accounts is not None else owned if owned is not None else accounts
+                    queue(previous,source,op,req,customer,selected_accounts)
             if end>today and p['forecast']=='1':
-                req={'TimePeriod':{'Start':str(today),'End':str(end+timedelta(days=1))},'Granularity':p['granularity'].upper(),'Metric':contract.FORECAST_METRICS[p['metric']],'PredictionIntervalLevel':80}
-                exp=contract.expression(p)
-                if exp:req['Filter']=exp
-                forecast.append(get_query(source,'get_cost_forecast',req,customer=customer,account_filter=accounts))
+                for left,right,owned in scoping.ownership_windows(source,customer,today,end+timedelta(days=1)):
+                    req={'TimePeriod':{'Start':str(left),'End':str(right)},'Granularity':p['granularity'].upper(),'Metric':contract.FORECAST_METRICS[p['metric']],'PredictionIntervalLevel':80}
+                    exp=contract.expression(p)
+                    if exp:req['Filter']=exp
+                    queue(forecast,source,'get_cost_forecast',req,customer,owned)
         queries=actual+previous+forecast
         rows,estimated,unit=unpack(actual,p,period_labels)
         payload,pt=chart(rows,period_labels,p,unit)
@@ -130,44 +147,82 @@ def build_report(params):
             prior,_,prior_unit=unpack(previous,p,prior_periods)
             if rows and prior and prior_unit!=unit:raise ValueError('Comparison periods have different units.')
             before={r['key']:r for r in prior};after={r['key']:r for r in rows};comparisons=[]
-            ready=all(q.data is not None for q in actual+previous) and bool(actual+previous)
+            ready=not blocked and not unavailable and bool(units) and all(q.data is not None for q in actual+previous)
             for key in sorted(before.keys()|after.keys()):
                 left=before.get(key,{}).get('total',Decimal(0)) if ready else None
                 right=after.get(key,{}).get('total',Decimal(0)) if ready else None
                 delta=right-left if ready else None
-                comparisons.append({'label':(after.get(key) or before[key])['label'],'before':left,'after':right,'delta':delta,'percent':delta/abs(left)*100 if left else None})
+                comparisons.append({'key':key,'label':(after.get(key) or before[key])['label'],'before':left,'after':right,'delta':delta,'percent':delta/abs(left)*100 if left else None})
             context.update(comparison_rows=comparisons,comparison_ready=ready,comparison_total=sum((r['total'] for r in prior),Decimal(0)) if ready else None)
+            if ready:
+                before_total=context['comparison_total'];delta=total-before_total
+                ordered=sorted(comparisons,key=lambda r:-abs(r['delta']))
+                displayed=ordered[:9]
+                if len(ordered)>9:
+                    rest=ordered[9:]
+                    displayed.append({'label':'Others','before':sum(r['before'] for r in rest),'after':sum(r['after'] for r in rest),'delta':sum(r['delta'] for r in rest)})
+                comparison_chart={'periods':[r['label'] for r in displayed],
+                    'series':[{'label':label,'values':[float(r[key]) for r in displayed],'color':color} for label,key,color in [('Previous','before',CHART_COLORS[0]),('Selected','after',CHART_COLORS[2])]],
+                    'totals':[float(r['delta']) for r in displayed],'currency':unit,'measure':p['measure'],'style':'bar','comparison':True}
+                context.update(comparison_delta=delta,comparison_percent=delta/abs(before_total)*100 if before_total else None,comparison_chart=comparison_chart)
         frows=[]
         for q in forecast:
             if q.data:
                 for period in q.data.get('ForecastResultsByTime',[]):
                     frows.append({'customer':unit_label(q),'start':period['TimePeriod']['Start'],'end':period['TimePeriod']['End'],
                                   'mean':Decimal(period['MeanValue']),'lower':Decimal(period.get('PredictionIntervalLowerBound','0')),'upper':Decimal(period.get('PredictionIntervalUpperBound','0'))})
-        context.update(forecast_rows=frows,forecast_requested=bool(forecast),actual_end=actual_end,aws_report=True)
+        context.update(forecast_rows=frows,forecast_requested=end>today and p['forecast']=='1',actual_end=actual_end,aws_report=True)
         for q in queries:
             if q.error:warnings.append(unit_label(q)+': '+q.error+(' Previous cached figures are displayed.' if q.data is not None else ''))
         context.update(report_pending=any(q.requested for q in queries),query_ids=[q.pk for q in queries],
-                       report_incomplete=unavailable>0 or any(q.data is None for q in queries),
+                       report_incomplete=bool(blocked) or not units or unavailable>0 or any(q.data is None for q in queries),
                        report_snapshot='; '.join(f'{unit_label(q)}: {q.last_success.isoformat() if q.last_success else "pending"}' for q in actual))
+        context['known_empty']=not context['report_incomplete'] and not rows
+        if context['known_empty']:
+            context.update(period_average=Decimal(0) if period_labels else None,period_totals=[Decimal(0) for _ in period_labels])
+        if p['report_mode']=='compare':
+            from .comparison_drivers import build as driver_report
+            drivers=driver_report(p,units)
+            context.update(driver_rows=drivers['rows'],driver_notes=drivers['notes'])
+            context['query_ids'] += [q.pk for q in drivers['queries']]
+            context['report_pending'] = context['report_pending'] or any(q.requested for q in drivers['queries'])
     q=contract.querydict(p)
     def url(**changes):
         new=p|changes
         return '/?'+contract.querydict(new).urlencode()
-    for row in context['pivot_rows']:
+    for row in context['pivot_rows']+context.get('comparison_rows',[]):
         group=p['group_by']
+        # Discard legacy portfolio links before constructing the complete Explorer URL.
+        row.pop('url',None)
         if group in contract.FILTERS and row['key']!='(Unassigned)':
             value=contract.EMPTY_VALUE if row['key']=='' or (group=='region' and row['key']=='NoRegion') else row['key']
             changes={group:[value],group+'_mode':'include'}
-            if group in ('tag','cost_category'):changes[group+'_key']=p['group_key']
+            if group in ('tag','cost_category'):
+                changes[group+'_key']=p['group_key'];changes['untagged' if group=='tag' else 'uncategorized']='0'
             row['url']=url(**changes)
+        elif group in ('tag','cost_category') and row['key']=='(Unassigned)':
+            row['url']=url(**{group:[],group+'_key':p['group_key'],'untagged' if group=='tag' else 'uncategorized':'1'})
         elif group=='customer':
-            customer=Customer.objects.filter(name=row['key']).first()
+            customer=Customer.objects.filter(pk=row['key']).first() if is_local(p) else Customer.objects.filter(name=row['key']).first()
             if customer:row['url']=url(customer=str(customer.pk))
+        if row.get('url') and 'before' in row:
+            from django.http import QueryDict
+            drill=QueryDict(row['url'].split('?',1)[1],mutable=True)
+            drill['group_by']='usage_type' if group=='service' else 'service';drill['group_key']=''
+            row['url']='/?'+drill.urlencode()
     filters=[]
     for key,(label,_) in contract.FILTERS.items():
         filters.append({'key':key,'label':label,'values':p[key],'mode':p[key+'_mode'],'key_value':p.get(key+'_key',''),
                         'expanded':bool(p[key]),'is_keyed':key in ('tag','cost_category'),'is_more':list(contract.FILTERS).index(key)>8})
-    context.update(params=p,parameters_json=p,parameter_fields={k:v for k,v in p.items() if not isinstance(v,list)},
+    from django.conf import settings
+    capability_notes=[]
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        sources={s.pk:s for s,_,_ in scoping.report_units(scoping.resolve(p).customer)}
+        if p['source']:sources={k:s for k,s in sources.items() if str(k)==p['source']}
+        for cap,label,requirement in [('forecasts','Forecasts','ce:GetCostForecast'),('tags','Tags and untagged reports','approved tag keys, ce:GetTags and ce:ListCostAllocationTags'),('cost_categories','Cost categories','approved category keys and ce:GetCostCategories'),('resources','Resource reports','ce:GetCostAndUsageWithResources and AWS resource-data opt-in')]:
+            missing=[s.customer.name for s in sources.values() if not s.capabilities.get(cap)]
+            if missing:capability_notes.append(f'{label}: requires {requirement}. Not enabled for: {", ".join(sorted(set(missing)))}.')
+    context.update(params=p,parameters_json=p,capability_notes=capability_notes,parameter_fields={k:v for k,v in p.items() if not isinstance(v,list)},
                    parameter_pairs=list(q.lists()),filters=filters,applied_count=sum(bool(p[k]) for k in contract.FILTERS)+int(p['untagged']=='1')+int(p['uncategorized']=='1'),
                    start=start,end=end,today=today,granularity=p['granularity'],group_by=p['group_by'],group_label=contract.GROUPS[p['group_by']],
                    metric=p['metric'],metric_label=contract.METRICS[p['metric']][0] if p['measure']=='cost' else 'Normalized usage' if p['normalized']=='1' else 'Usage quantity',

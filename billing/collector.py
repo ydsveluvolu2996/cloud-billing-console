@@ -109,7 +109,7 @@ def verify_source(source, session=None, meter=None):
             capabilities['budgets'] = True
         except ClientError as exc:
             capabilities['budgets_error'] = exc.response.get('Error', {}).get('Code', 'Unavailable')
-    for name in ('organizations', 'budgets', 'tags', 'cost_categories', 'forecasts', 'resources'):
+    for name in ('organizations', 'budgets', 'tags', 'cost_categories', 'forecasts', 'comparison_drivers', 'resources'):
         capabilities.setdefault(name, False)
         if name not in source.approved_capabilities:
             capabilities.setdefault(name + '_error', 'Not approved; core billing remains available.')
@@ -121,6 +121,9 @@ def verify_source(source, session=None, meter=None):
             'forecasts': ('get_cost_forecast', {'TimePeriod': {'Start': today.isoformat(), 'End': (today + timedelta(days=2)).isoformat()}, 'Metric':'UNBLENDED_COST', 'Granularity':'DAILY'}),
             'resources': ('get_cost_and_usage_with_resources', {'TimePeriod': window, 'Granularity':'DAILY', 'Metrics':['UnblendedCost'], 'Filter': {'Dimensions': {'Key':'SERVICE', 'Values':['Amazon Elastic Compute Cloud - Compute']}}, 'GroupBy':[{'Type':'DIMENSION','Key':'RESOURCE_ID'}]}),
         }
+        from dateutil.relativedelta import relativedelta
+        month=today.replace(day=1)
+        probes['comparison_drivers']=('get_cost_comparison_drivers',{'BaselineTimePeriod':{'Start':str(month-relativedelta(months=2)),'End':str(month-relativedelta(months=1))},'ComparisonTimePeriod':{'Start':str(month-relativedelta(months=1)),'End':str(month)},'MetricForComparison':'UnblendedCost','MaxResults':1})
         for name, (operation, args) in probes.items():
             if name in source.approved_capabilities:
                 try:

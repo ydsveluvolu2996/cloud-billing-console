@@ -145,9 +145,9 @@ def source_account_filter(source, customer):
     return customer_accounts(customer, source=source)
 
 
-def report_units(customer=None, active_only=True):
+def report_units(customer=None, active_only=True, start=None, end=None):
     """(source, customer, account_filter) tuples describing which AWS queries serve a scope."""
-    sources = BillingSource.objects.filter(kind__in=[BillingSource.PAYER, BillingSource.STANDALONE])
+    sources = BillingSource.objects.filter(kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).select_related('customer')
     if active_only:
         sources = sources.filter(enabled=True, last_success__isnull=False).exclude(role_arn='')
     units = []
@@ -156,11 +156,14 @@ def report_units(customer=None, active_only=True):
         access = current_access.get()
         from django.conf import settings
         if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
-            return [unit for c in Customer.objects.all() for unit in report_units(c, active_only)]
+            return [unit for c in Customer.objects.all() for unit in report_units(c, active_only, start, end)]
         return [(source, None, None) for source in sources]
     for source in sources:
         if source.customer_id == customer.pk or source.shared or AccountAssignment.objects.filter(account__source=source, customer=customer).exists():
             accounts = source_account_filter(source, customer)
+            if start is not None and end is not None:
+                assignments=AccountAssignment.objects.filter(customer=customer,account__source=source,start__lt=end).filter(Q(end__isnull=True)|Q(end__gt=start))
+                accounts=sorted(set(assignments.values_list('account__account_id',flat=True)))
             if accounts is None or accounts:
                 units.append((source, customer, accounts))
     return units

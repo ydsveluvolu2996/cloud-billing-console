@@ -50,7 +50,7 @@ class SourceForm(forms.ModelForm):
 
 
 class ConnectionForm(forms.ModelForm):
-    approved_capabilities = forms.MultipleChoiceField(required=False, choices=[(v,v.replace("_"," ").title()) for v in ("organizations","tags","cost_categories","forecasts","resources","budgets")], widget=forms.CheckboxSelectMultiple, help_text="Select only capabilities recorded in customer approval. Core billing remains available without optional access.")
+    approved_capabilities = forms.MultipleChoiceField(required=False, choices=[(v,v.replace("_"," ").title()) for v in ("organizations","tags","cost_categories","forecasts","comparison_drivers","resources","budgets")], widget=forms.CheckboxSelectMultiple, help_text="Select only capabilities recorded in customer approval. Core billing remains available without optional access.")
     class Meta:
         model = BillingSource
         fields = ['role_arn', 'approved_capabilities']

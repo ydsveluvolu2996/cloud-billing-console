@@ -19,6 +19,7 @@ OPTIONAL = {
     'tags': ['ce:GetTags', 'ce:ListCostAllocationTags'],
     'cost_categories': ['ce:GetCostCategories'],
     'forecasts': ['ce:GetCostForecast'],
+    'comparison_drivers': ['ce:GetCostComparisonDrivers'],
     'resources': ['ce:GetCostAndUsageWithResources'],
     'budgets': ['budgets:ViewBudget'],
 }
