@@ -79,6 +79,26 @@ class OnboardingTests(TestCase):
         self.assertEqual(Job.objects.get(kind='verify').status, Job.FAILED)
         self.assertIsNone(source.verified_at)
 
+    def test_customer_tree_handles_accounts_without_spend_and_preserves_zero(self):
+        customer, source = make_customer('Sparse billing', '123456789012', accounts=('210987654321',))
+        month = timezone.now().date().replace(day=1)
+        url = f'/customers/{customer.pk}/tree/?month={month}'
+        response = self.client.get(url)
+        self.assertContains(response, '123456789012')
+        self.assertContains(response, '210987654321')
+        self.assertContains(response, '— USD', count=3)
+        self.assertNotContains(response, '0.00 USD')
+
+        cost(source, month, Decimal('5'))
+        response = self.client.get(url)
+        self.assertContains(response, '5.00 USD')
+        self.assertContains(response, '— USD', count=1)
+
+        cost(source, month, Decimal('0'), account_id='210987654321')
+        response = self.client.get(url)
+        self.assertContains(response, '0.00 USD')
+        self.assertNotContains(response, '— USD')
+
     def test_duplicate_payer_and_member_onboarding_detected(self):
         customer, source = make_customer('Existing', '123456789012', accounts=('210987654321',))
         other = Customer.objects.create(name='Other')
