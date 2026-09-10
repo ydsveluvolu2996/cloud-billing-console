@@ -139,6 +139,18 @@ class HostRollback(unittest.TestCase):
         with patch.object(agent, 'run', return_value=''), self.assertRaisesRegex(ValueError, 'checksum'):
             self.agent.download('source.tar.gz', 'version', 'd'*64)
 
+    def test_unmatched_installed_executor_blocks_release_before_loading_artifacts(self):
+        self.agent.config.update(repository_id=release.REPOSITORY_ID, account_id=release.ACCOUNT, instance_id=release.INSTANCES['web'])
+        state = self.agent.state()
+        self.agent.save(state, 'new')
+        manifest = self.agent.stage/'manifest.json'
+        manifest.write_text(json.dumps({'release_id': RELEASE, 'sha': SHA, 'repository_id': release.REPOSITORY_ID,
+                            'account_id': release.ACCOUNT, 'instances': release.INSTANCES, 'executor_sha256': 'e'*64}))
+        with patch.object(self.agent, 'download', return_value=manifest) as download:
+            with self.assertRaisesRegex(ValueError, 'executor changed'):
+                self.agent.stage_release()
+        self.assertEqual(download.call_count, 1)
+
     def test_migration_change_blocks_automatic_release(self):
         source = self.agent.stage/'source'
         for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service']:

@@ -109,7 +109,7 @@ def main(directory):
         raise ValueError('Incomplete release artifact')
     s3 = session.client('s3')
     manifest = {'release_id': release_id, 'sha': sha, 'repository_id': REPOSITORY_ID, 'account_id': ACCOUNT,
-                'instances': INSTANCES, 'artifacts': {}}
+                'instances': INSTANCES, 'executor_sha256': digest(Path(__file__).with_name('agent.py')), 'artifacts': {}}
     for name in sorted(expected):
         path = directory / name
         if digest(path) != checksums[name]:

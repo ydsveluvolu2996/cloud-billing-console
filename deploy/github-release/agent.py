@@ -141,6 +141,7 @@ class Agent:
         require(str(manifest['repository_id']) == str(self.config['repository_id']), 'Wrong repository')
         require(manifest['account_id'] == self.config['account_id'], 'Wrong hosting account')
         require(manifest['instances'][self.config['runtime']] == self.config['instance_id'], 'Wrong target instance')
+        require(manifest.get('executor_sha256') == sha256(Path(__file__)), 'The release executor changed; update the reviewed root-owned helper before deploying')
         artifacts = manifest['artifacts']
         wanted = ['source.tar.gz', 'images.json', 'images.tar.gz'] if self.config['runtime'] == 'web' else ['source.tar.gz', 'wheels.tar.gz']
         require(shutil.disk_usage(self.stage).free > 3 * sum(artifacts[n]['size'] for n in wanted) + 1_000_000_000, 'Not enough free disk for a safe release')
