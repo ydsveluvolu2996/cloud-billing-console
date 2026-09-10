@@ -1,6 +1,6 @@
 # Cloud Billing Console
 
-A reusable AWS billing dashboard on Django 5.2, PostgreSQL 17, a durable collection queue and Caddy. The web application stays on EC2; customer AWS access moves to a separate EC2 collector with its own instance profile. This branch is a review build, not a production deployment.
+A reusable AWS billing dashboard on Django 5.2, PostgreSQL 17, a durable collection queue and Caddy. The web application, database and a separate collector process run on one EC2 instance. The collector retains its exact customer-role allowlist; a host firewall blocks EC2 metadata access from containers and all host users except root and the collector. See [single-EC2 operations](docs/single-ec2-operations.md) for the current topology and its host-compromise limitation.
 
 The same customer → payer/connection → account model supports multiple payers, standalone accounts, shared payers, effective ownership, projects, budgets and Alliance handoffs. Reporting uses decimal amounts, explicit currencies and inclusive UI/exclusive AWS dates. Six-hour polling does not imply six-hour AWS data freshness.
 
@@ -44,4 +44,4 @@ DEBUG=true .venv/bin/python manage.py makemigrations --check --dry-run
 .venv/bin/cfn-lint deploy/infrastructure.yaml
 ```
 
-The production web container cannot run migrations or collection. Use the administration runtime for migrations and `RUNTIME_ROLE=collector` on the isolated collector host for `manage.py run_worker`. The runbook describes private TLS database setup, identity grants and backup handling. Do not use the retired automatic account bootstrap or historical customer CloudFormation template for new onboarding.
+The production web container cannot run migrations or collection. Use the administration runtime for migrations and `RUNTIME_ROLE=collector` as the dedicated collector OS user for `manage.py run_worker`. The runbook describes private TLS database setup, identity grants and backup handling. Do not use the retired automatic account bootstrap or historical customer CloudFormation template for new onboarding.

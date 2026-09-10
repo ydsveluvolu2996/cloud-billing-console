@@ -60,7 +60,7 @@ def document():
 def compatibility():
     root = HERE.parent.parent
     files = sorted(str(p.relative_to(root)) for p in (root / 'billing/migrations').glob('*.py'))
-    files += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service']
+    files += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}
 
 
@@ -113,14 +113,16 @@ for name,expected in config['compatibility'].items():
  if name.startswith('billing/migrations/'):
   assert hashlib.sha256((root/name).read_bytes()).hexdigest()==expected, 'Migration baseline differs'
 assert sorted(p.name for p in (root/'billing/migrations').glob('*.py'))==sorted(Path(n).name for n in config['compatibility'] if n.startswith('billing/migrations/'))
-if config['runtime']=='web':
+if config['runtime'] in ('web','combined'):
  assert (root/'.deployment/database-policy-sha').read_text().strip()=='5461f736b58aad33587e91dce237a627ea1a31f2', 'Review active database policy first'
  subprocess.run(['docker','compose','exec','-T','app','python','manage.py','verify_runtime'],cwd=root,check=True,stdout=subprocess.DEVNULL)
  assert (root/'deploy/backup.sh').is_file()
-else:
+if config['runtime'] in ('collector','combined'):
  subprocess.run(['systemctl','is-active','--quiet','cloud-billing-collector'],check=True)
  subprocess.run(['/usr/bin/python3','-c','import venv,ensurepip'],check=True)
  subprocess.run(['systemd-run','--quiet','--wait','--pipe','--collect','--uid=billing-collector','--working-directory='+str(root),'--property=EnvironmentFile=/etc/cloud-billing/collector.env',str(root/'.venv/bin/python'),'manage.py','verify_runtime'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+if config['runtime']=='combined':
+ subprocess.run(['/usr/local/sbin/cloud-billing-metadata-guard','--check'],check=True,stdout=subprocess.DEVNULL)
 if INSTALL:
  target=Path('/usr/local/lib/cloud-billing-release');target.mkdir(parents=True,exist_ok=True);target.chmod(0o755)
  temporary=target/'agent.py.new';temporary.write_bytes(base64.b64decode(AGENT));temporary.chmod(0o755);temporary.replace(target/'agent.py')

@@ -1,3 +1,5 @@
+> This is the historical two-EC2 deployment procedure. For the current user-requested single-EC2 topology, follow [single-EC2 operations](single-ec2-operations.md). Do not recreate the retired collector host or restore the old web profile on the combined host.
+
 # Deployment runbook — separate authorization required
 
 This build does not deploy, merge, activate connections, send notifications or invite customers. Apply these steps only during a separately authorized deployment. Keep the portal and live notifications disabled throughout the internal pilot.

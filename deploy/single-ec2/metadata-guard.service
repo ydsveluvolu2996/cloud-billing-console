@@ -1,0 +1,11 @@
+[Unit]
+Description=Cloud Billing EC2 metadata isolation
+Requires=docker.service
+After=docker.service
+Before=cloud-billing-collector.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cloud-billing-metadata-guard
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload an exact CI release and coordinate both fixed SSM targets with rollback."""
+"""Upload an exact CI release and coordinate both runtimes on one fixed SSM target with rollback."""
 import hashlib
 import json
 import os
@@ -15,7 +15,7 @@ ACCOUNT = '582287676741'
 REGION = 'ap-south-1'
 BUCKET = 'cloud-billing-console-artifacts-1p8h79kjwyyw'
 REPOSITORY_ID = '1361643722'
-INSTANCES = {'web': 'i-0cae3cd32c80de891', 'collector': 'i-0bba5908e62ce509e'}
+INSTANCES = {'combined': 'i-0cae3cd32c80de891'}
 DOCUMENT = 'CloudBilling-GitHubRelease'
 BRANCH = 'refs/heads/codex/billing-security-portfolio'
 
@@ -76,11 +76,11 @@ class Release:
         raise TimeoutError('SSM release command did not complete; inspect command ' + command_id)
 
     def deploy(self):
-        for runtime in ('collector', 'web'):
+        for runtime in INSTANCES:
             self.command(runtime, 'stage')
         attempted = []
         try:
-            for runtime in ('collector', 'web'):
+            for runtime in INSTANCES:
                 attempted.append(runtime)
                 self.command(runtime, 'activate')
             self.receipt['status'] = 'active'

@@ -72,7 +72,7 @@ def safe_extract(path, destination, limit=2_000_000_000):
 
 def compatible(source, expected):
     paths = sorted(str(p.relative_to(source)) for p in (source / 'billing/migrations').glob('*.py'))
-    paths += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service']
+    paths += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
     actual = {name: sha256(source / name) for name in paths}
     require(actual == expected, 'Schema, database policy or service configuration changed; a separate maintenance deployment is required')
 
@@ -82,6 +82,7 @@ class Agent:
         require(RELEASE.fullmatch(release_id), 'Invalid release ID')
         require(VERSION.fullmatch(version) and version != 'null', 'A versioned S3 manifest is required')
         require(DIGEST.fullmatch(digest), 'Invalid manifest digest')
+        require(config['runtime'] in ('web', 'collector', 'combined'), 'Unknown runtime')
         self.config = config
         self.release_id, self.version, self.digest = release_id, version, digest
         self.sha = release_id.split('-')[0]
@@ -91,6 +92,14 @@ class Agent:
         self.journal = self.stage / 'state.json'
         self.current = self.root / '.deployment/github-release-current.json'
         self.prefix = 'releases/github/' + release_id + '/'
+
+    @property
+    def has_web(self):
+        return self.config['runtime'] in ('web', 'combined')
+
+    @property
+    def has_collector(self):
+        return self.config['runtime'] in ('collector', 'combined')
 
     def download(self, name, version, digest):
         require(re.fullmatch(r'[a-z0-9.-]+', name), 'Invalid artifact name')
@@ -143,7 +152,11 @@ class Agent:
         require(manifest['instances'][self.config['runtime']] == self.config['instance_id'], 'Wrong target instance')
         require(manifest.get('executor_sha256') == sha256(Path(__file__)), 'The release executor changed; update the reviewed root-owned helper before deploying')
         artifacts = manifest['artifacts']
-        wanted = ['source.tar.gz', 'images.json', 'images.tar.gz'] if self.config['runtime'] == 'web' else ['source.tar.gz', 'wheels.tar.gz']
+        wanted = ['source.tar.gz']
+        if self.has_web:
+            wanted += ['images.json', 'images.tar.gz']
+        if self.has_collector:
+            wanted += ['wheels.tar.gz']
         require(shutil.disk_usage(self.stage).free > 3 * sum(artifacts[n]['size'] for n in wanted) + 1_000_000_000, 'Not enough free disk for a safe release')
         for name in wanted:
             entry = artifacts[name]
@@ -152,10 +165,10 @@ class Agent:
         source = self.stage / 'source'
         safe_extract(self.stage / 'source.tar.gz', source)
         compatible(source, self.config['compatibility'])
-        if self.config['runtime'] == 'web':
+        if self.has_web:
             run(['docker', 'image', 'load', '--input', str(self.stage / 'images.tar.gz')])
             state['image_id'] = self.verify_images(json.loads((self.stage / 'images.json').read_text()))
-        else:
+        if self.has_collector:
             safe_extract(self.stage / 'wheels.tar.gz', self.stage / 'wheels')
             venv = self.stage / 'venv'
             previous_umask = os.umask(0o022)
@@ -173,12 +186,15 @@ class Agent:
         return state
 
     def health(self):
-        if self.config['runtime'] == 'collector':
+        if self.has_collector:
             run(['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--uid=billing-collector',
                  '--working-directory=' + str(self.root), '--property=EnvironmentFile=/etc/cloud-billing/collector.env',
                  str(self.root / '.venv/bin/python'), 'manage.py', 'verify_runtime'])
             run(['systemctl', 'is-active', '--quiet', 'cloud-billing-collector'])
+        if not self.has_web:
             return
+        if self.config['runtime'] == 'combined':
+            run(['/usr/local/sbin/cloud-billing-metadata-guard', '--check'])
         run(['docker', 'compose', 'exec', '-T', 'app', 'python', 'manage.py', 'verify_runtime'], cwd=self.root)
         origin = 'https://' + self.config['hostname']
         args = ['curl', '--silent', '--show-error', '--max-time', '10', '--resolve', self.config['hostname'] + ':443:127.0.0.1']
@@ -214,17 +230,17 @@ class Agent:
                 saved = backup / name
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, saved)
-        if self.config['runtime'] == 'web':
+        if self.has_web:
             shutil.copy2(self.root / '.env', backup / 'environment')
             run(['bash', str(self.root / 'deploy/backup.sh')], cwd=self.root)
-        else:
+        if self.has_collector:
             venv = self.root / '.venv'
             state['previous_venv_link'] = str(venv.readlink()) if venv.is_symlink() else None
             require(venv.exists(), 'Collector virtualenv is missing')
         self.save(state, 'activating')
         write_json(self.current, {'release_id': self.release_id, 'phase': 'activating'})
         try:
-            if self.config['runtime'] == 'collector':
+            if self.has_collector:
                 run(['systemctl', 'stop', 'cloud-billing-collector'])
             for name in previous_files - set(files):
                 (self.root / name).unlink()
@@ -237,7 +253,7 @@ class Agent:
                     parent.chmod(0o755)
                 shutil.copy2(source / name, target)
                 target.chmod(0o644)
-            if self.config['runtime'] == 'web':
+            if self.has_web:
                 env = self.root / '.env'
                 text = env.read_text()
                 require(len(re.findall(r'^BILLING_APP_IMAGE=.*$', text, re.M)) == 1, 'Expected exactly one web image setting')
@@ -247,7 +263,7 @@ class Agent:
                 temporary.chmod(0o600)
                 temporary.replace(env)
                 run(['docker', 'compose', 'up', '-d', '--no-build', '--no-deps', 'app'], cwd=self.root)
-            else:
+            if self.has_collector:
                 venv = self.root / '.venv'
                 if venv.is_symlink():
                     venv.unlink()
@@ -279,7 +295,7 @@ class Agent:
             return state
         require(self.current.exists() and json.loads(self.current.read_text())['release_id'] == self.release_id, 'Refusing to roll back a different/newer release')
         backup = self.stage / 'backup'
-        if self.config['runtime'] == 'collector':
+        if self.has_collector:
             run(['systemctl', 'stop', 'cloud-billing-collector'])
         for item in state['files']:
             target = self.root / item['name']
@@ -288,10 +304,10 @@ class Agent:
                 shutil.copy2(backup / item['name'], target)
             else:
                 target.unlink(missing_ok=True)
-        if self.config['runtime'] == 'web':
+        if self.has_web:
             shutil.copy2(backup / 'environment', self.root / '.env')
             run(['docker', 'compose', 'up', '-d', '--no-build', '--no-deps', 'app'], cwd=self.root)
-        else:
+        if self.has_collector:
             venv = self.root / '.venv'
             if venv.is_symlink():
                 venv.unlink()

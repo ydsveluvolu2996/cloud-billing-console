@@ -12,7 +12,8 @@ resources=client('cloudformation').describe_stack_resources(StackName=a.stack)['
 ids={r['LogicalResourceId']:r['PhysicalResourceId'] for r in resources};checks={}
 ec2=client('ec2');iam=client('iam')
 instances={}
-for logical in ('Server','CollectorServer'):
+single = 'CollectorServer' not in ids
+for logical in (('Server',) if single else ('Server','CollectorServer')):
  instance=ec2.describe_instances(InstanceIds=[ids[logical]])['Reservations'][0]['Instances'][0];instances[logical]=instance
  checks[logical+'_imds_v2']=instance['MetadataOptions']['HttpTokens']=='required' and instance['MetadataOptions']['HttpPutResponseHopLimit']==1
  volumes=ec2.describe_volumes(VolumeIds=[b['Ebs']['VolumeId'] for b in instance['BlockDeviceMappings']])['Volumes']
@@ -26,7 +27,11 @@ for logical in ('Server','CollectorServer'):
  checks[logical+'_no_public_admin_db']=not any(lo<=port<=hi for lo,hi in public for port in (22,5432))
  checks[logical+'_restricted_https']=not any(lo<=443<=hi for lo,hi in public)
  checks[logical+'_no_public_collector_ingress']=not public if logical=='CollectorServer' else True
-checks['distinct_instances_profiles']=instances['Server']['InstanceId']!=instances['CollectorServer']['InstanceId'] and instances['Server']['IamInstanceProfile']['Arn']!=instances['CollectorServer']['IamInstanceProfile']['Arn']
+if single:
+ profile=iam.get_instance_profile(InstanceProfileName=instances['Server']['IamInstanceProfile']['Arn'].rsplit('/',1)[1])['InstanceProfile']
+ checks['combined_collector_identity']=len(profile['Roles'])==1 and profile['Roles'][0]['RoleName']==ids['CollectorRole']
+else:
+ checks['distinct_instances_profiles']=instances['Server']['InstanceId']!=instances['CollectorServer']['InstanceId'] and instances['Server']['IamInstanceProfile']['Arn']!=instances['CollectorServer']['IamInstanceProfile']['Arn']
 s3=client('s3');bucket=ids['Artifacts']
 checks['backup_encryption']=bool(s3.get_bucket_encryption(Bucket=bucket)['ServerSideEncryptionConfiguration']['Rules'])
 checks['backup_public_access_block']=all(s3.get_public_access_block(Bucket=bucket)['PublicAccessBlockConfiguration'].values())
@@ -34,12 +39,12 @@ checks['backup_versioning']=s3.get_bucket_versioning(Bucket=bucket).get('Status'
 policy=json.loads(s3.get_bucket_policy(Bucket=bucket)['Policy'])
 checks['backup_tls_deny']=any(s.get('Effect')=='Deny' and str(s.get('Condition',{}).get('Bool',{}).get('aws:SecureTransport','')).lower()=='false' for s in policy['Statement'])
 checks['storage_region']=s3.get_bucket_location(Bucket=bucket).get('LocationConstraint','us-east-1')==a.region
-role=iam.get_role(RoleName=ids['WebRole'])['Role']['Arn']
+role=iam.get_role(RoleName=ids['CollectorRole'] if single else ids['WebRole'])['Role']['Arn']
 result=iam.simulate_principal_policy(PolicySourceArn=role,ActionNames=['sts:AssumeRole','iam:PutRolePolicy'],ResourceArns=['*'])
-checks['web_aws_privilege_denied']=all(r['EvalDecision']!='allowed' for r in result['EvaluationResults'])
+checks['host_wildcard_aws_privilege_denied' if single else 'web_aws_privilege_denied']=all(r['EvalDecision']!='allowed' for r in result['EvaluationResults'])
 logs=client('logs').describe_log_groups(logGroupNamePrefix=ids['AuditLogGroup'])['logGroups']
 checks['audit_retention']=any(g['logGroupName']==ids['AuditLogGroup'] and g.get('retentionInDays',0)>=90 for g in logs)
-report={'at':datetime.now(timezone.utc).isoformat(),'checks':checks,'passed':all(checks.values()),'pending':['Host metadata reachability from actual app container','Private DB TLS and actual login checks','SSM-only administration','Caddy HTTP/HTTPS/certificate renewal','Central audit arrival and deletion denial','Customer STS/trust verification','Backup restore from actual production backup']}
+report={'runtime_mode':'single-ec2' if single else 'separate-hosts','at':datetime.now(timezone.utc).isoformat(),'checks':checks,'passed':all(checks.values()),'pending':['Host metadata reachability from actual app container and non-collector OS user; firewall persistence after Docker/host restart','Private DB TLS and actual login checks','SSM-only administration','Caddy HTTP/HTTPS/certificate renewal','Central audit arrival and deletion denial','Customer STS/trust verification','Backup restore from actual production backup']}
 path=Path(a.output);path.write_text(json.dumps(report,indent=2)+'\n');path.chmod(0o600)
 print('Read-only configuration checks passed' if report['passed'] else 'Configuration checks failed; inspect restricted evidence')
 if not report['passed']:raise SystemExit(1)

@@ -84,7 +84,7 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: mkdir -p /tmp/security-evidence
       - run: pip-audit -r requirements.txt --format json --output /tmp/security-evidence/dependencies.json
-      - run: bandit -r billing config scripts deploy/github-release -x deploy/github-release/tests -ll -ii -f json -o /tmp/security-evidence/bandit.json
+      - run: bandit -r billing config scripts deploy/github-release deploy/single-ec2 -x deploy/github-release/tests -ll -ii -f json -o /tmp/security-evidence/bandit.json
       - run: python scripts/install_scanners.py
       - run: .deployment/tools/gitleaks git --redact --report-format json --report-path /tmp/security-evidence/secrets.json
       - name: Build deployable runtime images

@@ -105,6 +105,43 @@ class HostRollback(unittest.TestCase):
         self.assertEqual((old/'original-dependencies').read_text(), 'preserved')
         self.assertEqual(self.agent.state()['phase'], 'rolled_back')
 
+    def test_combined_failure_restores_image_source_and_virtualenv_together(self):
+        self.agent.config['runtime'] = 'combined'
+        previous = self.root/'old-dependencies'
+        previous.mkdir()
+        (previous/'marker').write_text('previous')
+        (self.root/'.venv').symlink_to(previous, target_is_directory=True)
+        (self.agent.stage/'venv').mkdir()
+        with patch.object(agent, 'run', return_value='') as run, patch.object(agent.time, 'sleep'), \
+             patch.object(self.agent, 'health', side_effect=[ValueError('unhealthy')]*20 + [None]):
+            with self.assertRaisesRegex(ValueError, 'unhealthy'):
+                self.agent.activate()
+        self.assertEqual((self.root/'.venv').resolve(), previous)
+        self.assertIn('BILLING_APP_IMAGE=previous', (self.root/'.env').read_text())
+        self.assertEqual((self.root/'billing/old.py').read_text(), 'previous version')
+        self.assertFalse((self.root/'billing/new.py').exists())
+        self.assertEqual(self.agent.state()['phase'], 'rolled_back')
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(calls.count(['systemctl','stop','cloud-billing-collector']), 2)
+        self.assertEqual(calls.count(['systemctl','start','cloud-billing-collector']), 2)
+        self.assertEqual(sum(c[:3] == ['docker','compose','up'] for c in calls), 2)
+
+    def test_combined_health_checks_both_database_roles_and_metadata_guard(self):
+        self.agent.config.update(runtime='combined', hostname='billing.example.com')
+        def command(args, **kwargs):
+            if '%{http_code}' in args:
+                return '302'
+            if args[-1].endswith('/login/'):
+                return '<input name="token" autocomplete="one-time-code">'
+            return ''
+        with patch.object(agent, 'run', side_effect=command) as run:
+            self.agent.health()
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertIn(['systemctl','is-active','--quiet','cloud-billing-collector'], calls)
+        self.assertIn(['/usr/local/sbin/cloud-billing-metadata-guard','--check'], calls)
+        self.assertIn(['docker','compose','exec','-T','app','python','manage.py','verify_runtime'], calls)
+        self.assertTrue(any(c[0]=='systemd-run' and 'verify_runtime' in c for c in calls))
+
     def test_unhealthy_rollback_cannot_be_reported_as_success_on_retry(self):
         state = self.agent.state()
         self.agent.save(state, 'rolled_back')
@@ -140,12 +177,12 @@ class HostRollback(unittest.TestCase):
             self.agent.download('source.tar.gz', 'version', 'd'*64)
 
     def test_unmatched_installed_executor_blocks_release_before_loading_artifacts(self):
-        self.agent.config.update(repository_id=release.REPOSITORY_ID, account_id=release.ACCOUNT, instance_id=release.INSTANCES['web'])
+        self.agent.config.update(repository_id=release.REPOSITORY_ID, account_id=release.ACCOUNT, instance_id=release.INSTANCES['combined'])
         state = self.agent.state()
         self.agent.save(state, 'new')
         manifest = self.agent.stage/'manifest.json'
         manifest.write_text(json.dumps({'release_id': RELEASE, 'sha': SHA, 'repository_id': release.REPOSITORY_ID,
-                            'account_id': release.ACCOUNT, 'instances': release.INSTANCES, 'executor_sha256': 'e'*64}))
+                            'account_id': release.ACCOUNT, 'instances': {'web': release.INSTANCES['combined']}, 'executor_sha256': 'e'*64}))
         with patch.object(self.agent, 'download', return_value=manifest) as download:
             with self.assertRaisesRegex(ValueError, 'executor changed'):
                 self.agent.stage_release()
@@ -153,7 +190,7 @@ class HostRollback(unittest.TestCase):
 
     def test_migration_change_blocks_automatic_release(self):
         source = self.agent.stage/'source'
-        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service']:
+        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']:
             path = source/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('baseline')
@@ -165,28 +202,28 @@ class HostRollback(unittest.TestCase):
 
 
 class Coordination(unittest.TestCase):
-    def test_second_host_failure_rolls_back_both_hosts_in_reverse_order(self):
+    def test_combined_host_failure_rolls_back_once(self):
         coordinator = release.Release(None, RELEASE, 'version', 'b'*64, {})
         calls = []
         def command(runtime, action):
             calls.append((runtime, action))
-            if (runtime, action) == ('web', 'activate'):
+            if (runtime, action) == ('combined', 'activate'):
                 raise RuntimeError('failed')
         with patch.object(coordinator, 'command', side_effect=command), self.assertRaises(RuntimeError):
             coordinator.deploy()
-        self.assertEqual(calls[-2:], [('web', 'rollback'), ('collector', 'rollback')])
+        self.assertEqual(calls, [('combined', 'stage'), ('combined', 'activate'), ('combined', 'rollback')])
         self.assertEqual(coordinator.receipt['status'], 'rolled_back')
 
     def test_stage_failure_does_not_activate_anything(self):
         coordinator = release.Release(None, RELEASE, 'version', 'b'*64, {})
-        with patch.object(coordinator, 'command', side_effect=[{}, RuntimeError('bad artifact')]) as command:
+        with patch.object(coordinator, 'command', side_effect=RuntimeError('bad artifact')) as command:
             with self.assertRaises(RuntimeError):
                 coordinator.deploy()
         self.assertTrue(all(call.args[1] == 'stage' for call in command.call_args_list))
 
     def test_rollback_failure_is_reported(self):
         coordinator = release.Release(None, RELEASE, 'version', 'b'*64, {})
-        with patch.object(coordinator, 'command', side_effect=[{}, {}, {}, RuntimeError('web failure'), RuntimeError('rollback failure'), {}]):
+        with patch.object(coordinator, 'command', side_effect=[{}, RuntimeError('combined failure'), RuntimeError('rollback failure')]):
             with self.assertRaises(RuntimeError):
                 coordinator.deploy()
         self.assertEqual(coordinator.receipt['status'], 'rollback_failed')
@@ -209,7 +246,8 @@ class Permissions(unittest.TestCase):
         permissions = {s['Action'] for s in policy['Statement']}
         self.assertEqual(permissions, {'s3:PutObject', 'ssm:SendCommand', 'ssm:GetCommandInvocation'})
         ssm = next(s for s in policy['Statement'] if s['Action'] == 'ssm:SendCommand')
-        self.assertEqual(len(ssm['Resource']), 3)
+        self.assertEqual(len(ssm['Resource']), 2)
+        self.assertEqual([x for x in ssm['Resource'] if ':instance/' in x], ['arn:aws:ec2:ap-south-1:582287676741:instance/i-0cae3cd32c80de891'])
         self.assertNotIn('AWS-RunShellScript', json.dumps(policy))
         self.assertEqual(reader['Statement'][0]['Action'], 's3:GetObjectVersion')
         self.assertTrue(reader['Statement'][0]['Resource'].endswith('/releases/github/*'))

@@ -1,3 +1,5 @@
+> Current production topology: web, database and collector share one EC2. The earlier separate-host threat model below is retained as the stronger alternative; it is not a claim about current host-level isolation. See [single-EC2 controls and limits](single-ec2-operations.md). Database identities, RLS, MFA and customer access controls still apply.
+
 # Security architecture and authorization
 
 The application extends the existing Django, PostgreSQL, durable worker and Caddy design. It preserves the Customer, BillingSource, AwsAccount, effective AccountAssignment, Cost and Alliance foundations. Additive migrations introduce governance and identity records without deleting existing billing facts, users, comments, service notes or snapshots.

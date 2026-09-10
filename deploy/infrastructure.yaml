@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Cloud Billing Console: EC2 web and isolated EC2 collector, private TLS
-  database access, exact customer role allowlisting. Review change set before applying.'
+Description: 'Cloud Billing Console: one EC2 for web, PostgreSQL and an isolated collector
+  process.'
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -17,19 +17,10 @@ Parameters:
   PilotCidr:
     Type: String
     Description: Approved pilot IP or VPN egress CIDR; no default. Do not use 0.0.0.0/0.
-  CollectorSubnetId:
-    Type: AWS::EC2::Subnet::Id
-    Description: Subnet with outbound HTTPS to AWS APIs; no inbound access.
-  CollectorInstanceType:
-    Type: String
-    Default: t3.small
-    AllowedValues:
-    - t3.small
-    - t3.medium
   ApprovedCustomerRoleArns:
     Type: CommaDelimitedList
     Default: ''
-    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:role/(?!.*[?*])[!-~]+/[A-Za-z0-9_+=,.@-]{1,64}$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@-]{1,64}$'
+    AllowedPattern: ^$|^arn:aws:iam::[0-9]{12}:role/(?!.*[?*])[!-~]+/[A-Za-z0-9_+=,.@-]{1,64}$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@-]{1,64}$
     Description: Exact approved customer role ARNs. Empty disables all customer AssumeRole.
   WebSecretArn:
     Type: String
@@ -145,7 +136,20 @@ Resources:
             - logs:CreateLogStream
             - logs:PutLogEvents
             Resource:
-              Fn::GetAtt: [AuditLogGroup, Arn]
+              Fn::GetAtt:
+              - AuditLogGroup
+              - Arn
+      - PolicyName: WriteEncryptedBackupsOnly
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/backups/*
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: AES256
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -183,7 +187,7 @@ Resources:
       InstanceType:
         Ref: InstanceType
       IamInstanceProfile:
-        Ref: WebInstanceProfile
+        Ref: InstanceProfile
       CreditSpecification:
         CPUCredits: standard
       MetadataOptions:
@@ -220,14 +224,8 @@ Resources:
 
           apt-get update
 
-          apt-get install -y docker.io docker-compose-v2 ca-certificates curl unzip
+          apt-get install -y docker.io docker-compose-v2 awscli ca-certificates curl
           unattended-upgrades
-
-          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
-
-          unzip -q /tmp/awscli.zip -d /tmp/awscli-install
-
-          /tmp/awscli-install/aws/install --update
 
           systemctl enable --now docker
 
@@ -293,7 +291,9 @@ Resources:
             - logs:CreateLogStream
             - logs:PutLogEvents
             Resource:
-              Fn::GetAtt: [AuditLogGroup, Arn]
+              Fn::GetAtt:
+              - AuditLogGroup
+              - Arn
       - PolicyName: WriteEncryptedBackupsOnly
         PolicyDocument:
           Version: '2012-10-17'
@@ -327,75 +327,6 @@ Resources:
         ToPort: 5432
         DestinationSecurityGroupId:
           Ref: WebSecurityGroup
-  CollectorDatabaseIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId:
-        Ref: WebSecurityGroup
-      SourceSecurityGroupId:
-        Ref: CollectorSecurityGroup
-      IpProtocol: tcp
-      FromPort: 5432
-      ToPort: 5432
-      Description: Collector only; bind PostgreSQL to the private interface and require
-        TLS
-  CollectorServer:
-    Type: AWS::EC2::Instance
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      ImageId:
-        Ref: AmiId
-      InstanceType:
-        Ref: CollectorInstanceType
-      IamInstanceProfile:
-        Ref: InstanceProfile
-      CreditSpecification:
-        CPUCredits: standard
-      MetadataOptions:
-        HttpTokens: required
-        HttpPutResponseHopLimit: 1
-        HttpEndpoint: enabled
-      BlockDeviceMappings:
-      - DeviceName: /dev/sda1
-        Ebs:
-          VolumeSize: 20
-          VolumeType: gp3
-          Encrypted: true
-          DeleteOnTermination: false
-      NetworkInterfaces:
-      - DeviceIndex: 0
-        AssociatePublicIpAddress: true
-        SubnetId:
-          Ref: CollectorSubnetId
-        GroupSet:
-        - Ref: CollectorSecurityGroup
-      Tags:
-      - Key: Name
-        Value: cloud-billing-collector
-      UserData:
-        Fn::Base64: '#!/bin/bash
-
-          set -euo pipefail
-
-          timedatectl set-timezone UTC
-
-          # The collector security group permits HTTPS, not plain HTTP package mirrors.
-
-          sed -i ''s|http://|https://|g'' /etc/apt/sources.list.d/ubuntu.sources
-
-          apt-get update
-
-          apt-get install -y python3-venv python3-pip ca-certificates curl unzip unattended-upgrades
-
-          useradd --system --create-home billing-collector
-
-          install -d -m 0750 -o billing-collector /opt/cloud-billing
-
-          # Release installation, secret files and activation are separate reviewed
-          steps.
-
-          '
   AuditLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -426,12 +357,14 @@ Outputs:
       - Arn
   CollectorInstanceId:
     Value:
-      Ref: CollectorServer
+      Ref: Server
   PrivateDatabaseAddress:
     Value:
       Fn::GetAtt:
       - Server
       - PrivateIp
+  RuntimeMode:
+    Value: single-ec2
 Rules:
   RestrictedPilot:
     Assertions:
