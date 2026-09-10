@@ -115,8 +115,10 @@ class Agent:
 
     def state(self):
         if not self.journal.exists():
-            return {'phase': 'new', 'release_id': self.release_id, 'manifest_version': self.version, 'manifest_sha256': self.digest}
+            return {'phase': 'new', 'runtime': self.config['runtime'], 'release_id': self.release_id, 'manifest_version': self.version, 'manifest_sha256': self.digest}
         state = json.loads(self.journal.read_text())
+        if self.config['runtime'] == 'combined':
+            require(state.get('runtime') == 'combined', 'Release predates single-EC2 migration; use the preserved maintenance recovery procedure')
         require((state['manifest_version'], state['manifest_sha256']) == (self.version, self.digest), 'Release coordinates changed')
         return state
 

@@ -29,6 +29,6 @@ Collector logs use `/var/log/cloud-billing/collector/worker.log` in a collector-
 
 ## Future releases
 
-`deploy/github-release/release.py` has one `combined` target. The installed helper stages source, scanned images and native wheels once; backs up the database; stops the collector; updates source, web image and collector venv; and checks both runtime identities and metadata rules. Failure restores image, source and venv together. Infrastructure, database policy, metadata guard and service changes still require explicit maintenance; ordinary releases never change those controls.
+`deploy/github-release/release.py` has one `combined` target. The installed helper stages source, scanned images and native wheels once; backs up the database; stops the collector; updates source, web image and collector venv; and checks both runtime identities and metadata rules. Failure restores image, source and venv together. Old per-host release journals are rejected by the combined helper; recovering the earlier two-host topology is a separate maintenance operation. Infrastructure, database policy, metadata guard and service changes still require explicit maintenance; ordinary releases never change those controls.
 
 Before any host restart, ensure both service enablement and Docker's metadata guard override are installed. After restart verify metadata denial, HTTPS, database TLS/RLS, collector scheduling, CloudWatch delivery and backup health. Keep the previous source/venv/image and root-only configuration evidence until recovery has been validated.

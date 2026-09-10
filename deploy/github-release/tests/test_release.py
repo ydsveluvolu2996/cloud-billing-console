@@ -107,6 +107,9 @@ class HostRollback(unittest.TestCase):
 
     def test_combined_failure_restores_image_source_and_virtualenv_together(self):
         self.agent.config['runtime'] = 'combined'
+        state = json.loads(self.agent.journal.read_text())
+        state['runtime'] = 'combined'
+        self.agent.save(state, 'staged')
         previous = self.root/'old-dependencies'
         previous.mkdir()
         (previous/'marker').write_text('previous')
@@ -125,6 +128,14 @@ class HostRollback(unittest.TestCase):
         self.assertEqual(calls.count(['systemctl','stop','cloud-billing-collector']), 2)
         self.assertEqual(calls.count(['systemctl','start','cloud-billing-collector']), 2)
         self.assertEqual(sum(c[:3] == ['docker','compose','up'] for c in calls), 2)
+
+    def test_combined_runtime_rejects_legacy_host_journal_before_mutation(self):
+        self.agent.config['runtime'] = 'combined'
+        before = (self.root/'billing/old.py').read_text()
+        for action in [self.agent.stage_release, self.agent.activate, self.agent.rollback]:
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, 'predates single-EC2'):
+                action()
+        self.assertEqual((self.root/'billing/old.py').read_text(), before)
 
     def test_combined_health_checks_both_database_roles_and_metadata_guard(self):
         self.agent.config.update(runtime='combined', hostname='billing.example.com')
