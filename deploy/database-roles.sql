@@ -86,7 +86,7 @@ REVOKE ALL ON FUNCTION billing_customer_visible(uuid),billing_source_visible(uui
 GRANT EXECUTE ON FUNCTION billing_customer_visible(uuid),billing_source_visible(uuid),billing_revoke_customer_access(uuid) TO billing_web;
 ALTER TABLE billing_customer ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS web_scope ON billing_customer;
-CREATE POLICY web_scope ON billing_customer TO billing_web USING (billing_customer_visible(id)) WITH CHECK (billing_can_access(id,NULL,true));
+CREATE POLICY web_scope ON billing_customer TO billing_web USING (CASE WHEN (SELECT billing_can_access(NULL,NULL,false)) THEN true ELSE (billing_customer_visible(id)) END) WITH CHECK (billing_can_access(id,NULL,true));
 DROP POLICY IF EXISTS collector_scope ON billing_customer;
 CREATE POLICY collector_scope ON billing_customer TO billing_collector USING (true) WITH CHECK (true);
 GRANT SELECT ON billing_customer TO billing_web;
@@ -120,7 +120,7 @@ GRANT SELECT ON billing_accountassignment TO billing_collector;
 GRANT INSERT,UPDATE,DELETE ON billing_accountassignment TO billing_collector;
 ALTER TABLE billing_cost ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS web_scope ON billing_cost;
-CREATE POLICY web_scope ON billing_cost TO billing_web USING (billing_can_access(customer_id,account_id,false)) WITH CHECK (billing_can_access(customer_id,account_id,true));
+CREATE POLICY web_scope ON billing_cost TO billing_web USING (CASE WHEN (SELECT billing_can_access(NULL,NULL,false)) THEN true ELSE (billing_can_access(customer_id,account_id,false)) END) WITH CHECK (billing_can_access(customer_id,account_id,true));
 DROP POLICY IF EXISTS collector_scope ON billing_cost;
 CREATE POLICY collector_scope ON billing_cost TO billing_collector USING (true) WITH CHECK (true);
 GRANT SELECT ON billing_cost TO billing_web;

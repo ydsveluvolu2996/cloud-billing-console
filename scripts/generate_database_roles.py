@@ -110,6 +110,13 @@ for name,m in models.items():
    read=f"billing_customer_visible({cid}) AND created_by=(SELECT username FROM auth_user WHERE id::text=current_setting('billing.user_id',true))";write=read
   if name=='ExplorerQuery':write=read # view-only users may request their scoped reports
  else:continue
+ # NULL customer/account cannot match a membership, so this is true only for
+ # the existing active, internal portfolio-admin branch. An uncorrelated
+ # subquery runs once per statement (including each prepared execution), and
+ # CASE avoids evaluating the per-row permission function for that admin.
+ # Keep scoped fallbacks, write checks and user-owned report/cache policies.
+ if name in ('Customer','Cost'):
+  read=f'CASE WHEN (SELECT billing_can_access(NULL,NULL,false)) THEN true ELSE ({read}) END'
  sql+=f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;\nDROP POLICY IF EXISTS web_scope ON {table};\nCREATE POLICY web_scope ON {table} TO billing_web USING ({read}) WITH CHECK ({write});\n'
  sql+=f'DROP POLICY IF EXISTS collector_scope ON {table};\nCREATE POLICY collector_scope ON {table} TO billing_collector USING (true) WITH CHECK (true);\n'
  sql+=f'GRANT SELECT ON {table} TO billing_web;\n'

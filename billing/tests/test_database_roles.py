@@ -52,6 +52,62 @@ class DatabaseRoleTests(TransactionTestCase):
                     with self.assertRaises(psycopg.errors.InsufficientPrivilege):
                         with c.transaction():c.execute(statement)
 
+    def test_portfolio_read_plan_rechecks_identity_and_grants_on_every_execution(self):
+        from datetime import timedelta
+        admin=User.objects.create_superuser('rls-portfolio',password='test-only-portfolio-password')
+        profile,_=UserSecurity.objects.update_or_create(user=admin,defaults={'portfolio_access':True})
+        with self.connect('billing_web') as c:
+            c.execute('PREPARE portfolio_counts AS SELECT (SELECT count(*) FROM billing_cost),(SELECT count(*) FROM billing_customer)')
+            def visible(identity, expected):
+                c.execute("SELECT set_config('billing.user_id',%s,true)",[str(identity) if identity else ''])
+                self.assertEqual(c.execute('EXECUTE portfolio_counts').fetchone(),expected)
+            visible(admin.pk,(2,2))
+            visible(None,(0,0))
+            visible(self.user.pk,(1,1))
+            UserSecurity.objects.filter(pk=profile.pk).update(portfolio_access=False)
+            visible(admin.pk,(0,0))
+            member=CustomerMembership.objects.create(user=admin,customer=self.a,role='viewer',account_ids=[self.sa.account_id])
+            visible(admin.pk,(1,1))
+            CustomerMembership.objects.filter(pk=member.pk).update(expires_at=timezone.now()-timedelta(seconds=1))
+            visible(admin.pk,(0,0))
+            CustomerMembership.objects.filter(pk=member.pk).update(expires_at=None)
+            visible(admin.pk,(1,1))
+            UserSecurity.objects.filter(pk=profile.pk).update(portfolio_access=True)
+            User.objects.filter(pk=admin.pk).update(is_active=False)
+            visible(admin.pk,(0,0))
+            User.objects.filter(pk=admin.pk).update(is_active=True,is_superuser=False)
+            visible(admin.pk,(1,1))
+            User.objects.filter(pk=admin.pk).update(is_superuser=True)
+            UserSecurity.objects.filter(pk=profile.pk).update(external=True)
+            visible(admin.pk,(0,0))
+            CustomerMembership.objects.filter(pk=member.pk).update(role='customer')
+            visible(admin.pk,(0,0))
+            c.execute("SELECT set_config('billing.external_enabled','true',true)")
+            visible(admin.pk,(1,1))
+            c.execute("SELECT set_config('billing.external_enabled','false',true)")
+            visible(admin.pk,(0,0))
+            UserSecurity.objects.filter(pk=profile.pk).update(external=False)
+            Customer.objects.filter(pk=self.a.pk).update(active=False)
+            visible(admin.pk,(2,2))  # Explicit admin access includes retained history.
+            UserSecurity.objects.filter(pk=profile.pk).update(portfolio_access=False)
+            visible(admin.pk,(0,0))
+
+    def test_portfolio_report_checks_global_authorization_once_per_relation(self):
+        import json
+        admin=User.objects.create_superuser('rls-plan-admin',password='test-only-plan-password')
+        UserSecurity.objects.update_or_create(user=admin,defaults={'portfolio_access':True})
+        with self.connect('billing_web') as c:
+            c.execute("SELECT set_config('billing.user_id',%s,true)",[str(admin.pk)])
+            plan=c.execute('EXPLAIN (ANALYZE,VERBOSE,FORMAT JSON) SELECT c.customer_id,SUM(c.unblended) FROM billing_cost c WHERE c.customer_id IN (SELECT id FROM billing_customer WHERE active) GROUP BY c.customer_id').fetchone()[0]
+            if isinstance(plan,str):plan=json.loads(plan)
+            def nodes(node):
+                yield node
+                for child in node.get('Plans',[]):yield from nodes(child)
+            checks=[n for n in nodes(plan[0]['Plan']) if n.get('Parent Relationship')=='InitPlan' and any('billing_can_access' in x for x in n.get('Output',[]))]
+            self.assertEqual(len(checks),2)
+            self.assertTrue(all(n['Actual Loops']==1 for n in checks))
+            self.assertEqual(c.execute('SELECT SUM(unblended) FROM billing_cost').fetchone()[0],1009)
+
     def test_database_previews_and_caches_require_current_request_scope(self):
         from billing.models import BulkImport,ExplorerQuery
         from billing.access import for_user,scope_fingerprint
