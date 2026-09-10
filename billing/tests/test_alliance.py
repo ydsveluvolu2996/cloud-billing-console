@@ -89,7 +89,7 @@ class AllianceTests(TestCase):
         self.assertIsNone(response.context['executive']['comparison']['percent'])
         response = self.client.get('/alliance/?month=2026-08&export=executive_customers_csv')
         exported = list(csv.DictReader(io.StringIO(response.content.decode())))
-        self.assertEqual(exported[0]['Change'], '115')
+        self.assertEqual(Decimal(exported[0]['Change']), Decimal('115'))
         self.assertEqual(exported[0]['Change percent'], '')
         self.assertEqual(len(exported), 1)
 
