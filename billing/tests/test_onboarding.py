@@ -132,6 +132,22 @@ class OnboardingTests(TestCase):
         for suffix in ['tree/', '']:
             self.assertNotContains(self.client.get(f'/customers/{external.pk}/{suffix}'), 'Configured budget (USD)')
 
+    def test_new_external_accounts_share_aligned_table_without_budget_columns(self):
+        customer, source = make_customer('External customer with a long legal entity name', '333333333333', accounts=('444444444444',))
+        source.accounts.update(name='Production account with a long descriptive name')
+        response = self.client.get(f'/customers/{customer.pk}/tree/')
+        self.assertContains(response, 'customer-account-table')
+        self.assertContains(response, 'Production account with a long descriptive name', count=2)
+        self.assertNotContains(response, 'Configured budget')
+        self.assertNotContains(response, 'Budget alarms')
+        html = response.content.decode()
+        header = html.split('<thead>')[1].split('</thead>')[0]
+        self.assertEqual(header.count('<th'), 3)
+        import re
+        rows = re.findall(r'<tr>(.*?)</tr>', html.split('<tbody>')[1].split('</tbody>')[0], re.S)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row.count('<td') == 3 for row in rows))
+
     def test_duplicate_payer_and_member_onboarding_detected(self):
         customer, source = make_customer('Existing', '123456789012', accounts=('210987654321',))
         other = Customer.objects.create(name='Other')
@@ -223,8 +239,8 @@ class OnboardingTests(TestCase):
         self.assertEqual({r['customer'].name for r in response.context['page']}, {'Gametion', 'Flentas partner'})
         html = response.content.decode()
         internal_html, external_html = html.split('<section class="panel" aria-labelledby="external-customers">')
-        self.assertIn('<th>Customer budget</th>', internal_html)
-        self.assertNotIn('<th>Customer budget</th>', external_html)
+        self.assertIn('<th class="number">Customer budget</th>', internal_html)
+        self.assertNotIn('<th class="number">Customer budget</th>', external_html)
         self.assertIn(str(external.pk), external_html)
         self.assertNotIn(str(internal.pk), external_html)
         self.assertIn('colspan="6"', external_html)

@@ -1,0 +1,5 @@
+<div class="table-wrap customer-account-wrap" tabindex="0" role="region" aria-label="{{ customer.name }} account costs">
+<table class="customer-account-table {% if show_account_budgets %}with-budgets{% endif %}"><caption class="sr-only">{{ customer.name }} account costs{% if show_account_budgets %} and configured budgets{% endif %}</caption>
+<colgroup><col class="account-id-col"><col class="account-name-col"><col class="account-cost-col">{% if show_account_budgets %}<col class="account-budget-col"><col class="account-alarm-col">{% endif %}</colgroup>
+<thead><tr><th>Account</th><th>Name / environment</th><th class="number">{% if is_current_month %}MTD{% else %}{{ month|date:'M Y' }}{% endif %} ({{ currency }})</th>{% if show_account_budgets %}<th class="number">Configured budget ({{ currency }})</th><th>Budget alarms</th>{% endif %}</tr></thead>
+<tbody>{% if own_row %}{% include 'billing/includes/customer_account_row.html' with row=own_row own=True %}{% endif %}{% for row in account_rows %}{% include 'billing/includes/customer_account_row.html' with own=False %}{% endfor %}</tbody></table></div>
