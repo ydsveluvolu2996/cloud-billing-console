@@ -1,0 +1,4 @@
+{% load money %}
+{% for configured in row.configured_budgets %}
+<div>{% if configured.amount != None %}{{ configured.amount|money }} {{ currency }}{% else %}<span class="muted">Not configured</span>{% endif %}<small><a href="{% url 'budget_detail' configured.budget.pk %}">{{ configured.budget.name }}</a>{% if configured.budget.filters %} · Filtered budget{% endif %}</small></div>
+{% empty %}<span class="muted">Not configured</span>{% endfor %}

@@ -179,6 +179,21 @@ def account_tree(customer, month, today, currency):
     sources = {s.pk: s for s in customer.sources.all()}
     for s in BillingSource.objects.filter(pk__in=[e['account'].source_id for e in accounts.values() if e['account'].source_id]):
         sources.setdefault(s.pk, s)
+    show_account_budgets = customer.name.strip().casefold() == 'flentas'
+    account_budgets = {}
+    if show_account_budgets:
+        budget_list = list(customer.budgets.filter(active=True, scope=Budget.ACCOUNT, currency=currency,
+                                                  metric='unblended').prefetch_related('amounts'))
+        evaluations = budgeting.latest_evaluations(budget_list, month)
+        alarms = {}
+        for alert in Alert.objects.filter(budget__in=budget_list, month=month, acknowledged_at__isnull=True):
+            alarms.setdefault(alert.budget_id, []).append(alert)
+        for budget in budget_list:
+            account_budgets.setdefault(budget.account_id, []).append({
+                'budget': budget, 'amount': budget.amount_for(month),
+                'evaluation': evaluations.get(budget.pk), 'alarms': alarms.get(budget.pk, [])})
+    for account_id, entry in accounts.items():
+        entry['configured_budgets'] = account_budgets.get(account_id, [])
     tree = []
     used = set()
     for source in sorted(sources.values(), key=lambda s: s.account_id):
@@ -201,7 +216,7 @@ def account_tree(customer, month, today, currency):
         tree.append({'source': source, 'own': own, 'members': members, 'count': len(members) + (1 if own else 0), 'total': total if (own and own['spend']) or any(r['spend'] for r in members) else None,
                      'periods': CollectionPeriod.objects.filter(source=source).order_by('-month')[:3]})
     orphans = [{**entry, 'spend': spend.get(account_id)} for account_id, entry in sorted(accounts.items()) if account_id not in used]
-    return {'tree': tree, 'orphans': orphans, 'month_end': month_end, 'month_total': sum((r['v'] for r in spend.values()), Decimal(0)) if spend else None}
+    return {'show_account_budgets': show_account_budgets, 'is_current_month': month == today.replace(day=1), 'tree': tree, 'orphans': orphans, 'month_end': month_end, 'month_total': sum((r['v'] for r in spend.values()), Decimal(0)) if spend else None}
 
 
 @never_cache
@@ -211,7 +226,7 @@ def customer_tree(request, pk):
     month=month_param(request)
     currency=request.GET.get('currency','USD')
     return render(request,'billing/includes/customer_tree.html',dict(
-        customer=customer,month=month,currency=currency,**account_tree(customer,month,timezone.now().date(),currency)))
+        customer=customer,month=month,currency=currency,can_edit=scoping.can_edit(request.user),**account_tree(customer,month,timezone.now().date(),currency)))
 
 
 @require_POST

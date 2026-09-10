@@ -3,7 +3,15 @@
 {% for node in tree %}
 <details class="portfolio-connection" open><summary>{{ node.source.account_id }} · {{ node.source.get_kind_display }} · {{ node.count }} accounts · {{ node.total|precise_money }} {{ currency }}</summary>
 <p>{{ node.source.state }} · Inventory: {{ node.source.discovery_mode|default:'Not discovered' }}{% if node.source.discovery_mode == 'billing_only' %} (zero-spend accounts may be missing){% endif %}<br>Last attempt: {{ node.source.last_attempt|default:'None' }}<br>Last success: {{ node.source.last_success|default:'None' }}</p>
-<div class="portfolio-accounts">{% if node.own %}<p><a href="{% url 'account_detail' node.own.account.account_id %}?customer={{ customer.pk }}">{{ node.own.account.account_id }} · Payer-own spend</a><br>{{ node.own.account.name }} · {% if node.own.spend %}{{ node.own.spend.v|precise_money }}{% else %}—{% endif %} {{ currency }}</p>{% endif %}
+{% if show_account_budgets %}
+<div class="table-wrap"><table><caption class="sr-only">Flentas account costs and configured budgets</caption><thead><tr><th>Account</th><th>Name / environment</th><th class="number">{% if is_current_month %}MTD{% else %}{{ month|date:'M Y' }}{% endif %} ({{ currency }})</th><th class="number">Configured budget ({{ currency }})</th><th>Budget alarms</th></tr></thead><tbody>
+{% if node.own %}{% include 'billing/includes/internal_account_row.html' with row=node.own own=True %}{% endif %}
+{% for row in node.members %}{% include 'billing/includes/internal_account_row.html' with own=False %}{% endfor %}
+</tbody></table></div>
+{% else %}<div class="portfolio-accounts">{% if node.own %}{% if show_account_budgets and orphans %}<h3>Other assigned accounts</h3><div class="table-wrap"><table><caption class="sr-only">Flentas account costs and configured budgets</caption><thead><tr><th>Account</th><th>Name / environment</th><th class="number">{% if is_current_month %}MTD{% else %}{{ month|date:'M Y' }}{% endif %} ({{ currency }})</th><th class="number">Configured budget ({{ currency }})</th><th>Budget alarms</th></tr></thead><tbody>
+{% for row in orphans %}{% include 'billing/includes/internal_account_row.html' with own=False %}{% endfor %}
+</tbody></table></div>{% endif %}
+<p><a href="{% url 'account_detail' node.own.account.account_id %}?customer={{ customer.pk }}">{{ node.own.account.account_id }} · Payer-own spend</a><br>{{ node.own.account.name }} · {% if node.own.spend %}{{ node.own.spend.v|precise_money }}{% else %}—{% endif %} {{ currency }}</p>{% endif %}
 {% for row in node.members %}<p><a href="{% url 'account_detail' row.account.account_id %}?customer={{ customer.pk }}">{{ row.account.account_id }} · {{ row.account.name|default:'Unnamed account' }}</a><br>{{ row.account.alias }} {{ row.account.environment }}{% if row.account.owner %} · Owner {{ row.account.owner }}{% endif %} · {{ row.account.state }} · {% if row.current %}Current{% else %}Historical{% endif %}<br>{% if row.spend %}{{ row.spend.v|precise_money }}{% else %}—{% endif %} {{ currency }}</p>{% endfor %}
-</div></details>{% empty %}<p>No assigned connections. <a href="{% url 'customer_detail' customer.pk %}">Review account ownership</a>.</p>{% endfor %}
+</div>{% endif %}</details>{% empty %}<p>No assigned connections. <a href="{% url 'customer_detail' customer.pk %}">Review account ownership</a>.</p>{% endfor %}
 <p><a href="{% url 'customer_detail' customer.pk %}">Open accounts, budgets and daily/monthly drilldown →</a></p>

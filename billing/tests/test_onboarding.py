@@ -6,8 +6,8 @@ from botocore.exceptions import ClientError
 from django.contrib.auth.models import User
 from django.test import TestCase, Client
 from django.utils import timezone
-from billing import jobs, onboarding, scheduler
-from billing.models import AccountAssignment, AuditEvent, BillingSource, Budget, Customer, ExplorerQuery, Job
+from billing import budgets as budgeting, jobs, onboarding, scheduler
+from billing.models import AccountAssignment, Alert, AuditEvent, BillingSource, Budget, BudgetAmount, Customer, ExplorerQuery, Job
 from .helpers import FakeSession, assign, cost, make_customer, web_settings
 
 
@@ -98,6 +98,39 @@ class OnboardingTests(TestCase):
         response = self.client.get(url)
         self.assertContains(response, '0.00 USD')
         self.assertNotContains(response, '— USD')
+
+    def test_flentas_account_columns_use_account_budgets_and_month_overrides(self):
+        customer, source = make_customer('Flentas', '123456789012', accounts=('210987654321', '210987654322'))
+        month = timezone.now().date().replace(day=1)
+        cost(source, month, Decimal('12.34'), account_id='210987654321')
+        budget = Budget.objects.create(customer=customer, scope=Budget.ACCOUNT, account_id='210987654321', name='Member monthly limit')
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('100'), effective_from=month)
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('250'), month=month)
+        for scope, name, currency in [(Budget.CUSTOMER, 'Parent limit', 'USD'), (Budget.ACCOUNT, 'Other currency', 'EUR')]:
+            other = Budget.objects.create(customer=customer, scope=scope, account_id='210987654321', name=name, currency=currency)
+            BudgetAmount.objects.create(budget=other, amount=Decimal('9999'), effective_from=month)
+        for suffix in ['tree/', '']:
+            response = self.client.get(f'/customers/{customer.pk}/{suffix}')
+            self.assertContains(response, 'MTD (USD)')
+            self.assertContains(response, 'Configured budget (USD)')
+            self.assertContains(response, '250.00 USD')
+            self.assertContains(response, '12.34')
+            self.assertContains(response, 'Not configured')
+            self.assertNotContains(response, '9,999')
+            self.assertNotContains(response, 'Other currency')
+            rows = response.context['tree'][0]['members']
+            configured = next(r for r in rows if r['account'].account_id == '210987654321')['configured_budgets']
+            self.assertEqual([b['amount'] for b in configured], [Decimal('250')])
+        budgeting.raise_alerts(budget, month, Decimal('250'), Decimal('220'), None, timezone.now())
+        budgeting.raise_alerts(budget, month, Decimal('250'), Decimal('220'), None, timezone.now())
+        self.assertEqual(Alert.objects.filter(budget=budget, kind='actual').count(), 1)
+        response = self.client.get(f'/customers/{customer.pk}/tree/')
+        self.assertContains(response, 'Budget alarms')
+        self.assertContains(response, 'Alarm: Actual ≥ 80%')
+        self.assertContains(response, 'Configure budget alarm')
+        external, _ = make_customer('Gametion', '111111111111')
+        for suffix in ['tree/', '']:
+            self.assertNotContains(self.client.get(f'/customers/{external.pk}/{suffix}'), 'Configured budget (USD)')
 
     def test_duplicate_payer_and_member_onboarding_detected(self):
         customer, source = make_customer('Existing', '123456789012', accounts=('210987654321',))
