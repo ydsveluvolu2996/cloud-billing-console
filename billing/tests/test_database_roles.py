@@ -103,7 +103,7 @@ class DatabaseRoleTests(TransactionTestCase):
             self.assertEqual(response.status_code,200)
             self.assertContains(response,'RLS Alpha');self.assertNotContains(response,'RLS Beta')
             self.assertEqual(client.get(f'/customers/{self.b.pk}/').status_code,404)
-            self.assertEqual(client.get('/mfa/').status_code,200)
+            self.assertRedirects(client.get('/mfa/'),'/login/',fetch_redirect_response=False)
             self.assertEqual(client.get(f'/customers/{self.a.pk}/governance/').status_code,200)
         finally:
             connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
@@ -121,12 +121,17 @@ class DatabaseRoleTests(TransactionTestCase):
             self.assertTrue(AccessAttempt.objects.filter(username=self.user.username).exists())
             self.assertNotIn('_auth_user_id',client.session)
             response=client.post('/login/', {'username':self.user.username, 'password':'test-only-unique-password'})
-            self.assertEqual(response.status_code,302)
+            self.assertContains(response,'Set up two-step verification')
+            self.assertNotIn('_auth_user_id',client.session)
+            from django_otp.plugins.otp_totp.models import TOTPDevice
+            from django_otp.oath import totp
+            device=TOTPDevice.objects.get(user=self.user)
+            token=str(totp(device.bin_key,step=device.step,t0=device.t0,digits=device.digits))
+            self.assertContains(client.post('/login/',{'token':token}),'Save your recovery codes')
             self.assertFalse(AccessAttempt.objects.filter(username=self.user.username).exists())
             self.assertEqual(client.session['_auth_user_id'],str(self.user.pk))
-            self.assertNotIn('mfa_at',client.session)
-            self.assertRedirects(client.get('/customers/'),'/mfa/',fetch_redirect_response=False)
-            self.assertContains(client.get('/mfa/'),'Set up two-step verification')
+            self.assertIn('mfa_at',client.session)
+            self.assertContains(client.get('/customers/'),'RLS Alpha')
         finally:
             connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
 
@@ -206,3 +211,57 @@ class DatabaseRoleTests(TransactionTestCase):
         for t in threads:t.join(timeout=10)
         self.assertEqual(sorted(outcomes),['overlap denied','published'])
         self.assertEqual(Cost.objects.count(),1)
+
+    def test_user_administration_database_capability_checks_mfa_and_scope(self):
+        import json
+        from django.contrib.auth.hashers import make_password
+        admin=User.objects.create_superuser('capability-admin')
+        UserSecurity.objects.create(user=admin,portfolio_access=True)
+        command={'action':'create','username':'capability-created','email':'','first_name':'','last_name':'',
+                 'password':make_password('synthetic-test-password'),'role':'viewer','active':True,
+                 'grants':[{'customer_id':str(self.a.pk),'role':'viewer','account_ids':[]}]}
+        with self.connect('billing_web') as c:
+            for uid,mfa in [(self.user.pk,'true'),(admin.pk,'false')]:
+                c.execute("SELECT set_config('billing.user_id',%s,true),set_config('billing.mfa_verified',%s,true)",[str(uid),mfa])
+                with self.assertRaises(psycopg.errors.InsufficientPrivilege),c.transaction():
+                    c.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(command)])
+            c.execute("SELECT set_config('billing.user_id',%s,true),set_config('billing.mfa_verified','true',true)",[str(admin.pk)])
+            bad={**command,'grants':[{'customer_id':str(self.a.pk),'role':'viewer','account_ids':[self.sb.account_id]}]}
+            with self.assertRaises(psycopg.errors.RaiseException),c.transaction():
+                c.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(bad)])
+            event=c.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(command)]).fetchone()[0]
+            self.assertNotIn('password',json.dumps(event))
+            self.assertTrue(User.objects.filter(pk=admin.pk,is_superuser=True).exists())
+            for mutation in [{'action':'delete','id':admin.pk},{**command,'action':'update','id':admin.pk,'role':'viewer'}]:
+                with self.assertRaises(psycopg.errors.RaiseException),c.transaction():
+                    c.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(mutation)])
+        with self.connect('billing_collector') as c:
+            with self.assertRaises(psycopg.errors.InsufficientPrivilege),c.transaction():
+                c.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(command)])
+
+    @override_settings(SECURE_SSL_REDIRECT=False,ALLOWED_HOSTS=['testserver'],STORAGES=TEST_STORAGES,DATABASE_RLS_ENABLED=True)
+    def test_administrator_user_lifecycle_with_actual_web_database_role(self):
+        import time
+        admin=User.objects.create_superuser('web-admin',password='admin-test-only-password')
+        UserSecurity.objects.create(user=admin,portfolio_access=True)
+        cfg=connection.settings_dict;old_user,old_password=cfg['USER'],cfg['PASSWORD']
+        connection.close();cfg['USER']='billing_web';cfg['PASSWORD']=self.password
+        try:
+            client=Client();client.force_login(admin)
+            session=client.session;session['mfa_at']=time.time();session.save()
+            data={'username':'http-created','first_name':'','last_name':'','email':'http@example.invalid','role':'viewer','active':'on',
+                  'customers':[str(self.a.pk)],'account_ids':self.sa.account_id,'password1':'initial-test-only-password','password2':'initial-test-only-password'}
+            self.assertEqual(client.post('/users/add/',data).status_code,302)
+            user=User.objects.get(username='http-created')
+            self.assertTrue(user.check_password('initial-test-only-password'))
+            self.assertFalse(user.is_superuser)
+            self.assertEqual(CustomerMembership.objects.get(user=user).account_ids,[self.sa.account_id])
+            self.assertContains(client.get('/users/'),'http-created')
+            self.assertEqual(client.post(f'/users/{user.pk}/',{**data,'role':'operator','password1':'','password2':''}).status_code,302)
+            self.assertEqual(CustomerMembership.objects.get(user=user).role,'operator')
+            self.assertEqual(client.post(f'/users/{user.pk}/',{'action':'delete','confirm_username':user.username}).status_code,302)
+            self.assertFalse(User.objects.filter(pk=user.pk).exists())
+        finally:
+            connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
+        self.assertEqual(Cost.objects.count(),2)
+        self.assertTrue(User.objects.filter(pk=admin.pk).exists())

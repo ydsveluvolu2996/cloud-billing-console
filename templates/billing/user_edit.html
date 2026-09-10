@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}{% if target %}Manage {{ target.username }}{% else %}Create user{% endif %} · Cloud Billing{% endblock %}
+{% block content %}
+<div class="eyebrow"><a href="{% url 'users' %}">Users &amp; access</a> <span>/</span> {% if target %}Manage user{% else %}Create user{% endif %}</div>
+<header class="page-header"><div><h1>{% if target %}{{ target.username }}{% else %}Create user{% endif %}</h1><p>Control sign-in and customer access in one place.</p></div></header>
+<div class="form-layout"><section class="panel form-panel">
+{% if delete_error %}<div class="message error" role="alert">{{ delete_error }}</div>{% endif %}
+<form method="post" autocomplete="off">{% csrf_token %}{{ form.non_field_errors }}
+{% for field in form %}<p>{{ field.label_tag }}{{ field }}{{ field.errors }}{% if field.help_text %}<span class="helptext">{{ field.help_text }}</span>{% endif %}</p>{% endfor %}
+<div class="form-actions"><button class="button" type="submit">{% if target %}Save changes{% else %}Create user{% endif %}</button><a href="{% url 'users' %}">Cancel</a></div></form>
+</section><aside class="help-card"><h2>Access roles</h2><p><strong>Administrator</strong><br>All customers and user management, including customers added later.</p><p><strong>Operator</strong><br>Manage billing settings for selected customers.</p><p><strong>Viewer</strong><br>Read reports for selected customers.</p><p>MFA is required for every user. Access changes revoke their existing sessions.</p><p>Share initial credentials directly with the intended user through your approved secure channel.</p></aside></div>
+{% if target and target.pk != user.pk %}<section class="panel form-panel user-delete"><h2>Delete user</h2><p>Removes this login, its authenticator, and customer access. Billing records and billing audit history are retained. You can also uncheck Active above to disable sign-in.</p><form method="post">{% csrf_token %}<input type="hidden" name="action" value="delete"><p><label for="confirm-username">Type {{ target.username }} to confirm</label><input id="confirm-username" name="confirm_username" autocomplete="off" required></p><button class="button danger" type="submit">Delete user</button></form></section>{% endif %}
+{% endblock %}

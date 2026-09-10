@@ -32,12 +32,36 @@ function marker(ns, kind, cx, cy, r, color) {
 }
 const navToggle = document.querySelector('[data-nav-toggle]');
 if (navToggle) {
+  const sidebar = document.getElementById('sidebar');
+  const mobile = window.matchMedia('(max-width: 1024px)');
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('billing.sidebarCollapsed') === 'true'; } catch { /* Storage may be disabled. */ }
+  function syncSidebar() {
+    const visible = mobile.matches ? document.body.classList.contains('nav-open') : !collapsed;
+    document.body.classList.toggle('sidebar-collapsed', !mobile.matches && collapsed);
+    sidebar.inert = !visible;
+    navToggle.setAttribute('aria-expanded', String(visible));
+    navToggle.setAttribute('aria-label', visible ? 'Hide sidebar' : 'Show sidebar');
+    navToggle.querySelector('[data-nav-label]').textContent = visible ? 'Hide sidebar' : 'Show sidebar';
+    window.dispatchEvent(new Event('resize'));
+  }
   navToggle.addEventListener('click', () => {
-    const open = document.body.classList.toggle('nav-open');
-    navToggle.setAttribute('aria-expanded', String(open));
+    if (mobile.matches) document.body.classList.toggle('nav-open');
+    else { collapsed = !collapsed; try { localStorage.setItem('billing.sidebarCollapsed', String(collapsed)); } catch { /* Optional preference. */ } }
+    syncSidebar();
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && document.body.classList.contains('nav-open')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); navToggle.focus(); } });
-  document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('#sidebar, [data-nav-toggle]')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); } });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('nav-open')) {
+      document.body.classList.remove('nav-open'); syncSidebar(); navToggle.focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (mobile.matches && document.body.classList.contains('nav-open') && !event.target.closest('#sidebar, [data-nav-toggle]')) {
+      document.body.classList.remove('nav-open'); syncSidebar();
+    }
+  });
+  mobile.addEventListener('change', () => { document.body.classList.remove('nav-open'); syncSidebar(); });
+  syncSidebar();
 }
 document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
   const field = document.getElementById(button.dataset.copy);

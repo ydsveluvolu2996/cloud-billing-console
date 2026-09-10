@@ -2,11 +2,14 @@
 from django.urls import path, include
 from django.contrib.auth import views as auth_views
 from django.views.generic import RedirectView
-from billing import web, authentication, views_security
+from billing import web, authentication, views_security, user_administration
 from billing import views_management as manage
 from billing import views_alliance as alliance
 
 urlpatterns = [
+    path('users/', user_administration.users, name='users'),
+    path('users/add/', user_administration.user_edit, name='user_add'),
+    path('users/<int:pk>/', user_administration.user_edit, name='user_edit'),
     path('customers/<uuid:pk>/tree/', manage.customer_tree, name='customer_tree'),
     path('customers/<uuid:pk>/invite/', views_security.portal_invite, name='portal_invite'),
     path('portal/accept/', views_security.portal_accept, name='portal_accept'),
@@ -29,7 +32,7 @@ urlpatterns = [
     path('alliance/', alliance.overview, name='alliance'),
     path('alliance/<uuid:customer_id>/<str:account_id>/', alliance.detail, name='alliance_detail'),
     path('export/report/', web.export_report, name='export_report'),
-    path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),
+    path('login/', authentication.sign_in, name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     path('password/', auth_views.PasswordChangeView.as_view(template_name='registration/password.html', success_url='/'), name='password_change'),
     path('customers/', manage.customers, name='customers'),

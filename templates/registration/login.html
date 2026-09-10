@@ -1,1 +1,28 @@
-{% extends 'base.html' %}{% block title %}Sign in · Cloud Billing{% endblock %}{% block content %}<section class="auth-card"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 19V13M12 19V5M19 19V9"/></svg></span><span>Cloud Billing<small>CUSTOMER BILLING</small></span></a><div class="auth-heading"><h1>Sign in</h1><p>Internal AWS cost management for your customers.</p></div>{% if form.errors %}<div class="message error" role="alert">Your username and password did not match. Both fields are case-sensitive.</div>{% endif %}<form method="post">{% csrf_token %}<p><label for="id_username">Username <span class="muted">(required)</span></label><input type="text" name="username" id="id_username" autocomplete="username" autofocus required maxlength="150"></p><p><label for="id_password">Password <span class="muted">(required)</span></label><input type="password" name="password" id="id_password" autocomplete="current-password" required></p>{% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}<button class="button full" type="submit">Sign in</button></form><p class="auth-note">Access is limited to your authorized team.<br>Contact your administrator if you need an account.</p></section>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Sign in · Cloud Billing{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <a class="brand" href="{% url 'login' %}"><span class="brand-icon" aria-hidden="true">▥</span><span>Cloud Billing<small>CUSTOMER BILLING</small></span></a>
+  <div class="auth-heading"><h1>{% if recovery_codes %}Save your recovery codes{% elif enrolling %}Set up two-step verification{% elif challenge %}Verify your sign-in{% else %}Sign in{% endif %}</h1>
+  <p>{% if challenge %}Signing in as <strong>{{ username }}</strong>.{% else %}Secure access to your customer billing workspace.{% endif %}</p></div>
+  {% if error %}<div class="message error" role="alert">{{ error }}</div>{% endif %}
+  {% if recovery_codes %}
+    <p>Save these codes privately. Each works once if your authenticator is unavailable. They will not be shown again.</p>
+    <ul class="recovery-codes">{% for code in recovery_codes %}<li><code>{{ code }}</code></li>{% endfor %}</ul>
+    <a class="button full" href="{{ destination }}">Continue to dashboard</a>
+  {% else %}
+    {% if enrolling %}<p>Add this key to Google Authenticator, Microsoft Authenticator, or another time-based authenticator. Enter its current six-digit code below.</p><label for="totp-key">Authenticator setup key</label><textarea id="totp-key" rows="2" readonly>{{ enrollment_key }}</textarea><p class="helptext">Keep this setup key private.</p>{% endif %}
+    <form method="post" action="{% url 'login' %}">{% csrf_token %}
+      {% if not challenge %}
+      <p><label for="id_username">Username</label><input type="text" name="username" id="id_username" value="{{ form.username.value|default:'' }}" autocomplete="username" autofocus required maxlength="150"></p>
+      <p><label for="id_password">Password</label><input type="password" name="password" id="id_password" autocomplete="current-password" required></p>
+      <input type="hidden" name="next" value="{{ next }}">
+      {% endif %}
+      <p><label for="id_token">Authenticator or recovery code</label><input type="text" name="token" id="id_token" autocomplete="one-time-code" spellcheck="false" maxlength="100" {% if challenge %}autofocus required{% endif %}><span class="helptext">{% if challenge %}Your dashboard opens only after this code is verified. This sign-in expires after five minutes.{% else %}Enter your authenticator code. For first-time setup, leave this blank and continue with your password.{% endif %}</span></p>
+      <button class="button full" type="submit">{% if challenge %}Verify &amp; sign in{% else %}Sign in{% endif %}</button>
+    </form>
+    {% if challenge %}<form method="post" action="{% url 'login' %}">{% csrf_token %}<input type="hidden" name="action" value="restart"><button class="text-button" type="submit">Use a different account</button></form>{% endif %}
+  {% endif %}
+  <p class="auth-note">Two-step verification is required before dashboard access.</p>
+</section>
+{% endblock %}

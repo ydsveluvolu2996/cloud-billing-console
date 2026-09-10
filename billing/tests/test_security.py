@@ -128,7 +128,7 @@ class IsolationTests(TestCase):
         self.assertEqual(self.client.get('/').status_code,403)
     def test_login_requires_mfa_before_customer_access(self):
         self.client.force_login(self.user)
-        self.assertRedirects(self.client.get('/customers/'),'/mfa/',fetch_redirect_response=False)
+        self.assertRedirects(self.client.get('/customers/'),'/login/',fetch_redirect_response=False)
     def test_csrf_still_required(self):
         c=Client(enforce_csrf_checks=True);c.force_login(self.user)
         session=c.session;session['mfa_at']=timezone.now().timestamp();session.save()
@@ -184,27 +184,29 @@ class IAMTests(TestCase):
 class MFATests(TestCase):
     def setUp(self):
         self.user=User.objects.create_user('individual',password='test-only-unique-password')
-        self.client.force_login(self.user)
+        self.client.logout()
+        self.client.post('/login/',{'username':self.user.username,'password':'test-only-unique-password'})
     def test_enrollment_replay_recovery_and_revocation(self):
-        self.assertContains(self.client.get('/mfa/'),'Set up two-step verification')
+        self.assertContains(self.client.get('/login/'),'Set up two-step verification')
         device=TOTPDevice.objects.get(user=self.user)
         token=str(totp(device.bin_key,step=device.step,t0=device.t0,digits=device.digits))
-        response=self.client.post('/mfa/',{'token':token})
+        response=self.client.post('/login/',{'token':token})
         self.assertContains(response,'Save your recovery codes')
         device.refresh_from_db();self.assertTrue(device.confirmed)
         profile=UserSecurity.objects.get(user=self.user);self.assertEqual(len(profile.recovery_hashes),8)
         code=response.context['recovery_codes'][0]
         self.assertNotIn(code,profile.recovery_hashes)
-        self.client.force_login(self.user)
-        self.assertContains(self.client.post('/mfa/',{'token':token}),'Code invalid')
+        self.client.logout()
+        self.client.post('/login/',{'username':self.user.username,'password':'test-only-unique-password'})
+        self.assertContains(self.client.post('/login/',{'token':token}),'Code invalid')
         UserSecurity.objects.filter(user=self.user).update(recovery_locked_until=None)
-        self.assertRedirects(self.client.post('/mfa/',{'token':code}),'/',fetch_redirect_response=False)
+        self.assertRedirects(self.client.post('/login/',{'token':code}),'/',fetch_redirect_response=False)
         profile.refresh_from_db();self.assertEqual(len(profile.recovery_hashes),7)
         self.assertRedirects(self.client.post('/sessions/revoke/'),'/login/',fetch_redirect_response=False)
         self.assertRedirects(self.client.get('/customers/'),'/login/?next=/customers/',fetch_redirect_response=False)
     def test_recovery_cannot_enroll_over_confirmed_device(self):
         TOTPDevice.objects.create(user=self.user,confirmed=True,name='existing')
-        self.assertNotContains(self.client.get('/mfa/'),'otpauth://')
+        self.assertNotContains(self.client.get('/login/'),'otpauth://')
 
 @secure_settings
 class ScopeChangeTests(TestCase):

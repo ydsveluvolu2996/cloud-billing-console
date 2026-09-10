@@ -260,3 +260,8 @@ th button,.sort-link{font:inherit;color:inherit;border:0;background:transparent;
 .portfolio-accounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
 .portfolio-accounts p{padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin:0}
 @media(max-width:900px){[data-customer-tree]{width:calc(100vw - 64px)}}
+
+/* Workspace navigation can be collapsed independently of report parameters. */
+.nav-toggle{display:inline-flex;white-space:nowrap}
+@media(min-width:1025px){.sidebar-collapsed .sidebar{transform:translateX(-100%);visibility:hidden}.sidebar-collapsed .topbar{left:0}.sidebar-collapsed .main{margin-left:0}}
+.user-search{padding:20px}.user-search input{max-width:420px}.user-delete{margin-top:24px;max-width:760px}.button.danger{background:#b91c1c;color:white}.recovery-codes{padding-left:0;list-style:none;overflow-wrap:anywhere}.recovery-codes li{padding:6px 0}.auth-card form+form{margin-top:16px}

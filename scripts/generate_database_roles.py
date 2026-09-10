@@ -153,4 +153,5 @@ CREATE TRIGGER guard_role_approval BEFORE INSERT OR UPDATE ON billing_roleapprov
 sql += Path('deploy/ownership.sql').read_text()
 sql += Path('deploy/readiness.sql').read_text()
 sql += Path('deploy/portal-admission.sql').read_text()
+sql += Path('deploy/user-administration.sql').read_text()
 Path('deploy/database-roles.sql').write_text(sql)

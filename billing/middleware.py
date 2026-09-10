@@ -23,15 +23,20 @@ class SecurityMiddleware:
                     return redirect('login')
             elif profile.external and not settings.EXTERNAL_PORTAL_ENABLED and not public:
                 return HttpResponseForbidden('External customer access is disabled.')
-            elif settings.MFA_REQUIRED and not public and request.path != '/mfa/':
-                at = request.session.get('mfa_at', 0)
-                if at < timezone.now().timestamp() - settings.SESSION_COOKIE_AGE:
-                    return redirect('mfa')
+            elif settings.MFA_REQUIRED and request.path != '/logout/' and not request.path.startswith('/oidc/'):
+                from .authentication import mfa_current, begin_login
+                if not mfa_current(request):
+                    user = request.user
+                    backend = request.session.get('_auth_user_backend', 'django.contrib.auth.backends.ModelBackend')
+                    begin_login(request, user, backend, request.get_full_path() if request.path not in ('/login/','/mfa/') else '/')
+                    return redirect('login')
         with transaction.atomic():
             if connection.vendor == 'postgresql' and settings.DATABASE_RLS_ENABLED:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT set_config('billing.user_id', %s, true)", [str(request.user.pk) if request.user.is_authenticated else ''])
                     cursor.execute("SELECT set_config('billing.external_enabled', %s, true)", ['true' if settings.EXTERNAL_PORTAL_ENABLED else 'false'])
+                    from .authentication import mfa_current
+                    cursor.execute("SELECT set_config('billing.mfa_verified', %s, true)", ['true' if request.user.is_authenticated and mfa_current(request) else 'false'])
             access = for_user(request.user, write=request.method not in ('GET','HEAD','OPTIONS'))
             if connection.vendor == 'postgresql' and settings.DATABASE_RLS_ENABLED:
                 with connection.cursor() as cursor:
