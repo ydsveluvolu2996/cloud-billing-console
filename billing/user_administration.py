@@ -12,7 +12,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.hashers import make_password
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import connection, transaction, DatabaseError
-from django.db.models import Q
+from django.db.models import Q, Exists, OuterRef, Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
@@ -101,6 +101,8 @@ def apply_user_change(actor, command):
             with connection.cursor() as cursor:
                 cursor.execute('SELECT billing_admin_user(%s::jsonb)',[json.dumps(command)])
                 event=cursor.fetchone()[0]
+                if isinstance(event,str):
+                    event=json.loads(event)
             logging.getLogger('security.audit').info(json.dumps(event,default=str))
             return event['user_id']
         # SQLite is used only in isolated development tests. Production calls the
@@ -134,7 +136,9 @@ def apply_user_change(actor, command):
 @never_cache
 @administrator_required
 def users(request):
-    rows=User.objects.select_related('security').prefetch_related('customer_memberships__customer','totpdevice_set').order_by('username')
+    from django_otp.plugins.otp_totp.models import TOTPDevice
+    memberships=CustomerMembership.objects.filter(active=True).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now())).select_related('customer')
+    rows=User.objects.select_related('security').annotate(mfa_enrolled=Exists(TOTPDevice.objects.filter(user_id=OuterRef('pk'),confirmed=True))).prefetch_related(Prefetch('customer_memberships',queryset=memberships,to_attr='active_grants')).order_by('username')
     q=request.GET.get('q','').strip()
     if q:rows=rows.filter(Q(username__icontains=q)|Q(email__icontains=q))
     return render(request,'billing/users.html',{'users':rows,'active_page':'users','search':q})
