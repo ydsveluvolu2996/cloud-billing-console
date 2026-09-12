@@ -24,7 +24,7 @@ MIDDLEWARE = ['django.middleware.security.SecurityMiddleware', 'whitenoise.middl
 ROOT_URLCONF = 'config.urls'
 TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'DIRS': [BASE_DIR / 'templates'],
               'APP_DIRS': True, 'OPTIONS': {'context_processors': ['django.template.context_processors.request',
-                  'django.contrib.auth.context_processors.auth', 'django.contrib.messages.context_processors.messages']}}]
+                  'django.contrib.auth.context_processors.auth', 'django.contrib.messages.context_processors.messages', 'billing.context_processors.workspace_access']}}]
 WSGI_APPLICATION = 'config.wsgi.application'
 if os.environ.get('DB_HOST'):
     DATABASES = {'default': {'ENGINE': 'django.db.backends.postgresql', 'NAME': os.environ.get('DB_NAME', 'billing'),

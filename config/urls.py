@@ -2,11 +2,16 @@
 from django.urls import path, include
 from django.contrib.auth import views as auth_views
 from django.views.generic import RedirectView
-from billing import web, authentication, views_security, user_administration
+from billing import web, authentication, views_security, user_administration, views_access, views_insights, views_optimization, views_reconciliation
 from billing import views_management as manage
 from billing import views_alliance as alliance
 
 urlpatterns = [
+    path('insights/', views_insights.insights, name='insights'),
+    path('optimization/', views_optimization.optimization, name='optimization'),
+    path('reconciliation/', views_reconciliation.reconciliation, name='reconciliation'),
+    path('reports/monthly.xlsx', views_reconciliation.monthly_report, name='monthly_report'),
+    path('my-access/', views_access.my_access, name='my_access'),
     path('users/', user_administration.users, name='users'),
     path('users/add/', user_administration.user_edit, name='user_add'),
     path('users/<int:pk>/', user_administration.user_edit, name='user_edit'),

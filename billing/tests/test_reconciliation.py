@@ -1,0 +1,81 @@
+import io
+import zipfile
+from datetime import date
+from decimal import Decimal
+from xml.etree import ElementTree as ET
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import SimpleTestCase, TestCase
+from billing.invoice_reconciliation import parse_upload, workbook, reconcile, HEADERS
+from billing.views_reconciliation import monthly_report
+from .helpers import web_settings, make_customer, cost
+
+
+class InvoiceParserTests(SimpleTestCase):
+    def parse(self, text):
+        return parse_upload(SimpleUploadedFile('invoice.csv', text.encode()), date(2026, 8, 1), 'USD')
+
+    def test_csv_preserves_zero_account_and_negative_credit(self):
+        self.assertEqual(self.parse('account_id,month,currency,amount\n012345678901,2026-08,USD,-1.50'), {'012345678901': Decimal('-1.50')})
+
+    def test_duplicate_wrong_currency_nonfinite_and_formulas_rejected(self):
+        for lines in ['012345678901,2026-08,USD,NaN', '012345678901,2026-08,INR,1', '012345678901,2026-08,USD,=1+1', '012345678901,2026-08,USD,1\n012345678901,2026-08,USD,2']:
+            with self.subTest(lines=lines), self.assertRaises(ValueError):
+                self.parse('account_id,month,currency,amount\n'+lines)
+
+    def test_xlsx_roundtrip_and_text_safety(self):
+        raw = workbook([('Invoice', [HEADERS, ['012345678901', '2026-08', 'USD', Decimal('24.5')]])])
+        self.assertEqual(parse_upload(SimpleUploadedFile('invoice.xlsx', raw), date(2026,8,1), 'USD')['012345678901'], Decimal('24.5'))
+        raw = workbook([('Report', [['=HYPERLINK("evil")', '012345678901']])])
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            xml = archive.read('xl/worksheets/sheet1.xml')
+            self.assertNotIn(b'<f>', xml)
+            self.assertIn(b'inlineStr', xml)
+            ET.fromstring(xml)
+
+    def test_missing_coverage_never_matches_and_hidden_account_rejected(self):
+        rows = [{'account_id':'012345678901', 'customer': 'x', 'name':'Account', 'current':{'state':'Partial','value':Decimal(10)}}]
+        self.assertEqual(reconcile(rows, {'012345678901':Decimal(10)})[0]['status'], 'AWS data incomplete')
+        with self.assertRaises(ValueError):
+            reconcile(rows, {'999999999999':Decimal(10)})
+
+
+@web_settings
+class MonthlyWorkbookTests(TestCase):
+    def test_report_uses_scoped_accounts(self):
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory, override_settings
+        from billing.access import Access, context
+        customer, source = make_customer('Visible', '012345678901', accounts=['999999999999'])
+        cost(source, date(2026,8,1), '10')
+        cost(source, date(2026,8,1), '900', account_id='999999999999')
+        user = User.objects.create_user('report-reader')
+        request = RequestFactory().get('/reports/monthly.xlsx', {'month':'2026-08'})
+        request.user = user
+        access = Access(user.pk, user.username, False, (customer.pk,), (), {customer.pk:['012345678901']})
+        with override_settings(ENFORCE_CUSTOMER_AUTHORIZATION=True), context(access):
+            response = monthly_report(request)
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            content = archive.read('xl/worksheets/sheet2.xml')
+        self.assertIn(b'012345678901', content)
+        self.assertNotIn(b'999999999999', content)
+
+    def test_reader_upload_preview_keeps_read_scope(self):
+        from unittest.mock import patch
+        from django.http import HttpResponse
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory, override_settings
+        from billing.access import Access, context
+        from billing.views_reconciliation import reconciliation
+        customer, source = make_customer('Reader customer', '012345678901')
+        cost(source, date(2026,8,1), '10')
+        user = User.objects.create_user('invoice-reader')
+        upload = SimpleUploadedFile('invoice.csv', b'account_id,month,currency,amount\n012345678901,2026-08,USD,10')
+        request = RequestFactory().post('/reconciliation/', {'month':'2026-08', 'customer':str(customer.pk), 'currency':'USD', 'invoice':upload})
+        request.user = user
+        access = Access(user.pk, user.username, False, (customer.pk,), (), {customer.pk:['012345678901']}, write=True)
+        with override_settings(ENFORCE_CUSTOMER_AUTHORIZATION=True), context(access), patch('billing.views_reconciliation.render', return_value=HttpResponse()) as rendered:
+            reconciliation(request)
+        data = rendered.call_args.args[2]
+        self.assertNotIn('error', data)
+        self.assertEqual(data['rows'][0]['account_id'], '012345678901')
