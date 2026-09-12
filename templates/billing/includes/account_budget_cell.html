@@ -1,4 +1,4 @@
 {% load money %}
-{% for configured in row.configured_budgets %}
-<div>{% if configured.amount != None %}{{ configured.amount|money }} {{ currency }}{% else %}<span class="muted">Not configured</span>{% endif %}<small><a href="{% url 'budget_detail' configured.budget.pk %}">{{ configured.budget.name }}</a>{% if configured.budget.filters %} · Filtered budget{% endif %}</small></div>
-{% empty %}<span class="muted">Not configured</span>{% endfor %}
+{% for b in row.aws_budgets %}<div><strong>{{ b.limit_amount|money }} {{ b.limit_unit }}</strong><small><a href="{% url 'imported_budgets' %}?q={{ b.name|urlencode }}">AWS · {{ b.name }}</a>{% if b.filters %} · Filtered{% endif %}</small><small>AWS actual {{ b.actual_amount|money }} {{ b.actual_unit }} · Forecast {{ b.forecast_amount|money }} {{ b.forecast_unit }}</small><small>{% if b.snapshot_stale %}Stale snapshot · {% endif %}Imported {{ b.imported_at|date:'d M H:i' }} UTC</small></div>{% endfor %}
+{% for configured in row.configured_budgets %}<div>{% if configured.amount != None %}{{ configured.amount|money }} {{ currency }}{% else %}<span class="muted">Not configured</span>{% endif %}<small><a href="{% url 'budget_detail' configured.budget.pk %}">Dashboard · {{ configured.budget.name }}</a>{% if configured.budget.filters %} · Filtered budget{% endif %}</small></div>{% endfor %}
+{% if not row.aws_budgets and not row.configured_budgets %}<span class="muted">Not configured · AWS budget unavailable</span><small><a href="{% url 'imported_budgets' %}">Check AWS budget imports</a></small>{% endif %}

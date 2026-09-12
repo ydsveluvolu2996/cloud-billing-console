@@ -107,7 +107,9 @@ def report(month, currency, metric, selected, show_budgets=True, today=None):
         assignments = assignments.none()
     missing = list(assignments.exclude(account__account_id__in=configured_accounts).values(
         'customer_id', 'customer__name', 'account__account_id').distinct().order_by('account__account_id'))
-    return {'month': month, 'period_end': end - timedelta(days=1), 'currency': currency, 'metric': metric,
+    from .aws_budget_display import overview
+    imported = overview(internal)
+    return {**imported, 'month': month, 'period_end': end - timedelta(days=1), 'currency': currency, 'metric': metric,
         'selected': selected, 'opportunities': opportunities, 'budget_rows': rows, 'missing_budgets': missing,
         'show_budgets': bool(internal), 'alerts': Alert.objects.filter(budget__in=configured, month=month).select_related('budget')[:50],
         'breach_count': sum(r['evaluation'].status in ('Over budget', 'Forecast over budget') for r in rows),

@@ -53,8 +53,8 @@ def schedule_due(now=None):
         _, made = jobs.enqueue('explorer_refresh', key=f'explorer_refresh:{source.pk}:{stamp}', source=source, priority=7, once=True,
                                run_after=run_after + timedelta(minutes=5), payload={'scheduled': True})
         created += made
-        if source.capabilities.get('budgets'):
-            _, made = jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:{stamp}', source=source, priority=8, once=True,
+        if 'budgets' in source.approved_capabilities or (not settings.REQUIRE_CONNECTION_APPROVAL and source.capabilities.get('budgets')):
+            _, made = jobs.enqueue('import_budgets', key=f'import_budgets:v2:{source.pk}:{stamp}', source=source, priority=8, once=True,
                                    run_after=run_after + timedelta(minutes=2))
             created += made
         if slot.hour == 0:
@@ -62,7 +62,7 @@ def schedule_due(now=None):
             created += made
         BillingSource.objects.filter(pk=source.pk).update(next_run=run_after if source.next_run is None or source.next_run < now else source.next_run)
     for source in BillingSource.objects.filter(kind=BillingSource.MEMBER_BUDGETS, enabled=True, customer__active=True).exclude(role_arn='').exclude(verified_at=None):
-        _, made = jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:{stamp}', source=source, priority=8, once=True, run_after=slot)
+        _, made = jobs.enqueue('import_budgets', key=f'import_budgets:v2:{source.pk}:{stamp}', source=source, priority=8, once=True, run_after=slot)
         created += made
     for source in active_sources().filter(sync_requested=True):
         _, made = jobs.enqueue('collect', key=f'collect:{source.pk}:manual', source=source, priority=3, payload={'months_back': 1, 'manual': True})
@@ -143,6 +143,8 @@ def handle_verify(job):
         BillingSource.objects.filter(pk=source.pk).update(last_error=message)
         raise jobs.PermanentJobError(message)
     request_discovery(source)
+    if capabilities.get('budgets'):
+        jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:verified', source=source, priority=2)
     return {'capabilities': capabilities}
 
 
@@ -182,9 +184,22 @@ def handle_explorer_refresh(job):
 @jobs.handler('import_budgets')
 def handle_import_budgets(job):
     source = load_source(job)
-    if not source.capabilities.get('budgets'):
-        raise jobs.PermanentJobError('budgets:ViewBudget is not granted for this connection.')
-    return {'budgets': collector.import_budgets(source)}
+    if settings.REQUIRE_CONNECTION_APPROVAL and 'budgets' not in source.approved_capabilities:
+        raise jobs.PermanentJobError('Budget import approval is required for this connection.')
+    from botocore.exceptions import ClientError
+    try:
+        count = collector.import_budgets(source)
+    except ClientError as exc:
+        code = exc.response.get('Error', {}).get('Code', '')
+        if code not in ('AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation'):
+            raise
+        caps = dict(source.capabilities, budgets=False, budgets_error=code)
+        BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(capabilities=caps)
+        raise jobs.PermanentJobError('AWS budget read denied. Grant budgets:ViewBudget to this account connection.') from None
+    caps = dict(source.capabilities, budgets=True, budgets_imported_at=timezone.now().isoformat())
+    caps.pop('budgets_error', None)
+    BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(capabilities=caps)
+    return {'budgets': count}
 
 
 @jobs.handler('evaluate_budgets')
