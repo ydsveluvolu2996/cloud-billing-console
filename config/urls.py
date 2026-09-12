@@ -16,6 +16,7 @@ urlpatterns = [
     path('customers/<uuid:pk>/governance/', views_security.customer_governance, name='customer_governance'),
     path('sources/<uuid:pk>/inventory/', views_security.manual_inventory, name='manual_inventory'),
     path('operations/', views_security.operations, name='operations'),
+    path('security/authenticator/', authentication.change_authenticator, name='change_authenticator'),
     path('mfa/', authentication.mfa, name='mfa'),
     path('sessions/revoke/', authentication.revoke_own_sessions, name='revoke_sessions'),
     # Account provisioning and MFA recovery use evidence-backed administration;
