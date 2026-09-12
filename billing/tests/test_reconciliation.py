@@ -32,6 +32,15 @@ class InvoiceParserTests(SimpleTestCase):
             self.assertIn(b'inlineStr', xml)
             ET.fromstring(xml)
 
+    def test_xml_entities_and_alternate_encoding_are_rejected(self):
+        xml = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY secret "expanded">]><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+        for encoding in ('utf-8', 'utf-16'):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, 'w') as archive:
+                archive.writestr('xl/worksheets/sheet1.xml', xml.encode(encoding))
+            with self.assertRaises(ValueError):
+                parse_upload(SimpleUploadedFile('invoice.xlsx', output.getvalue()), date(2026, 8, 1), 'USD')
+
     def test_missing_coverage_never_matches_and_hidden_account_rejected(self):
         rows = [{'account_id':'012345678901', 'customer': 'x', 'name':'Account', 'current':{'state':'Partial','value':Decimal(10)}}]
         self.assertEqual(reconcile(rows, {'012345678901':Decimal(10)})[0]['status'], 'AWS data incomplete')

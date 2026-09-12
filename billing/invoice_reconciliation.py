@@ -65,10 +65,11 @@ def xlsx_rows(raw):
         if len(infos) > 100 or sum(i.file_size for i in infos) > 10 * MAX_BYTES:
             raise ValueError('The workbook is too large after decompression.')
         def xml(name):
-            data = archive.read(name)
-            if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
+            # Normalize before checking declarations so alternate encodings cannot bypass it.
+            data = archive.read(name).decode('utf-8-sig')
+            if '<!DOCTYPE' in data.upper() or '<!ENTITY' in data.upper():
                 raise ValueError('XML declarations are not supported.')
-            return ET.fromstring(data)
+            return ET.fromstring(data)  # nosec B314: bounded UTF-8 XML; DTD/entity declarations rejected above.
         shared = []
         if 'xl/sharedStrings.xml' in archive.namelist():
             shared = [''.join(n.itertext()) for n in xml('xl/sharedStrings.xml').findall(NS + 'si')]
