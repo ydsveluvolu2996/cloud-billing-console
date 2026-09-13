@@ -86,7 +86,7 @@ class AWSBudgetDisplayTests(TestCase):
             self.assertContains(response, '500.00 USD')
         self.customer.name = 'External customer'
         self.customer.save()
-        self.assertNotContains(self.client.get('/portfolio/', params), 'Configured budget')
+        self.assertNotContains(self.client.get('/portfolio/', params), 'Budget usage')
 
     def test_member_budget_credit_refund_exclusion_maps_without_service_budget(self):
         self.source.kind = BillingSource.MEMBER_BUDGETS
