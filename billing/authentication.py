@@ -17,7 +17,7 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.debug import sensitive_post_parameters
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_http_methods
 from django_otp import login as otp_login
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from .models import UserSecurity
@@ -211,3 +211,79 @@ def revoke_own_sessions(request):
     revoke_sessions(request.user, request.user.username)
     logout(request)
     return redirect('login')
+
+
+class AuthenticatorChangeForm(forms.Form):
+    password = forms.CharField(label='Current password', widget=forms.PasswordInput(attrs={'autocomplete': 'current-password'}))
+    token = forms.RegexField(r'^\d{6}$', label='Current authenticator code', widget=forms.TextInput(attrs={'autocomplete': 'one-time-code', 'inputmode': 'numeric'}))
+
+
+@never_cache
+@sensitive_post_parameters()
+@login_required
+@require_http_methods(['GET', 'POST'])
+def change_authenticator(request):
+    """Replace a factor atomically, after proving both old and new factors."""
+    if not mfa_current(request):
+        raise PermissionDenied('Sign in with two-step verification first.')
+    codes = None
+    error = ''
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(pk=request.user.pk)
+        profile = UserSecurity.objects.select_for_update().get(user=user)
+        if profile.session_version != request.session.get('security_version'):
+            raise PermissionDenied('Sign in again.')
+        pending = request.session.get('authenticator_change', {})
+        valid = (0 <= timezone.now().timestamp() - pending.get('at', 0) <= 300
+                 and pending.get('version') == profile.session_version
+                 and constant_time_compare(pending.get('auth_hash', ''), user.get_session_auth_hash()))
+        device = TOTPDevice.objects.select_for_update().filter(pk=pending.get('device'), user=user, confirmed=False, name='replacement').first() if valid else None
+        if not device:
+            request.session.pop('authenticator_change', None)
+        form = TokenForm(request.POST if request.method == 'POST' else None) if device else AuthenticatorChangeForm(request.POST if request.method == 'POST' else None)
+        if request.method == 'POST' and request.POST.get('action') == 'cancel':
+            if device:
+                device.delete()
+            request.session.pop('authenticator_change', None)
+            return redirect('change_authenticator')
+        if request.method == 'POST' and form.is_valid():
+            allowed = not profile.recovery_locked_until or profile.recovery_locked_until <= timezone.now()
+            verified = False
+            if allowed:
+                if device:
+                    verified = device.verify_token(form.cleaned_data['token'])
+                elif user.check_password(form.cleaned_data['password']):
+                    current = TOTPDevice.objects.select_for_update().filter(user=user, confirmed=True).first()
+                    verified = bool(current and current.verify_token(form.cleaned_data['token']))
+            if verified:
+                profile.recovery_failed = 0
+                profile.recovery_locked_until = None
+                if device:
+                    TOTPDevice.objects.filter(user=user).exclude(pk=device.pk).delete()
+                    device.confirmed = True
+                    device.name = 'primary'
+                    device.save(update_fields=['confirmed', 'name'])
+                    codes = [secrets.token_urlsafe(24) for _ in range(8)]
+                    profile.recovery_hashes = [make_password(code) for code in codes]
+                    profile.session_version += 1
+                    profile.save(update_fields=['recovery_hashes', 'session_version', 'recovery_failed', 'recovery_locked_until'])
+                    request.session.pop('authenticator_change', None)
+                    complete_mfa(request, profile, device)
+                    security_event(user.username, 'Authenticator changed', target=str(user.pk))
+                else:
+                    TOTPDevice.objects.filter(user=user, confirmed=False, name='replacement').delete()
+                    device = TOTPDevice.objects.create(user=user, name='replacement', confirmed=False)
+                    request.session['authenticator_change'] = {'device': device.pk, 'at': timezone.now().timestamp(), 'version': profile.session_version, 'auth_hash': user.get_session_auth_hash()}
+                    profile.save(update_fields=['recovery_failed', 'recovery_locked_until'])
+                    form = TokenForm()
+            else:
+                if allowed:
+                    profile.recovery_failed += 1
+                    profile.recovery_locked_until = timezone.now() + timedelta(seconds=min(900, 2 ** min(profile.recovery_failed, 10)))
+                    profile.save(update_fields=['recovery_failed', 'recovery_locked_until'])
+                security_event(user.username, 'Authenticator change failed', outcome='denied', target=str(user.pk))
+                error = 'Password or code invalid, already used, or temporarily rate-limited. Wait and try again.'
+        if device:
+            form.fields['token'].label = 'New authenticator code'
+        return render(request, 'registration/change_authenticator.html', {'form': form, 'error': error, 'enrolling': bool(device), 'recovery_codes': codes,
+            'enrollment_key': __import__('base64').b32encode(device.bin_key).decode() if device and not codes else ''})

@@ -503,3 +503,19 @@ document.querySelectorAll('[data-customer-tree]').forEach(details => {
     }
   });
 });
+
+const accountSettings = document.querySelector('[data-account-settings]');
+if (accountSettings) {
+  accountSettings.addEventListener('toggle', () => {
+    if (accountSettings.open) accountSettings.scrollIntoView({block: 'nearest'});
+  });
+  accountSettings.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && accountSettings.open) {
+      event.stopPropagation(); accountSettings.open = false;
+      accountSettings.querySelector('summary').focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (!accountSettings.contains(event.target)) accountSettings.open = false;
+  });
+}

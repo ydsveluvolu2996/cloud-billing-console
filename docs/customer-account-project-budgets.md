@@ -116,3 +116,23 @@ budgets and rules. `billing/scope.py` resolves every customer/source/account/pro
 rejects identifiers that do not belong together, for HTML reports, CSV exports, metadata lookups,
 saved reports and worker queries. Shared-payer AWS queries always carry a `LINKED_ACCOUNT`
 restriction derived from assignments.
+
+
+## Automatic AWS budget snapshots
+
+Approved budget connections import every six hours and immediately after successful
+verification. A denied read preserves the last successful snapshot, marks it stale,
+and retries on the next scheduled cycle. Revoked approval prevents AWS reads.
+
+Flentas account columns show current-month COST/MONTHLY AWS snapshots whose currency
+and cost basis match the view. Exact single-account filters map payer-owned budgets
+to the assigned account; unfiltered standalone/member-reader budgets map to their
+owning account. Organization-wide and multi-account budgets remain in the AWS budget
+summary and are never allocated arbitrarily or summed with overlapping budgets.
+AWS actual and forecast values are explicitly labeled separately from dashboard MTD.
+Local dashboard budgets remain distinct. External account columns remain budget-free.
+
+The Budgets & savings page and Imported AWS budgets page show snapshots and connection
+status. This feature reads AWS Budgets only; it does not change AWS limits,
+notifications, subscribers, IAM policies or customer approval records. Member-owned
+budgets need approved member-budget reader connections and scoped budgets:ViewBudget.
