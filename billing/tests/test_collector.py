@@ -174,7 +174,7 @@ class CollectionTests(TestCase):
         client.describe_budgets.side_effect = [
             {'Budgets': [{'BudgetName': 'Monthly', 'BudgetType': 'COST', 'TimeUnit': 'MONTHLY', 'BudgetLimit': {'Amount': '1000', 'Unit': 'USD'},
                           'CostFilters': {'LinkedAccount': ['222222222222']}, 'CalculatedSpend': {'ActualSpend': {'Amount': '412.5', 'Unit': 'USD'}, 'ForecastedSpend': {'Amount': '900', 'Unit': 'USD'}},
-                          'TimePeriod': {'Start': datetime(2026, 9, 1, tzinfo=dt_tz.utc), 'End': datetime(2087, 6, 15, tzinfo=dt_tz.utc)}, 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc)}], 'NextToken': 'n'},
+                          'TimePeriod': {'Start': datetime(2026, 9, 1, tzinfo=dt_tz.utc), 'End': datetime(2087, 6, 15, tzinfo=dt_tz.utc)}, 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc), 'HealthStatus': {'Status': 'HEALTHY', 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc)}}], 'NextToken': 'n'},
             {'Budgets': [{'BudgetName': 'RI coverage', 'BudgetType': 'RI_COVERAGE', 'TimeUnit': 'MONTHLY', 'BudgetLimit': {'Amount': '80', 'Unit': 'PERCENTAGE'},
                           'CalculatedSpend': {'ActualSpend': {'Amount': '65', 'Unit': 'PERCENTAGE'}}}]}]
         count = import_budgets(self.source, session=FakeSession(budgets=client), meter=Meter(limit=0))
@@ -184,6 +184,7 @@ class CollectionTests(TestCase):
         self.assertEqual(monthly.limit_amount, Decimal('1000'))
         self.assertEqual(monthly.filters, {'LinkedAccount': ['222222222222']})
         self.assertEqual(monthly.actual_amount, Decimal('412.5'))
+        self.assertEqual(monthly.raw['HealthStatus']['LastUpdatedTime'], '2026-09-08T00:00:00Z')
         self.assertEqual(monthly.owning_account_id, '111111111111')
         coverage = ImportedBudget.objects.get(name='RI coverage')
         self.assertTrue(coverage.is_percentage)

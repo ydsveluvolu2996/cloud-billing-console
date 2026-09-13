@@ -112,10 +112,10 @@ class OnboardingTests(TestCase):
         for suffix in ['tree/', '']:
             response = self.client.get(f'/customers/{customer.pk}/{suffix}')
             self.assertContains(response, 'MTD (USD)')
-            self.assertContains(response, 'Configured budget (USD)')
+            self.assertContains(response, 'Budget usage (USD)')
             self.assertContains(response, '250.00 USD')
             self.assertContains(response, '12.34')
-            self.assertContains(response, 'Not configured')
+            self.assertContains(response, 'No account budget')
             self.assertNotContains(response, '9,999')
             self.assertNotContains(response, 'Other currency')
             rows = response.context['tree'][0]['members']
@@ -130,7 +130,7 @@ class OnboardingTests(TestCase):
         self.assertContains(response, 'Configure budget alarm')
         external, _ = make_customer('Gametion', '111111111111')
         for suffix in ['tree/', '']:
-            self.assertNotContains(self.client.get(f'/customers/{external.pk}/{suffix}'), 'Configured budget (USD)')
+            self.assertNotContains(self.client.get(f'/customers/{external.pk}/{suffix}'), 'Budget usage (USD)')
 
     def test_new_external_accounts_share_aligned_table_without_budget_columns(self):
         customer, source = make_customer('External customer with a long legal entity name', '333333333333', accounts=('444444444444',))
@@ -138,7 +138,7 @@ class OnboardingTests(TestCase):
         response = self.client.get(f'/customers/{customer.pk}/tree/')
         self.assertContains(response, 'customer-account-table')
         self.assertContains(response, 'Production account with a long descriptive name', count=2)
-        self.assertNotContains(response, 'Configured budget')
+        self.assertNotContains(response, 'Budget usage')
         self.assertNotContains(response, 'Budget alarms')
         html = response.content.decode()
         header = html.split('<thead>')[1].split('</thead>')[0]
