@@ -7,6 +7,7 @@ services:
       dockerfile: deploy/Dockerfile.postgres
     restart: unless-stopped
     environment:
+      PGDATA: /var/lib/postgresql/data
       POSTGRES_DB: billing
       POSTGRES_USER: billing_admin
       POSTGRES_PASSWORD_FILE: /run/secrets/admin_db_password
@@ -111,7 +112,8 @@ services:
     networks:
     - frontend
 volumes:
-  pgdata: null
+  pgdata:
+    name: ${BILLING_POSTGRES_VOLUME:-cloud-billing_pgdata}
   caddydata: null
   caddyconfig: null
 secrets:

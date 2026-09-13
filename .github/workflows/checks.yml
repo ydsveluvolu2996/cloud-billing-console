@@ -25,11 +25,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   test:
+    name: Application tests (Python ${{ matrix.python }}, PostgreSQL ${{ matrix.postgres }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.14']
+        postgres: ['17-alpine', '18-alpine']
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: billing
           POSTGRES_PASSWORD: ci-isolated-database-only
@@ -47,10 +53,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pip check
       - run: python -m unittest discover -s deploy/github-release/tests -v
+      - run: python -m unittest discover -s deploy/postgres-maintenance/tests -v
       - run: python manage.py collectstatic --noinput
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test billing.tests --noinput
@@ -71,10 +79,12 @@ jobs:
           SECRET_KEY: ci-validation-only-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: synthetic-capacity-${{ github.sha }}
+          name: synthetic-capacity-python-${{ matrix.python }}-postgres-${{ matrix.postgres }}-${{ github.sha }}
           path: /tmp/security-load.json
           retention-days: 14
   security:
+    # The native Ubuntu collector intentionally stays on Python 3.12. package.py
+    # builds its offline wheelhouse using this interpreter, not the web image.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
