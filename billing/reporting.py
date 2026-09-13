@@ -94,10 +94,12 @@ def report(params):
                                         active=True, currency=currency, metric=metric).prefetch_related('amounts'):
         configured.setdefault((budget.customer_id, budget.account_id), []).append(
             {'budget': budget, 'amount': budget.amount_for(month_start)})
+    from .aws_budget_display import account_snapshots
+    imported = account_snapshots([c for c in customer_list if c.pk in internal_ids], month_start, currency, metric)
     for item in account_totals:
         key = (item['customer_id'], item['account_id'])
         item.update(mtd=account_mtd.get(key), is_internal=item['customer_id'] in internal_ids,
-                    configured_budgets=configured.get(key, []))
+                    configured_budgets=configured.get(key, []), aws_budgets=imported.get(key, []))
     show_account_budgets = any(r['is_internal'] for r in account_totals)
     # Budgets and projections always use whole-customer costs in the current month.
     current = Cost.objects.filter(customer__in=customers, currency=currency, day__gte=month_start, day__lte=today)

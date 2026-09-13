@@ -149,7 +149,17 @@ def users(request):
 @administrator_required
 def user_edit(request, pk=None):
     target=get_object_or_404(User,pk=pk) if pk else None
-    form=UserForm(request.POST or None,target=target,actor=request.user)
+    initial = None
+    if not target and request.method == 'GET' and request.GET.get('customer'):
+        import uuid
+        from django.http import Http404
+        try:
+            customer_id = uuid.UUID(request.GET['customer'])
+        except (ValueError, TypeError):
+            raise Http404('Customer not found.') from None
+        customer = get_object_or_404(Customer, pk=customer_id, active=True)
+        initial = {'role': 'viewer', 'customers': [customer.pk], 'active': True}
+    form=UserForm(request.POST or None,target=target,actor=request.user, **({'initial': initial} if initial else {}))
     delete_error=''
     if request.method=='POST':
         deleting=request.POST.get('action')=='delete'

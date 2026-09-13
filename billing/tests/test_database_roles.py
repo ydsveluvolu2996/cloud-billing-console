@@ -161,6 +161,15 @@ class DatabaseRoleTests(TransactionTestCase):
             self.assertEqual(client.get(f'/customers/{self.b.pk}/').status_code,404)
             self.assertRedirects(client.get('/mfa/'),'/login/',fetch_redirect_response=False)
             self.assertEqual(client.get(f'/customers/{self.a.pk}/governance/').status_code,200)
+            for path in ('/insights/', '/optimization/', '/reconciliation/', '/my-access/'):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200, path)
+                self.assertNotContains(response, 'RLS Beta')
+            response = client.get('/reports/monthly.xlsx', {'month': '2026-01'})
+            self.assertEqual(response.status_code, 200)
+            import io, zipfile
+            with zipfile.ZipFile(io.BytesIO(response.content)) as workbook:
+                self.assertNotIn(b'RLS Beta', workbook.read('xl/worksheets/sheet2.xml'))
         finally:
             connection.close();cfg['USER']=old_user;cfg['PASSWORD']=old_password
 
