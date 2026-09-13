@@ -45,13 +45,13 @@ class BillingTests(TestCase):
         self.assertEqual(row['configured_budgets'][0]['amount'], Decimal('300'))
         self.client.force_login(self.admin)
         response = self.client.get('/portfolio/', params)
-        self.assertContains(response, 'Configured budget')
+        self.assertContains(response, 'Budget usage')
         self.assertContains(response, '300.00 USD')
         self.assertContains(response, 'MTD ·')
         self.customer.name = 'External customer'
         self.customer.save()
         self.assertFalse(report(params)['show_account_budgets'])
-        self.assertNotContains(self.client.get('/portfolio/', params), 'Configured budget')
+        self.assertNotContains(self.client.get('/portfolio/', params), 'Budget usage')
 
     def test_sync_replaces_revisions_without_duplicates(self):
         for amount in ('10.10', '11.25'):
