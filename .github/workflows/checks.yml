@@ -58,6 +58,7 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pip check
       - run: python -m unittest discover -s deploy/github-release/tests -v
+      - run: python -m unittest discover -s deploy/postgres-maintenance/tests -v
       - run: python manage.py collectstatic --noinput
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test billing.tests --noinput

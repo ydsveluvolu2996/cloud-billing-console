@@ -14,20 +14,66 @@ import time
 
 BOOTSTRAP = 'billing_migration_bootstrap'
 CATALOG = """SELECT jsonb_build_object(
-'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY rolname) FROM (SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls,rolconnlimit,rolvaliduntil,rolconfig,rolpassword FROM pg_authid WHERE rolname !~ '^pg_' AND rolname <> 'billing_migration_bootstrap') r),
-'schemas',(SELECT jsonb_agg(to_jsonb(r) ORDER BY nspname) FROM (SELECT nspname,pg_get_userbyid(nspowner) owner,nspacl FROM pg_namespace WHERE nspname='public') r),
-'database',(SELECT jsonb_build_object('owner',pg_get_userbyid(datdba),'acl',datacl) FROM pg_database WHERE datname='billing'),
+'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY rolname) FROM (SELECT r.rolname,r.rolsuper,r.rolinherit,r.rolcreaterole,r.rolcreatedb,r.rolcanlogin,r.rolreplication,r.rolbypassrls,r.rolconnlimit,r.rolvaliduntil,r.rolconfig,a.rolpassword FROM pg_roles r JOIN pg_authid a USING (oid) WHERE r.rolname !~ '^pg_' AND r.rolname <> 'billing_migration_bootstrap') r),
+'schemas',(SELECT jsonb_agg(to_jsonb(r) ORDER BY nspname) FROM (SELECT nspname,pg_get_userbyid(nspowner) owner,ARRAY(SELECT x::text FROM unnest(coalesce(nspacl,acldefault('n',nspowner))) x ORDER BY x::text) nspacl FROM pg_namespace WHERE nspname='public') r),
+'database',(SELECT jsonb_build_object('owner',pg_get_userbyid(datdba),'acl',ARRAY(SELECT x::text FROM unnest(coalesce(datacl,acldefault('d',datdba))) x ORDER BY x::text)) FROM pg_database WHERE datname='billing'),
 'memberships',(SELECT jsonb_agg(to_jsonb(r) ORDER BY parent,member) FROM (SELECT p.rolname parent,c.rolname member,m.admin_option,m.inherit_option,m.set_option FROM pg_auth_members m JOIN pg_roles p ON p.oid=m.roleid JOIN pg_roles c ON c.oid=m.member) r),
-'relations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY nspname,relname) FROM (SELECT n.nspname,c.relname,c.relkind,pg_get_userbyid(c.relowner) owner,c.relrowsecurity,c.relforcerowsecurity,c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') r),
+'relations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY nspname,relname) FROM (SELECT n.nspname,c.relname,c.relkind,pg_get_userbyid(c.relowner) owner,c.relrowsecurity,c.relforcerowsecurity,ARRAY(SELECT x::text FROM unnest(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) x ORDER BY x::text) relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') r),
 'policies',(SELECT jsonb_agg(to_jsonb(p) ORDER BY schemaname,tablename,policyname) FROM pg_policies p WHERE schemaname='public'),
-'functions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY signature) FROM (SELECT p.oid::regprocedure::text signature,pg_get_userbyid(p.proowner) owner,p.prosecdef,p.proconfig,p.proacl FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') r),
-'default_acl',(SELECT jsonb_agg(to_jsonb(r) ORDER BY owner,namespace,defaclobjtype) FROM (SELECT pg_get_userbyid(d.defaclrole) owner,n.nspname namespace,d.defaclobjtype,d.defaclacl FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace) r)
+'functions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY signature) FROM (SELECT p.oid::regprocedure::text signature,pg_get_userbyid(p.proowner) owner,p.prosecdef,p.proconfig,ARRAY(SELECT x::text FROM unnest(coalesce(p.proacl,acldefault('f',p.proowner))) x ORDER BY x::text) proacl,ARRAY(SELECT x::text FROM unnest(acldefault('f',p.proowner)) x ORDER BY x::text) default_acl,(SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e') extension FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') r),
+'extensions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY extname) FROM (SELECT e.extname,e.extversion,pg_get_userbyid(e.extowner) owner,n.nspname namespace FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace) r),
+'default_acl',(SELECT jsonb_agg(to_jsonb(r) ORDER BY owner,namespace,defaclobjtype) FROM (SELECT pg_get_userbyid(d.defaclrole) owner,n.nspname namespace,d.defaclobjtype,ARRAY(SELECT x::text FROM unnest(d.defaclacl) x ORDER BY x::text) defaclacl FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace) r)
 )::text"""
 
 
 def require(value, message):
     if not value:
         raise RuntimeError(message)
+
+
+def catalog_equivalent(source, target):
+    """Allow reviewed installed-extension upgrades, never application/security drift."""
+    left, right = dict(source), dict(target)
+    old_extensions = {e['extname']: e for e in left.pop('extensions') or []}
+    new_extensions = {e['extname']: e for e in right.pop('extensions') or []}
+    if old_extensions.keys() != new_extensions.keys():
+        return False
+    upgraded = set()
+    for name, old in old_extensions.items():
+        new = new_extensions[name]
+        if {k: v for k, v in old.items() if k != 'extversion'} != {k: v for k, v in new.items() if k != 'extversion'}:
+            return False
+        if old['extversion'] != new['extversion']:
+            upgraded.add(name)
+    old_functions = {f['signature']: f for f in left.pop('functions') or []}
+    new_functions = {f['signature']: f for f in right.pop('functions') or []}
+    if not old_functions.keys() <= new_functions.keys():
+        return False
+    if any(new_functions[name] != old for name, old in old_functions.items()):
+        return False
+    for name in new_functions.keys() - old_functions.keys():
+        item = new_functions[name]
+        extension = item.get('extension')
+        if (extension not in upgraded or item['owner'] != new_extensions[extension]['owner']
+                or item['prosecdef'] or item['proconfig'] or item['proacl'] != item['default_acl']):
+            return False
+    return left == right
+
+
+def restore_globals(text, initializer='billing_admin'):
+    require(re.fullmatch(r'[a-z_][a-z0-9_]*', initializer), 'Unsupported source initializer identifier.')
+    statement = f'CREATE ROLE {initializer};'
+    require(text.splitlines().count(statement) == 1, 'Expected one source initializer declaration.')
+    # Apply the initializer's final restrictions last, from the restored admin,
+    # so a NOLOGIN/NOSUPERUSER source role cannot interrupt restoration.
+    final = [line for line in text.splitlines() if line.startswith(f'ALTER ROLE {initializer} ')]
+    require(final, 'Source initializer attributes are missing.')
+    lines = [line for line in text.splitlines() if line != statement and line not in final]
+    return '\n'.join(lines + ['SET ROLE billing_admin;'] + final + ['RESET ROLE;']) + '\n'
+
+
+def catalog_hash(snapshot):
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
 
 
 def env_patch(text, changes):
@@ -83,7 +129,7 @@ class Maintenance:
 
     def fingerprint(self, container, user='billing_admin'):
         raw = self.sql(container, CATALOG, user)
-        return hashlib.sha256(json.dumps(json.loads(raw), sort_keys=True).encode()).hexdigest()
+        return json.loads(raw)
 
     def counts(self, container, user='billing_admin'):
         names = json.loads(self.sql(container, "SELECT coalesce(json_agg(tablename ORDER BY tablename),'[]') FROM pg_tables WHERE schemaname='public'", user))
@@ -138,32 +184,40 @@ class Maintenance:
         existing = self.command(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().splitlines()
         require(volume not in existing, 'New target volume already exists: never overwrite or reuse a volume.')
         self.command(['docker', 'volume', 'create', '--label', 'cloud-billing.pg18-maintenance=true', volume])
+        source_catalog = json.loads((self.work / (prefix + '-source-catalog.json')).read_text())
+        initializer = next(e['owner'] for e in source_catalog['extensions'] if e['extname'] == 'plpgsql')
+        require(re.fullmatch(r'[a-z_][a-z0-9_]*', initializer), 'Unsupported source initializer identifier.')
         password = self.work / (prefix + '-bootstrap-password')
         atomic(password, secrets.token_urlsafe(40))
         # Private parent directory prevents host access; postgres UID must read its mounted secret.
         password.chmod(0o444)
         container = self.command(['docker', 'run', '-d', '--network', 'none', '--memory', '512m', '--cpus', '1',
-            '-e', 'PGDATA=/var/lib/postgresql/data', '-e', 'POSTGRES_USER=' + BOOTSTRAP,
+            '-e', 'PGDATA=/var/lib/postgresql/data', '-e', 'POSTGRES_USER=' + initializer, '-e', 'POSTGRES_DB=postgres',
             '-e', 'POSTGRES_PASSWORD_FILE=/run/bootstrap-password', '-v', str(password) + ':/run/bootstrap-password:ro',
             '-v', volume + ':/var/lib/postgresql/data', self.args.image,
             'postgres', '-c', 'shared_buffers=64MB', '-c', 'max_connections=30']).decode().strip()
         try:
             for _ in range(60):
-                ready = subprocess.run(['docker', 'exec', container, 'pg_isready', '-U', BOOTSTRAP], capture_output=True)
+                ready = subprocess.run(['docker', 'exec', container, 'pg_isready', '-U', 'billing_admin'], capture_output=True)
                 if ready.returncode == 0:
                     break
                 time.sleep(1)
             else:
                 raise RuntimeError('Isolated PG18 did not become ready.')
-            self.sql(container, (self.work / (prefix + '-globals.sql')).read_text(), BOOTSTRAP, 'postgres')
-            self.command(['docker', 'exec', '-i', container, 'pg_restore', '-U', BOOTSTRAP, '-d', 'postgres', '--create', '--exit-on-error'],
-                         (self.work / (prefix + '-billing.dump')).read_bytes())
-            self.sql(container, 'ANALYZE', BOOTSTRAP)
-            digest = self.fingerprint(container, BOOTSTRAP)
-            counts = self.counts(container, BOOTSTRAP)
-            # Disable temporary bootstrap before attaching the target to production networks.
-            self.sql(container, 'DROP DATABASE ' + BOOTSTRAP, BOOTSTRAP, 'postgres')
-            self.sql(container, 'ALTER ROLE ' + BOOTSTRAP + ' NOLOGIN PASSWORD NULL', BOOTSTRAP)
+            self.sql(container, restore_globals((self.work / (prefix + '-globals.sql')).read_text(), initializer), initializer, 'postgres')
+            original_initializer = next(r for r in source_catalog['roles'] if r['rolname'] == initializer)
+            if original_initializer['rolpassword'] is None:
+                # pg_dumpall omits a password clause for NULL; clear the temporary
+                # initialization password explicitly instead of creating access.
+                self.sql(container, f'ALTER ROLE {initializer} PASSWORD NULL', 'billing_admin', 'postgres')
+            self.command(['docker', 'exec', '-i', '-e', 'PGPASSWORD', container, 'pg_restore', '-U', 'billing_admin', '-d', 'postgres', '--create', '--exit-on-error'],
+                         (self.work / (prefix + '-billing.dump')).read_bytes(), password=True)
+            self.sql(container, 'ANALYZE')
+            digest = self.fingerprint(container)
+            counts = self.counts(container)
+            # No temporary login is created; source administrator credentials and
+            # attributes replace the initialization secret via the globals dump.
+            atomic(self.work / (prefix + '-target-catalog.json'), json.dumps(digest, sort_keys=True))
             return digest, counts
         finally:
             self.command(['docker', 'stop', container])
@@ -175,10 +229,11 @@ class Maintenance:
         source, original, old_image = self.preflight()
         self.backup(source, 'rehearsal')
         before = self.fingerprint(source)
+        atomic(self.work / 'rehearsal-source-catalog.json', json.dumps(before, sort_keys=True))
         digest, counts = self.restore(self.args.volume + '-rehearsal', 'rehearsal')
-        require(digest == before, 'Rehearsal role/grant/RLS catalog differs; source unchanged.')
+        require(catalog_equivalent(before, digest), 'Rehearsal role/grant/RLS catalog differs; source unchanged.')
         self.save(phase='rehearsed', original_volume=original, original_image=old_image,
-                  target_volume=self.args.volume, target_image=self.args.image, rehearsal_counts=counts)
+                  target_volume=self.args.volume, target_image=self.args.image, rehearsal_counts=counts, source_extensions=before['extensions'], target_extensions=digest['extensions'])
         print('Online isolated restore rehearsal passed. Original volume and writers unchanged.')
 
     def freeze(self):
@@ -196,15 +251,16 @@ class Maintenance:
         require(original == self.state['original_volume'], 'Source volume changed after rehearsal.')
         source = self.freeze()
         before, counts = self.fingerprint(source), self.counts(source)
+        atomic(self.work / 'final-source-catalog.json', json.dumps(before, sort_keys=True))
         self.backup(source, 'final')
         digest, restored_counts = self.restore(self.args.volume, 'final')
-        require(digest == before and counts == restored_counts, 'Final restored roles/grants/RLS or table counts differ. Writers remain stopped.')
+        require(catalog_equivalent(before, digest) and counts == restored_counts, 'Final restored roles/grants/RLS or table counts differ. Writers remain stopped.')
         env = self.root / '.env'
         require(env.exists(), 'Expected existing .env.')
         original_env = self.work / 'original.env'
         require(not original_env.exists(), 'Original environment backup already exists.')
         atomic(original_env, env.read_text())
-        self.save(phase='switching', catalog_hash=before, final_counts=counts)
+        self.save(phase='switching', catalog_hash=catalog_hash(before), final_counts=counts)
         self.command(['docker', 'compose', 'stop', 'db'])
         atomic(env, env_patch(env.read_text(), {'BILLING_POSTGRES_IMAGE': self.args.image, 'BILLING_POSTGRES_VOLUME': self.args.volume}))
         config = json.loads(self.command(['docker', 'compose', 'config', '--format', 'json']))
@@ -217,7 +273,7 @@ class Maintenance:
             time.sleep(1)
         target = self.db()
         require(self.sql(target, 'SHOW server_version_num').startswith('18'), 'Cutover is not PostgreSQL18.')
-        require(self.fingerprint(target) == before and self.counts(target) == counts, 'Cutover verification failed.')
+        require(catalog_equivalent(before, self.fingerprint(target)) and self.counts(target) == counts, 'Cutover verification failed.')
         self.save(phase='awaiting-verification')
         print('PG18 cutover verified; writers remain stopped. Verify web/collector runtime identities, TLS and RLS before reopen. Rollback remains available.')
 

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import importlib.util
 from pathlib import Path
@@ -69,5 +70,71 @@ class UpgradeGuards(unittest.TestCase):
         self.assertEqual(result, {'billing_cost': 42, 'sequence:billing_cost_id_seq': '99:true'})
 
 
+class CatalogSecurityComparison(unittest.TestCase):
+    def snapshot(self):
+        return {'extensions': [{'extname': 'btree_gist', 'extversion': '1.7', 'owner': 'billing_admin', 'namespace': 'public'}],
+                'functions': [{'signature': 'public.existing(integer)', 'extension': 'btree_gist', 'owner': 'billing_admin', 'prosecdef': False,
+                               'proconfig': None, 'proacl': ['=X/billing_admin', 'billing_admin=X/billing_admin'],
+                               'default_acl': ['=X/billing_admin', 'billing_admin=X/billing_admin']}],
+                'roles': [{'rolname': 'billing_web', 'rolbypassrls': False}], 'relations': []}
+
+    def changed(self):
+        source = self.snapshot()
+        target = copy.deepcopy(source)
+        target['extensions'][0]['extversion'] = '1.8'
+        added = copy.deepcopy(target['functions'][0])
+        added['signature'] = 'public.new_sortsupport(internal)'
+        target['functions'].append(added)
+        return source, target
+
+    def test_new_default_privilege_function_only_for_existing_upgraded_extension(self):
+        source, target = self.changed()
+        self.assertTrue(upgrade.catalog_equivalent(source, target))
+        target['extensions'][0]['extversion'] = '1.7'
+        self.assertFalse(upgrade.catalog_equivalent(source, target))
+
+    def test_reject_removed_or_security_changed_existing_function(self):
+        source, target = self.changed()
+        target['functions'][0]['owner'] = 'billing_migration_bootstrap'
+        self.assertFalse(upgrade.catalog_equivalent(source, target))
+        target['functions'].pop(0)
+        self.assertFalse(upgrade.catalog_equivalent(source, target))
+
+    def test_reject_new_application_function_or_definer_or_nondefault_grants(self):
+        for field, value in [('extension', None), ('prosecdef', True), ('proacl', ['attacker=X/billing_admin']), ('proconfig', ['search_path=unsafe'])]:
+            source, target = self.changed()
+            target['functions'][-1][field] = value
+            self.assertFalse(upgrade.catalog_equivalent(source, target))
+
+    def test_reject_extension_owner_schema_and_role_drift(self):
+        for field in ('owner', 'namespace'):
+            source, target = self.changed()
+            target['extensions'][0][field] = 'unexpected'
+            self.assertFalse(upgrade.catalog_equivalent(source, target))
+        source, target = self.changed()
+        target['roles'][0]['rolbypassrls'] = True
+        self.assertFalse(upgrade.catalog_equivalent(source, target))
+
+
 if __name__ == '__main__':
     unittest.main()
+
+class RestoreGlobals(unittest.TestCase):
+    def test_only_existing_admin_create_is_removed(self):
+        text = 'CREATE ROLE billing_admin;\nALTER ROLE billing_admin WITH SUPERUSER;\nCREATE ROLE billing_web;\n'
+        result = upgrade.restore_globals(text)
+        self.assertNotIn('CREATE ROLE billing_admin;', result)
+        self.assertIn('ALTER ROLE billing_admin WITH SUPERUSER;', result)
+        self.assertIn('CREATE ROLE billing_web;', result)
+        for invalid in ('', text + 'CREATE ROLE billing_admin;\n'):
+            with self.assertRaises(RuntimeError):
+                upgrade.restore_globals(invalid)
+
+    def test_legacy_initializer_restrictions_are_applied_last(self):
+        text = 'CREATE ROLE billing;\nALTER ROLE billing WITH NOSUPERUSER NOLOGIN;\nCREATE ROLE billing_admin;\nALTER ROLE billing_admin WITH SUPERUSER LOGIN;\n'
+        result = upgrade.restore_globals(text, 'billing')
+        self.assertNotIn('CREATE ROLE billing;', result)
+        self.assertLess(result.index('ALTER ROLE billing_admin'), result.index('SET ROLE billing_admin;'))
+        self.assertGreater(result.index('ALTER ROLE billing WITH'), result.index('SET ROLE billing_admin;'))
+        with self.assertRaises(RuntimeError):
+            upgrade.restore_globals(text, 'billing; DROP ROLE billing_web')
