@@ -1,0 +1,171 @@
+{
+  "generated_at": "2026-09-09T04:14:51.911147+00:00",
+  "parameters": {
+    "customers": 100,
+    "accounts": 3932,
+    "months": 7,
+    "services": 3,
+    "readers": 8,
+    "requests": 80,
+    "collect_sources": 130
+  },
+  "database": "postgresql",
+  "hardware_note": "Record CPU, RAM, OS and database version in the adjacent performance report.",
+  "generation": {
+    "seconds": 311.2,
+    "cost_rows": 2261574,
+    "accounts": 3926,
+    "customers": 100,
+    "days": 193,
+    "python_peak_memory_mb": 337.8
+  },
+  "collection_cycle": {
+    "sources": 130,
+    "months_per_source": 2,
+    "wall_seconds": 100.3,
+    "per_source_seconds": {
+      "mean": 0.77,
+      "p95": 2.56,
+      "max": 2.83
+    },
+    "requests_per_source": {
+      "mean": 5.0,
+      "max": 13
+    },
+    "rows_published": 471120,
+    "pages": 656,
+    "python_peak_memory_mb": 52.9,
+    "estimated_ce_cost_usd_per_cycle_at_0_01": 6.56,
+    "estimated_ce_cost_usd_per_day_4_cycles": 26.24,
+    "projected_full_cycle_seconds_single_worker": 100.3,
+    "note": "Fake client has zero network latency. Live AWS latency, quotas and throttling need separate authorized measurement."
+  },
+  "budgets": {
+    "evaluated": 200,
+    "seconds": 14.3
+  },
+  "dashboard": {
+    "per_path": {
+      "/": {
+        "status": 200,
+        "requests": 12,
+        "p50_ms": 160,
+        "p95_ms": 5595,
+        "queries_mean": 31,
+        "queries_max": 31
+      },
+      "/portfolio/": {
+        "status": 200,
+        "requests": 2,
+        "p50_ms": 2646,
+        "p95_ms": 3918,
+        "queries_mean": 31.5,
+        "queries_max": 32
+      },
+      "/overview/": {
+        "status": 200,
+        "requests": 1,
+        "p50_ms": 348,
+        "p95_ms": 348,
+        "queries_mean": 23,
+        "queries_max": 23
+      },
+      "/customers/<id>/": {
+        "status": 200,
+        "requests": 11,
+        "p50_ms": 20,
+        "p95_ms": 93,
+        "queries_mean": 15.6,
+        "queries_max": 19
+      },
+      "/budgets/": {
+        "status": 200,
+        "requests": 1,
+        "p50_ms": 35,
+        "p95_ms": 35,
+        "queries_mean": 14,
+        "queries_max": 14
+      },
+      "/onboarding/": {
+        "status": 200,
+        "requests": 1,
+        "p50_ms": 34,
+        "p95_ms": 34,
+        "queries_mean": 12,
+        "queries_max": 12
+      },
+      "/customers/<id>/?tab=budgets": {
+        "status": 200,
+        "requests": 5,
+        "p50_ms": 18,
+        "p95_ms": 18,
+        "queries_mean": 18.4,
+        "queries_max": 20
+      }
+    },
+    "failures": [],
+    "concurrent": {
+      "readers": 8,
+      "requests": 80,
+      "wall_seconds": 29.0,
+      "throughput_rps": 2.8,
+      "p50_ms": 626,
+      "p95_ms": 9890,
+      "max_ms": 20211,
+      "python_peak_memory_mb": 62.7
+    },
+    "note": "Django test client in-process (no gunicorn/Caddy/TLS); concurrency limited by the GIL and one PostgreSQL connection per thread."
+  },
+  "queue_fairness": {
+    "jobs_scheduled": 393,
+    "lease_loop_seconds": 1.38,
+    "distinct_sources_leased": 130,
+    "collect_jobs": 130,
+    "first_collect_position": 0,
+    "lease_ms_per_job": 3.52,
+    "note": "Per-source exclusion means no two jobs of one connection run at once; run_after jitter spreads the slot across SCHEDULE_JITTER_SECONDS."
+  },
+  "table_sizes": {
+    "billing_cost": "1038 MB",
+    "billing_awsaccount": "1024 kB",
+    "billing_accountassignment": "584 kB",
+    "billing_job": "376 kB",
+    "billing_collectionperiod": "264 kB",
+    "billing_billingsource": "176 kB",
+    "billing_budgetevaluation": "136 kB",
+    "billing_alert": "128 kB"
+  },
+  "scoped_concurrency": {
+    "readers": 8,
+    "requests": 80,
+    "p50_ms": 89.5,
+    "p95_ms": 207.4,
+    "seconds": 1.04,
+    "failures": []
+  },
+  "workload": {
+    "base_account_counts": [
+      2,
+      15,
+      101
+    ],
+    "standalone_sources": 20,
+    "shared_sources": 10,
+    "total_sources": 130,
+    "customers": 100,
+    "account_count": 3926
+  },
+  "targets": {
+    "scoped_p95_ms": 2000,
+    "collection_cycle_seconds": 21600,
+    "cross_customer_disclosures": 0,
+    "http_errors": 0
+  },
+  "targets_met": {
+    "scoped_p95": true,
+    "isolation": true,
+    "collection_cycle": true,
+    "http_errors": true
+  },
+  "rechecked_at": "2026-09-09T04:48:24.029790+00:00"
+}

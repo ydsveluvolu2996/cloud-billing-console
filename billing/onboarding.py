@@ -10,41 +10,26 @@ import boto3
 import yaml
 from botocore.config import Config
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from .models import AuditEvent, AwsAccount, BillingSource, Budget, BudgetAmount, Customer, ExplorerQuery, Job, new_external_id
 
 ACCOUNT_RE = re.compile(r'^\d{12}$')
-WIZARD_STEPS = [(1, 'Customer'), (2, 'Connection'), (3, 'Setup link'), (4, 'Verify role'), (5, 'Discover accounts'), (6, 'Assign & import')]
-
-
-def template_parameters(source):
-    return {'CollectorRoleArn': settings.COLLECTOR_ROLE_ARN, 'ExternalId': str(source.external_id), 'ExpectedAccountId': source.account_id,
-            'EnableOrganizationsDiscovery': 'true' if source.kind == BillingSource.PAYER else 'false',
-            'EnableBudgetImport': 'true' if source.capabilities.get('request_budgets', True) else 'false'}
+WIZARD_STEPS = [(1, 'Customer'), (2, 'Connection'), (3, 'Manual IAM role'), (4, 'Verify role'), (5, 'Discover accounts'), (6, 'Assign & import')]
 
 
 def source_template(source):
-    if not settings.COLLECTOR_ROLE_ARN:
-        raise ValueError('The collector IAM role is not configured yet.')
-    template = yaml.safe_load((settings.BASE_DIR / 'deploy/customer-role.yaml').read_text())
-    for key, value in template_parameters(source).items():
-        template['Parameters'][key]['Default'] = value
-    return yaml.safe_dump(template, sort_keys=False)
+    """Download manual IAM JSON; no customer infrastructure is required."""
+    import json
+    from .iam import policy_bundle
+    return json.dumps(policy_bundle(source), indent=2)
 
 
 def quick_create_url(source):
-    if not settings.ARTIFACT_BUCKET or not settings.COLLECTOR_ROLE_ARN:
-        return ''
-    # New buckets may redirect the global S3 endpoint. A redirect changes the
-    # signed host and invalidates the URL, so always sign the regional endpoint.
-    s3 = boto3.client('s3', region_name=settings.AWS_REGION, endpoint_url=f'https://s3.{settings.AWS_REGION}.amazonaws.com',
-                      config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}))
-    # Generic template contains no credentials; presigned URL expires after one hour.
-    template_url = s3.generate_presigned_url('get_object', Params={'Bucket': settings.ARTIFACT_BUCKET, 'Key': 'templates/customer-role.yaml'}, ExpiresIn=3600)
-    query = {'templateURL': template_url, 'stackName': 'CloudBillingReadOnly'}
-    query.update({f'param_{key}': value for key, value in template_parameters(source).items()})
-    return f'https://{settings.AWS_REGION}.console.aws.amazon.com/cloudformation/home?region={settings.AWS_REGION}#/stacks/create/review?{urlencode(query)}'
+    # Compatibility for callers: the setup route now renders copyable manual policies.
+    from django.urls import reverse
+    return reverse('source_setup', args=[source.pk])
 
 
 def rotate_external_id(source, actor=''):
@@ -70,17 +55,27 @@ def set_paused(source, paused, actor=''):
     AuditEvent.objects.create(actor=actor, action='Collection paused' if paused else 'Collection resumed', customer=source.customer, source=source)
 
 
+@transaction.atomic
 def offboard_customer(customer, actor=''):
-    """Stop collection for every connection but retain all historical records."""
+    """Stop publication, close ownership, then revoke access in one transaction."""
+    from .governance import stop_customer
+    from .authentication import security_event
+    from .models import CustomerMembership
+    from django.db import connection
+    from django.conf import settings
+    stop_customer(customer, actor)
     now = timezone.now()
-    with transaction.atomic():
-        Customer.objects.filter(pk=customer.pk).update(active=False, offboarded_at=now)
-        BillingSource.objects.filter(customer=customer).update(enabled=False, sync_requested=False)
-        Job.objects.filter(source__customer=customer, status=Job.QUEUED).delete()
-        for assignment in customer.assignments.filter(end__isnull=True):
-            assignment.end = max(now.date(), assignment.start + timezone.timedelta(days=1))
-            assignment.save(update_fields=['end'])
-        AuditEvent.objects.create(actor=actor, action='Customer offboarded (history retained)', customer=customer)
+    for assignment in customer.assignments.filter(end__isnull=True):
+        assignment.end = max(now.date(), assignment.start + timezone.timedelta(days=1))
+        assignment.save(update_fields=['end'])
+    security_event(actor,'Customer offboarded (history retained)',customer=customer)
+    if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED and settings.RUNTIME_ROLE=='web':
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT billing_revoke_customer_access(%s)',[customer.pk])
+    else:
+        Customer.objects.filter(pk=customer.pk).update(active=False,offboarded_at=now)
+        for membership in CustomerMembership.objects.filter(customer=customer,active=True):
+            membership.active=False;membership.save(update_fields=['active'])
 
 
 def reactivate_customer(customer, actor=''):
@@ -104,7 +99,7 @@ def detect_conflicts(account_id, customer=None):
 
 # --- bulk CSV --------------------------------------------------------------------------------------
 
-CUSTOMER_COLUMNS = ['name', 'reference', 'owner', 'currency', 'account_id', 'kind', 'shared', 'budget']
+CUSTOMER_COLUMNS = ['customer_id', 'name', 'reference', 'owner', 'currency', 'account_id', 'kind', 'shared', 'budget']
 
 
 def parse_customer_csv(text):
@@ -113,24 +108,42 @@ def parse_customer_csv(text):
     rows, errors = [], []
     if not reader.fieldnames or 'name' not in reader.fieldnames or 'account_id' not in reader.fieldnames:
         return [], ['The CSV needs at least the columns name and account_id.']
-    seen_names, seen_accounts = set(), set()
+    seen_names, seen_accounts = {}, set()
     for number, raw in enumerate(reader, start=2):
         row = {k: (v or '').strip() for k, v in raw.items() if k}
         problems = []
         name = row.get('name', '')
         if not name:
             problems.append('name is required')
-        elif name.lower() in seen_names:
-            problems.append('duplicate name in file')
-        seen_names.add(name.lower())
-        existing = Customer.objects.filter(name__iexact=name).first() if name else None
+        reference = row.get('reference','')
+        if name.lower() in seen_names and (not reference or seen_names[name.lower()] != reference):
+            problems.append('duplicate name in file without a consistent explicit customer reference')
+        seen_names[name.lower()] = reference
+        existing = None
+        if row.get('customer_id'):
+            try:
+                existing=Customer.objects.filter(pk=row['customer_id']).first()
+            except (ValueError, ValidationError):
+                problems.append('customer_id must be a valid customer UUID')
+            if existing is None:problems.append('customer_id is not available in your authorized scope')
+        elif reference:
+            matches=Customer.objects.filter(reference=reference)
+            if matches.count()>1:problems.append('reference is ambiguous; specify customer_id')
+            else:existing=matches.first()
+        named=Customer.objects.filter(name=name).first() if name else None
+        if named and existing is None:
+            problems.append('existing customer requires its customer_id or unique reference; names do not authorize merging')
+        if existing and existing.name!=name:
+            problems.append('name differs from the explicitly selected customer')
         account_id = row.get('account_id', '')
         if not ACCOUNT_RE.match(account_id):
             problems.append('account_id must be 12 digits')
         elif account_id in seen_accounts:
             problems.append('duplicate account_id in file')
         else:
-            problems.extend(detect_conflicts(account_id, existing))
+            prior=BillingSource.objects.filter(account_id=account_id).first()
+            if not (prior and existing and prior.customer_id==existing.pk):
+                problems.extend(detect_conflicts(account_id, existing))
         seen_accounts.add(account_id)
         kind = (row.get('kind') or 'payer').lower()
         if kind not in (BillingSource.PAYER, BillingSource.STANDALONE):
@@ -145,7 +158,7 @@ def parse_customer_csv(text):
                     problems.append('budget must be positive')
             except InvalidOperation:
                 problems.append('budget is not a number')
-        rows.append({'line': number, 'name': name, 'reference': row.get('reference', ''), 'owner': row.get('owner', ''), 'currency': currency,
+        rows.append({'line': number, 'customer_id': str(existing.pk) if existing else '', 'name': name, 'reference': row.get('reference', ''), 'owner': row.get('owner', ''), 'currency': currency,
                      'account_id': account_id, 'kind': kind, 'shared': (row.get('shared', '') or 'false').lower() in ('1', 'true', 'yes'),
                      'budget': budget, 'action': 'add connection' if existing else 'create', 'problems': problems})
         errors.extend(f'Line {number}: {p}' for p in problems)
@@ -160,9 +173,18 @@ def apply_customer_rows(rows, actor):
         for row in rows:
             if row['problems']:
                 raise ValueError(f'Line {row["line"]} has validation problems.')
-            customer, made = Customer.objects.get_or_create(name__iexact=row['name'], defaults={
-                'name': row['name'], 'reference': row['reference'], 'owner': row['owner'], 'currency': row['currency']})
-            source = BillingSource.objects.create(customer=customer, kind=row['kind'], account_id=row['account_id'], shared=row['shared'], onboarding_step=3)
+            if row.get('customer_id'):
+                customer = Customer.objects.select_for_update().get(pk=row['customer_id'])
+                made = False
+            else:
+                customer, made = Customer.objects.get_or_create(name=row['name'], defaults={
+                    'reference': row['reference'], 'owner': row['owner'], 'currency': row['currency']})
+                if not made and (not row['reference'] or customer.reference != row['reference']):
+                    raise ValueError('Customer identity changed after preview. Upload a fresh preview with the explicit customer ID.')
+            source, added = BillingSource.objects.get_or_create(account_id=row['account_id'], kind=row['kind'], defaults={
+                'customer':customer,'shared':row['shared'],'onboarding_step':3})
+            if source.customer_id!=customer.pk or source.shared!=row['shared']:
+                raise ValueError('Connection ownership differs from the preview. Resolve the conflict before retrying.')
             if row['budget'] and made:
                 budget = Budget.objects.create(customer=customer, scope=Budget.CUSTOMER, name=f'{customer.name} monthly budget', currency=row['currency'], created_by=actor)
                 BudgetAmount.objects.create(budget=budget, amount=Decimal(row['budget']), effective_from=date.today().replace(day=1))
@@ -175,7 +197,7 @@ def customer_csv_template():
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(CUSTOMER_COLUMNS)
-    writer.writerow(['Example Ltd', 'CRM-1001', 'Jane Owner', 'USD', '123456789012', 'payer', 'false', '5000'])
+    writer.writerow(['', 'Example Ltd', 'CRM-1001', 'Jane Owner', 'USD', '123456789012', 'payer', 'false', '5000'])
     return out.getvalue()
 
 

@@ -1,36 +1,217 @@
-name: Application checks
-on: [push, pull_request]
+name: Application and security checks
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the exact tested SHA to billing production
+        type: boolean
+        default: false
+      expected_sha:
+        description: Full 40-character commit SHA being approved
+        type: string
+        required: true
+      reason:
+        description: Release reason
+        type: string
+        required: true
 permissions:
   contents: read
+concurrency:
+  group: checks-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
         env:
           POSTGRES_USER: billing
-          POSTGRES_PASSWORD: test-database-password
+          POSTGRES_PASSWORD: ci-isolated-database-only
           POSTGRES_DB: billing
         ports: ['5432:5432']
         options: --health-cmd "pg_isready -U billing" --health-interval 10s --health-timeout 5s --health-retries 5
     env:
       DEBUG: 'true'
       DB_HOST: localhost
-      DB_PASSWORD: test-database-password
+      DB_PASSWORD: ci-isolated-database-only
+      AWS_EC2_METADATA_DISABLED: 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m unittest discover -s deploy/github-release/tests -v
       - run: python manage.py collectstatic --noinput
       - run: python manage.py makemigrations --check --dry-run
-      - run: python manage.py test billing.tests
-      - run: python manage.py migrate --noinput && python manage.py run_worker --once
-      - run: python manage.py synthetic_load --customers 4 --accounts 40 --months 2 --readers 2 --requests 8 --collect-sources 4 --output /tmp/synthetic-load.json
-      - run: python manage.py check --deploy
+      - run: python manage.py test billing.tests --noinput
+      - name: Verify generated runtime policies
+        run: |
+          PYTHONPATH=. python scripts/generate_database_roles.py
+          git diff --exit-code -- deploy/database-roles.sql
+      - run: cfn-lint deploy/infrastructure.yaml
+      - run: python manage.py migrate --noinput
+      - run: python manage.py run_worker --once --limit 5
+        env:
+          RUNTIME_ROLE: collector
+      - name: Heterogeneous 100-customer smoke workload
+        run: python manage.py security_load --months 1 --services 1 --requests 16 --readers 4 --collect-sources 130 --output /tmp/security-load.json
+      - run: python manage.py check --deploy --fail-level WARNING
         env:
           DEBUG: 'false'
-          SECRET_KEY: ci-validation-placeholder-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+          SECRET_KEY: ci-validation-only-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: synthetic-capacity-${{ github.sha }}
+          path: /tmp/security-load.json
+          retention-days: 14
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: mkdir -p /tmp/security-evidence
+      - run: pip-audit -r requirements.txt --format json --output /tmp/security-evidence/dependencies.json
+      - run: bandit -r billing config scripts deploy/github-release deploy/single-ec2 -x deploy/github-release/tests -ll -ii -f json -o /tmp/security-evidence/bandit.json
+      - run: python scripts/install_scanners.py
+      - run: .deployment/tools/gitleaks git --redact --report-format json --report-path /tmp/security-evidence/secrets.json
+      - name: Build deployable runtime images
+        run: |
+          docker build --pull -f deploy/Dockerfile -t cloud-billing-app:${{ github.sha }} .
+          docker build --pull -f deploy/Dockerfile.postgres -t cloud-billing-postgres:${{ github.sha }} .
+          docker build --pull -f deploy/Dockerfile.caddy -t cloud-billing-caddy:${{ github.sha }} .
+      - name: Test the actual application and PostgreSQL images
+        run: |
+          docker network create billing-checks
+          docker network create --internal billing-checks-private
+          docker run -d --name billing-checks-db --network billing-checks \
+            -p 127.0.0.1:55432:5432 \
+            -e POSTGRES_USER=billing -e POSTGRES_DB=billing \
+            -e POSTGRES_PASSWORD=ci-isolated-database-only cloud-billing-postgres:${{ github.sha }}
+          docker network connect billing-checks-private billing-checks-db
+          for attempt in $(seq 1 30); do
+            if docker exec billing-checks-db pg_isready -U billing -d billing; then break; fi
+            sleep 2
+          done
+          docker exec billing-checks-db pg_isready -U billing -d billing
+          python -c "import socket; socket.create_connection(('127.0.0.1', 55432), timeout=5).close()"
+          docker run --rm --network billing-checks-private \
+            -e DEBUG=true -e AWS_EC2_METADATA_DISABLED=true \
+            -e DB_HOST=billing-checks-db -e DB_PASSWORD=ci-isolated-database-only \
+            --entrypoint python cloud-billing-app:${{ github.sha }} manage.py test billing.tests --noinput
+          docker run --rm -e DASHBOARD_HOST=billing.example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            cloud-billing-caddy:${{ github.sha }} caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Scan images; critical/high findings fail
+        run: |
+          scan_status=0
+          for image in cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }}; do
+            report=$(printf '%s' "$image" | tr ':/' '_')
+            .deployment/tools/trivy image --timeout 10m --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format json --output "/tmp/security-evidence/$report.json" "$image" || scan_status=1
+          done
+          exit "$scan_status"
+      - name: Package the tested and scanned images
+        run: |
+          mkdir -p /tmp/billing-release
+          docker image inspect cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }} > /tmp/billing-release/images.json
+          docker save cloud-billing-app:${{ github.sha }} cloud-billing-postgres:${{ github.sha }} cloud-billing-caddy:${{ github.sha }} | gzip -1 > /tmp/billing-release/images.tar.gz
+          cd /tmp/billing-release
+          sha256sum images.tar.gz > images.tar.gz.sha256
+      - name: Package tracked source and offline native dependencies
+        run: python deploy/github-release/package.py /tmp/billing-release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: billing-release-${{ github.sha }}
+          path: /tmp/billing-release
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: security-scans-${{ github.sha }}
+          path: /tmp/security-evidence
+          retention-days: 14
+
+  oidc-identity:
+    if: github.event_name == 'workflow_dispatch' && !inputs.deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: billing-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Show non-secret identity claims for the one-time trust setup
+        run: python deploy/github-release/oidc.py
+        env:
+          IDENTITY_ONLY: 'true'
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    needs: [test, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    environment: billing-production
+    concurrency:
+      group: billing-production-release
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    env:
+      AWS_REGION: ap-south-1
+      AWS_EC2_METADATA_DISABLED: 'true'
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      BILLING_RELEASE_ROLE_ARN: ${{ vars.BILLING_RELEASE_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Verify the repository, branch and exact release commit
+        run: |
+          python - <<'PYTHON'
+          import os, runpy
+          runpy.run_path('deploy/github-release/release.py')['check_context'](os.environ)
+          PYTHON
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: billing-release-${{ github.sha }}
+          path: /tmp/billing-release
+      - name: Obtain temporary AWS credentials through GitHub OIDC
+        run: python deploy/github-release/oidc.py
+      - name: Stage, activate and health-check both billing runtimes
+        run: python deploy/github-release/release.py /tmp/billing-release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: billing-deployment-${{ github.sha }}-${{ github.run_attempt }}
+          path: release-receipt.json
+          if-no-files-found: ignore
+          retention-days: 90

@@ -32,12 +32,36 @@ function marker(ns, kind, cx, cy, r, color) {
 }
 const navToggle = document.querySelector('[data-nav-toggle]');
 if (navToggle) {
+  const sidebar = document.getElementById('sidebar');
+  const mobile = window.matchMedia('(max-width: 1024px)');
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('billing.sidebarCollapsed') === 'true'; } catch { /* Storage may be disabled. */ }
+  function syncSidebar() {
+    const visible = mobile.matches ? document.body.classList.contains('nav-open') : !collapsed;
+    document.body.classList.toggle('sidebar-collapsed', !mobile.matches && collapsed);
+    sidebar.inert = !visible;
+    navToggle.setAttribute('aria-expanded', String(visible));
+    navToggle.setAttribute('aria-label', visible ? 'Hide sidebar' : 'Show sidebar');
+    navToggle.querySelector('[data-nav-label]').textContent = visible ? 'Hide sidebar' : 'Show sidebar';
+    window.dispatchEvent(new Event('resize'));
+  }
   navToggle.addEventListener('click', () => {
-    const open = document.body.classList.toggle('nav-open');
-    navToggle.setAttribute('aria-expanded', String(open));
+    if (mobile.matches) document.body.classList.toggle('nav-open');
+    else { collapsed = !collapsed; try { localStorage.setItem('billing.sidebarCollapsed', String(collapsed)); } catch { /* Optional preference. */ } }
+    syncSidebar();
   });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && document.body.classList.contains('nav-open')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); navToggle.focus(); } });
-  document.addEventListener('click', event => { if (document.body.classList.contains('nav-open') && !event.target.closest('#sidebar, [data-nav-toggle]')) { document.body.classList.remove('nav-open'); navToggle.setAttribute('aria-expanded', 'false'); } });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('nav-open')) {
+      document.body.classList.remove('nav-open'); syncSidebar(); navToggle.focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (mobile.matches && document.body.classList.contains('nav-open') && !event.target.closest('#sidebar, [data-nav-toggle]')) {
+      document.body.classList.remove('nav-open'); syncSidebar();
+    }
+  });
+  mobile.addEventListener('change', () => { document.body.classList.remove('nav-open'); syncSidebar(); });
+  syncSidebar();
 }
 document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
   const field = document.getElementById(button.dataset.copy);
@@ -208,10 +232,11 @@ if (parameters) {
   }));
   window.addEventListener('resize', updateExpanded); updateExpanded();
 }
-const explorerHost = document.getElementById('explorer-chart');
-if (explorerHost) {
-  const payload = JSON.parse(document.getElementById('explorer-data').textContent);
-  const tooltip = document.getElementById('explorer-tooltip');
+for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparison-chart')) {
+  const chartId=explorerHost.id==='comparison-chart'?'comparison':'explorer';
+  const chartPanel=explorerHost.closest('.panel');
+  const payload = JSON.parse(document.getElementById(chartId+'-data').textContent);
+  const tooltip = document.getElementById(chartId+'-tooltip');
   const hidden = new Set();
   const ns = 'http://www.w3.org/2000/svg';
   const amount = value => {
@@ -219,7 +244,7 @@ if (explorerHost) {
     return new Intl.NumberFormat('en', {style:payload.measure==='usage'?'decimal':'currency', currency:payload.measure==='usage'?undefined:payload.currency, minimumFractionDigits:2,
       maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 10 : 2}).format(value);
   };
-  const periodLabel = text => text.includes(':') ? text + ' UTC' : /^\d{4}-/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
+  const periodLabel = text => /^\d{4}-\d{2}-\d{2} \d{2}:/.test(text) ? text + ' UTC' : /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
   const drawExplorer = () => {
     const w = Math.max(220, explorerHost.clientWidth), h = explorerHost.clientHeight;
     const pad = {l:w < 400 ? 42 : 55,r:14,t:14,b:34}, pw = w-pad.l-pad.r, ph = h-pad.t-pad.b;
@@ -250,7 +275,7 @@ if (explorerHost) {
       node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:value===0?TOKENS.muted:TOKENS.border,'stroke-width':value===0?1.5:1});
       node('text',{x:pad.l-9,y:y(value)+3,fill:TOKENS.muted,'text-anchor':'end','font-size':11},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
     }
-    const fills = payload.series.map((s,i) => PATTERNS[i % PATTERNS.length] === 'solid' ? s.color : definePattern(svg, ns, `series-${i}`, s.color, PATTERNS[i % PATTERNS.length]));
+    const fills = payload.series.map((s,i) => PATTERNS[i % PATTERNS.length] === 'solid' ? s.color : definePattern(svg, ns, `${chartId}-series-${i}`, s.color, PATTERNS[i % PATTERNS.length]));
     const indexOf = s => payload.series.indexOf(s);
     const positive=Array(count).fill(0),negative=Array(count).fill(0);
     series.forEach((s,j)=>{
@@ -284,7 +309,7 @@ if (explorerHost) {
     });
     const every=Math.max(1,Math.ceil(count/Math.max(2,Math.floor(pw/78))));
     payload.periods.forEach((period,i)=>{
-      if(i%every===0)node('text',{x:x(i),y:h-10,'text-anchor':'middle',fill:TOKENS.muted,'font-size':11},/^\d{4}-/.test(period)?periodLabel(period).replace(/ 20\d\d$/,''):period);
+      if(i%every===0)node('text',{x:x(i),y:h-10,'text-anchor':'middle',fill:TOKENS.muted,'font-size':11},payload.comparison&&period.length>13?period.slice(0,12)+'…':/^\d{4}-/.test(period)?periodLabel(period).replace(/ 20\d\d$/,''):period);
     });
     const guide=node('line',{x1:0,x2:0,y1:pad.t,y2:h-pad.b,stroke:TOKENS.primary,'stroke-dasharray':'3 3',visibility:'hidden','pointer-events':'none'});
     const targets=[];
@@ -293,8 +318,8 @@ if (explorerHost) {
       guide.setAttribute('x1',x(i)); guide.setAttribute('x2',x(i)); guide.setAttribute('visibility','visible');
       tooltip.replaceChildren();
       const available=series.filter(s=>s.values[i]!==null);
-      const displayedTotal=payload.totals[i]===null?null:available.reduce((sum,s)=>sum+s.values[i],0);
-      const title=document.createElement('strong'); title.textContent=`${periodLabel(payload.periods[i])} · ${hidden.size ? 'Visible total' : 'Total'} ${amount(displayedTotal)}`;tooltip.appendChild(title);
+      const displayedTotal=payload.comparison?payload.totals[i]:payload.totals[i]===null?null:available.reduce((sum,s)=>sum+s.values[i],0);
+      const title=document.createElement('strong'); title.textContent=`${periodLabel(payload.periods[i])} · ${payload.comparison?'Change':hidden.size ? 'Visible total' : 'Total'} ${amount(displayedTotal)}`;tooltip.appendChild(title);
       available.forEach(s=>{const span=document.createElement('span');span.textContent=`${s.label}: ${amount(s.values[i])}`;tooltip.appendChild(span);});
       if(overlay)overlay.remove();
       const ow=Math.min(310,pw),oh=Math.min(h-pad.t-pad.b,32+available.length*20);
@@ -312,7 +337,7 @@ if (explorerHost) {
     };
     payload.periods.forEach((period,i)=>{
       const hit=node('rect',{x:pad.l+i*step,y:pad.t,width:step,height:ph,fill:'transparent',tabindex:i===0?0:-1,role:'img',
-        'aria-label':`${periodLabel(period)}. Total ${amount(payload.totals[i])}. Focus to inspect groups.`});
+        'aria-label':`${periodLabel(period)}. ${payload.comparison?'Change':'Total'} ${amount(payload.totals[i])}. Focus to inspect groups.`});
       hit.addEventListener('pointerenter',()=>showPeriod(i));hit.addEventListener('focus',()=>showPeriod(i));
       hit.addEventListener('click',()=>showPeriod(i));
       hit.addEventListener('keydown',event=>{
@@ -329,18 +354,18 @@ if (explorerHost) {
     svg.addEventListener('pointerleave',()=>{overlay?.remove();guide.setAttribute('visibility','hidden');});
     explorerHost.replaceChildren(svg);
   };
-  document.querySelectorAll('[data-series]').forEach(button=>{
+  chartPanel.querySelectorAll('[data-series]').forEach(button=>{
     // Legend swatches show the same pattern/dash as the chart so series are distinguishable without colour.
     const index=Number(button.dataset.series), series=payload.series[index], swatch=button.querySelector('svg');
     if(series && swatch){
       swatch.setAttribute('viewBox','0 0 14 14'); swatch.replaceChildren();
       const kind=PATTERNS[index % PATTERNS.length];
-      const fill=kind==='solid'?series.color:definePattern(swatch, ns, `legend-${index}`, series.color, kind);
+      const fill=kind==='solid'?series.color:definePattern(swatch, ns, `${chartId}-legend-${index}`, series.color, kind);
       const rect=document.createElementNS(ns,'rect'); rect.setAttribute('width','14'); rect.setAttribute('height','14'); rect.setAttribute('fill',fill); swatch.appendChild(rect);
       if(payload.style==='line'){ const line=document.createElementNS(ns,'path'); line.setAttribute('d','M1 7H13'); line.setAttribute('stroke',TOKENS.surface); line.setAttribute('stroke-width','2'); if(DASHES[index % DASHES.length]) line.setAttribute('stroke-dasharray',DASHES[index % DASHES.length]); swatch.appendChild(line); }
     }
   });
-  document.querySelectorAll('[data-series]').forEach(button=>button.addEventListener('click',()=>{
+  chartPanel.querySelectorAll('[data-series]').forEach(button=>button.addEventListener('click',()=>{
     const index=Number(button.dataset.series);
     if(hidden.has(index))hidden.delete(index);else hidden.add(index);
     button.setAttribute('aria-pressed',String(!hidden.has(index)));drawExplorer();
@@ -353,29 +378,54 @@ const reportForm=document.getElementById('report-form');
 if(reportForm){
   const field=name=>reportForm.elements.namedItem(name);
   let changed=false;
+  const reportToday=new Date(reportForm.dataset.today+'T00:00:00Z');
+  const iso=date=>date.toISOString().slice(0,10);
+  const monthDate=(offset,day=1)=>new Date(Date.UTC(reportToday.getUTCFullYear(),reportToday.getUTCMonth()+offset,day));
+  field('date_range').addEventListener('change',()=>{
+    const range=field('date_range').value;let start,end;
+    if(range!=='last_month'&&field('compare_range').value==='month_over_month'){field('compare_range').value='previous_period';field('compare_start').value='';field('compare_end').value='';}
+    if(range==='this_month'){start=monthDate(0);end=reportToday;}
+    else if(range==='last_month'){start=monthDate(-1);end=monthDate(0,0);}
+    else if(/^last_(3|6|12)_months$/.test(range)){start=monthDate(-Number(range.split('_')[1]));end=monthDate(0,0);}
+    else if(/^last_(7|14)_days$/.test(range)){end=reportToday;start=new Date(reportToday);start.setUTCDate(start.getUTCDate()-Number(range.split('_')[1])+1);}
+    if(start){field('start').value=iso(start);field('end').value=iso(end);}
+  });
+  const monthComparison=()=>{
+    field('date_range').value='last_month';field('start').value=iso(monthDate(-1));field('end').value=iso(monthDate(0,0));
+    field('compare_start').value=iso(monthDate(-2));field('compare_end').value=iso(monthDate(-1,0));field('granularity').value='monthly';
+    field('compare_range').value='month_over_month';field('date_range').dispatchEvent(new Event('change',{bubbles:true}));
+  };
+  document.querySelector('[data-month-comparison]').addEventListener('click',monthComparison);
+  field('compare_range').addEventListener('change',()=>{
+    if(field('compare_range').value==='month_over_month')monthComparison();
+    else if(field('compare_range').value==='previous_period'){field('compare_start').value='';field('compare_end').value='';}
+  });
   reportForm.addEventListener('change',()=>{changed=true;});
   reportForm.addEventListener('input',()=>{changed=true;});
-  ['start','end'].forEach(name=>field(name).addEventListener('change',()=>{field('date_range').value='custom';}));
-  field('report_mode').addEventListener('change',()=>{document.querySelector('[data-compare-fields]').hidden=field('report_mode').value!=='compare';});
+  ['start','end'].forEach(name=>field(name).addEventListener('change',()=>{field('date_range').value='custom';if(field('compare_range').value==='month_over_month')field('compare_range').value='custom';}));
+  ['compare_start','compare_end'].forEach(name=>field(name).addEventListener('change',()=>{field('compare_range').value='custom';}));
+  field('report_mode').addEventListener('change',()=>{document.querySelector('[data-compare-fields]').hidden=field('report_mode').value!=='compare';if(field('report_mode').value==='compare')monthComparison();});
   field('group_by').addEventListener('change',()=>{document.querySelector('[data-group-key]').hidden=!['tag','cost_category'].includes(field('group_by').value);});
-  const makeOption=(key,value,checked=false)=>{
+  const makeOption=(key,value,checked=false,display='')=>{
     const label=document.createElement('label');label.className='checkbox-label';
     const input=document.createElement('input');input.type='checkbox';input.name=key;input.value=value===''?'__billing_empty_value__':value;input.checked=checked;
-    const span=document.createElement('span');span.textContent=value||'(Empty value)';label.append(input,span);return label;
+    const span=document.createElement('span');span.textContent=display||value||'(Empty value)';label.append(input,span);return label;
   };
   const metadataRequests=new WeakMap();
   async function metadata(kind,key,status,render){
     const generation=(metadataRequests.get(status)||0)+1;metadataRequests.set(status,generation);
-    const query=new URLSearchParams({dimension:kind,key,customer:field('customer').value,start:field('start').value,end:field('end').value});
+    const query=new URLSearchParams(new FormData(reportForm));query.set('dimension',kind);query.set('key',key);
     let attempts=0;
     const read=async()=>{
       try{
         const response=await fetch(`/explorer/metadata/?${query}`,{credentials:'same-origin'});
-        if(!response.ok){const error=await response.json();throw new Error(error.error||'Could not load billing values.');}
-        const result=await response.json();if(metadataRequests.get(status)!==generation)return;render(result.values);
+        if(response.redirected)throw new Error('Your session expired. Sign in again to load billing values.');
+        if(!response.ok){let error={};try{error=await response.json();}catch{}throw new Error(error.error||'Could not load billing values.');}
+        const result=await response.json();if(metadataRequests.get(status)!==generation)return;render(result.values,result.labels||{});
         status.textContent=result.errors.length?result.errors.join(' '):result.pending?'Loading from AWS; the worker checks within a minute.':result.values.length?`${result.values.length} available values`:'No values returned for these dates and customers.';
         if(result.pending&&attempts++<24)setTimeout(read,5000);
-      }catch(error){status.textContent=error.message;}
+        else if(result.pending)status.textContent='Still queued. Use Load available values to check again, or review Sync & activity.';
+      }catch(error){if(metadataRequests.get(status)===generation)status.textContent=error.message;}
     };await read();
   }
   reportForm.querySelectorAll('[data-filter]').forEach(box=>{
@@ -387,16 +437,16 @@ if(reportForm){
     box.querySelector('[data-load-values]').addEventListener('click',()=>{
       const keyValue=field(`${key}_key`)?.value||'';
       if(['tag','cost_category'].includes(key)&&!keyValue){status.textContent='Choose a key first.';return;}
-      metadata(key,keyValue,status,values=>{const existing=new Set([...list.querySelectorAll('input')].map(i=>i.value));values.forEach(value=>{if(!existing.has(value===''?'__billing_empty_value__':value))list.append(makeOption(key,value));});search();});
+      metadata(key,keyValue,status,(values,labels)=>{list.querySelectorAll('input:not(:checked)').forEach(input=>input.closest('label').remove());const existing=new Map([...list.querySelectorAll('input')].map(i=>[i.value,i]));values.forEach(value=>{const input=existing.get(value===''?'__billing_empty_value__':value);if(!input)list.append(makeOption(key,value,false,labels[value]));else if(labels[value])input.nextElementSibling.textContent=labels[value];});search();});
     });
     box.addEventListener('toggle',()=>{if(box.open&&!box.dataset.loaded){box.dataset.loaded='1';(box.querySelector('[data-load-keys]')||box.querySelector('[data-load-values]')).click();}});
     box.querySelector('[data-add-value]').addEventListener('click',()=>{
       const input=box.querySelector('[data-manual-value]'), value=input.value;
       if(!value)return;
       const existing=[...list.querySelectorAll('input')].find(i=>i.value===value);
-      if(existing)existing.checked=true;else list.append(makeOption(key,value,true));input.value='';count();changed=true;
+      if(existing)existing.checked=true;else list.append(makeOption(key,value,true));input.value='';count();changed=true;list.dispatchEvent(new Event('change',{bubbles:true}));
     });
-    box.querySelector('[data-clear-values]').addEventListener('click',()=>{list.querySelectorAll('input').forEach(i=>{i.checked=false;});count();changed=true;});
+    box.querySelector('[data-clear-values]').addEventListener('click',()=>{list.querySelectorAll('input').forEach(i=>{i.checked=false;});count();changed=true;list.dispatchEvent(new Event('change',{bubbles:true}));});
     box.querySelector('[data-load-keys]')?.addEventListener('click',()=>metadata(key,'',status,values=>{
       const datalist=document.getElementById(`keys-${key}`);datalist.replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
     }));
@@ -405,7 +455,11 @@ if(reportForm){
   document.querySelector('[data-load-group-keys]').addEventListener('click',()=>metadata(field('group_by').value,'',document.querySelector('[data-key-status]'),values=>{
     document.getElementById('group-key-options').replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
   }));
-  ['customer','start','end'].forEach(name=>field(name).addEventListener('change',()=>{reportForm.querySelectorAll('[data-filter-status], [data-key-status]').forEach(status=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);status.textContent='Date or customer changed. Reload available values.';});reportForm.querySelectorAll('.dimension-values input:not(:checked)').forEach(input=>input.closest('label').remove());reportForm.querySelectorAll('[data-filter]').forEach(box=>{delete box.dataset.loaded;});}));
+  reportForm.addEventListener('change',event=>{
+    if(!['customer','source','start','end','date_range'].includes(event.target.name)&&!event.target.closest('[data-filter]'))return;
+    reportForm.querySelectorAll('[data-filter-status], [data-key-status]').forEach(status=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);status.textContent='Filters changed. Reload available values.';});
+    reportForm.querySelectorAll('[data-filter]').forEach(box=>{delete box.dataset.loaded;});
+  });
   let preferences={};try{preferences=JSON.parse(localStorage.getItem('billing-filter-visibility')||'{}');}catch{}
   reportForm.querySelectorAll('[data-visible-filter]').forEach(toggle=>{
     const box=reportForm.querySelector(`[data-filter="${toggle.dataset.visibleFilter}"]`);
@@ -414,7 +468,10 @@ if(reportForm){
     toggle.addEventListener('change',()=>{preferences[toggle.dataset.visibleFilter]=toggle.checked;try{localStorage.setItem('billing-filter-visibility',JSON.stringify(preferences));}catch{}apply();});
   });
   document.getElementById('save-current-report')?.addEventListener('submit',event=>{
-    event.currentTarget.elements.namedItem('report_name').value=field('report_name').value;
+    if(!reportForm.reportValidity()){event.preventDefault();return;}
+    const saveForm=event.currentTarget;
+    saveForm.querySelectorAll('input:not([name="csrfmiddlewaretoken"])').forEach(input=>input.remove());
+    for(const [name,value] of new FormData(reportForm)){const input=document.createElement('input');input.type='hidden';input.name=name;input.value=value;saveForm.append(input);}
   });
   const pending=document.getElementById('pending-query-ids');
   if(pending){
@@ -428,4 +485,37 @@ if(reportForm){
       }catch{document.querySelector('[data-query-progress]').textContent='Unable to check progress. Reload to retry.';}
     };setTimeout(poll,5000);
   }
+}
+document.querySelectorAll('[data-customer-tree]').forEach(details => {
+  details.addEventListener('toggle', async () => {
+    if (!details.open || details.dataset.loaded) return;
+    details.dataset.loaded = 'loading';
+    const content = details.querySelector('[data-tree-content]');
+    content.textContent = 'Loading assigned accounts…';
+    try {
+      const response = await fetch(details.dataset.customerTree, {credentials: 'same-origin'});
+      if (!response.ok || response.redirected) throw new Error('Scope unavailable');
+      content.innerHTML = await response.text();
+      details.dataset.loaded = 'true';
+    } catch (error) {
+      content.textContent = 'Account details are unavailable. Close and reopen to retry, or sign in again.';
+      delete details.dataset.loaded;
+    }
+  });
+});
+
+const accountSettings = document.querySelector('[data-account-settings]');
+if (accountSettings) {
+  accountSettings.addEventListener('toggle', () => {
+    if (accountSettings.open) accountSettings.scrollIntoView({block: 'nearest'});
+  });
+  accountSettings.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && accountSettings.open) {
+      event.stopPropagation(); accountSettings.open = false;
+      accountSettings.querySelector('summary').focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (!accountSettings.contains(event.target)) accountSettings.open = false;
+  });
 }

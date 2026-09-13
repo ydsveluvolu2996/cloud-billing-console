@@ -22,7 +22,12 @@ def role(user):
 
 
 def can_edit(user):
-    return user.is_authenticated and user.is_staff
+    from django.conf import settings
+    from .access import current_access, for_user
+    if not settings.ENFORCE_CUSTOMER_AUTHORIZATION:
+        return user.is_authenticated and user.is_staff
+    access = current_access.get() or for_user(user)
+    return bool(user.is_authenticated and (access.portfolio or access.editable))
 
 
 def parse_uuid(value, message):
@@ -84,7 +89,7 @@ def resolve(params, require_customer=False):
         raise ValueError('Choose a customer.')
     sid = params.get('source', '') or ''
     if sid:
-        scope.source = BillingSource.objects.filter(pk=parse_uuid(sid, 'Choose a valid connection.')).select_related('customer').first()
+        scope.source = BillingSource.objects.filter(pk=parse_uuid(sid, 'Choose a valid connection.')).first()
         if scope.source is None:
             raise ValueError('This connection could not be found.')
         if scope.customer and scope.source.customer_id != scope.customer.pk and not scope.source.shared:
@@ -132,24 +137,33 @@ def source_account_filter(source, customer):
     """
     if customer is None:
         return None
-    if not source.shared and source.customer_id == customer.pk:
+    from django.conf import settings
+    if not settings.ENFORCE_CUSTOMER_AUTHORIZATION and not source.shared and source.customer_id == customer.pk:
         other_owner = AccountAssignment.objects.filter(account__source=source, end__isnull=True).exclude(customer=customer).exists()
         if not other_owner:
             return None
     return customer_accounts(customer, source=source)
 
 
-def report_units(customer=None, active_only=True):
+def report_units(customer=None, active_only=True, start=None, end=None):
     """(source, customer, account_filter) tuples describing which AWS queries serve a scope."""
     sources = BillingSource.objects.filter(kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).select_related('customer')
     if active_only:
-        sources = sources.filter(enabled=True, customer__active=True, last_success__isnull=False).exclude(role_arn='')
+        sources = sources.filter(enabled=True, last_success__isnull=False).exclude(role_arn='')
     units = []
     if customer is None:
+        from .access import current_access
+        access = current_access.get()
+        from django.conf import settings
+        if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
+            return [unit for c in Customer.objects.all() for unit in report_units(c, active_only, start, end)]
         return [(source, None, None) for source in sources]
     for source in sources:
-        if source.customer_id == customer.pk or source.shared or AccountAssignment.objects.filter(account__source=source, customer=customer, end__isnull=True).exists():
+        if source.customer_id == customer.pk or source.shared or AccountAssignment.objects.filter(account__source=source, customer=customer).exists():
             accounts = source_account_filter(source, customer)
+            if start is not None and end is not None:
+                assignments=AccountAssignment.objects.filter(customer=customer,account__source=source,start__lt=end).filter(Q(end__isnull=True)|Q(end__gt=start))
+                accounts=sorted(set(assignments.values_list('account__account_id',flat=True)))
             if accounts is None or accounts:
                 units.append((source, customer, accounts))
     return units
@@ -157,7 +171,9 @@ def report_units(customer=None, active_only=True):
 
 def visible_customers(user):
     """Internal team users see every customer; readers see them read-only."""
-    return Customer.objects.all()
+    from .access import context, for_user
+    with context(for_user(user)):
+        return Customer.objects.all()
 
 
 def assert_customer_owns_source(customer, source):
@@ -169,3 +185,21 @@ def unassigned_accounts():
     """Accounts under shared payers (or seen in billing) with no current owner."""
     owned = AccountAssignment.objects.filter(account=OuterRef('pk'), end__isnull=True)
     return AwsAccount.objects.annotate(has_owner=Exists(owned)).filter(has_owner=False).select_related('source', 'source__customer').order_by('payer_account_id', 'account_id')
+
+
+def ownership_windows(source, customer, start, end):
+    """Exclusive-end intervals with a stable set of customer-owned accounts."""
+    if customer is None:
+        return [(start, end, None)]
+    assignments = list(AccountAssignment.objects.filter(customer=customer, account__source=source,
+                                                       start__lt=end).filter(Q(end__isnull=True) | Q(end__gt=start)))
+    boundaries = sorted({start, end} | {max(start,a.start) for a in assignments} | {min(end,a.end) for a in assignments if a.end})
+    result=[]
+    from .access import current_access
+    access=current_access.get()
+    permitted=access.accounts.get(customer.pk) if access else None
+    for left,right in zip(boundaries,boundaries[1:]):
+        ids=sorted({a.account.account_id for a in assignments if a.covers(left) and (not permitted or a.account.account_id in permitted)})
+        if ids:
+            result.append((left,right,ids))
+    return result

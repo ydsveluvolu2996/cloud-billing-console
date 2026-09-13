@@ -47,6 +47,8 @@ class Meter:
             except ClientError as exc:
                 code = exc.response.get('Error', {}).get('Code', '')
                 attempts += 1
+                if self.limit and self.requests >= self.limit:
+                    raise RequestBudgetExceeded() from None
                 if code in THROTTLE_CODES and attempts <= getattr(settings, 'AWS_THROTTLE_RETRIES', 3):
                     self.throttled += 1
                     time.sleep(min(2 ** attempts, 30) * random.uniform(0.5, 1.5) * getattr(settings, 'AWS_THROTTLE_SLEEP_FACTOR', 1.0))
@@ -62,12 +64,14 @@ class Session:
     """Assumed-role session for one billing source. Credentials never leave memory."""
 
     def __init__(self, source, credentials=None):
+        from .iam import assert_role_allowed
+        assert_role_allowed(source)
         source.full_clean(exclude=['customer'])
         self.source = source
         if credentials is None:
             sts = boto3.client('sts', region_name=settings.AWS_REGION, config=AWS_CONFIG)
             response = sts.assume_role(RoleArn=source.role_arn, RoleSessionName=f'billing-{source.pk.hex[:16]}',
-                                       ExternalId=str(source.external_id), DurationSeconds=3600)
+                                       ExternalId=str(source.external_id), DurationSeconds=900)
             credentials = response['Credentials']
             self.assumed_account = response.get('AssumedRoleUser', {}).get('Arn', '').split(':')[4] if response.get('AssumedRoleUser') else ''
         else:

@@ -1,0 +1,25 @@
+> Review the current [single-EC2 topology](single-ec2-operations.md), including its shared-host compromise risk and metadata firewall. Earlier separate-host evidence does not establish isolation for this topology.
+
+# Independent review package
+
+**Independent review has not occurred.** Implementation-agent tests and scans are engineering evidence, not an independent security assessment or compliance certification. External portal access remains disabled. All critical/high findings block release.
+
+Review the final draft PR SHA, [B01–B34 tracker](build-tracker.md), [security architecture](security-architecture.md), [manual IAM map](manual-iam-onboarding.md), migrations 0008–0020, generated database policies and [release/recovery runbooks](deployment-runbook.md). Evidence under `docs/evidence/` is synthetic or public image/pricing metadata. CI artifacts are keyed to their exact Git SHA. Obtain actual customer and infrastructure evidence separately in approved restricted storage.
+
+## Threat boundaries and review priorities
+
+- Web identity versus collector identity: exact provider AssumeRole allowlisting, IMDSv2/hop limit, container escape/host compromise assumptions, separate files/Secrets Manager resources, private TLS database access, absence of a generic collector RPC endpoint, server-selected approved connection configuration.
+- User and customer boundaries: anonymous/missing/revoked membership, operator versus viewer, explicit portfolio grants, account restrictions, shared payer custody, historical transfers, ownership exclusion constraint, nested relation reads and all writes/bulk operations. Check URLs, query parameters, export CSVs, saved reports, Alliance revision history and asynchronous cache results.
+- Database trust: execute tests as actual `billing_web`/`billing_collector` logins, never a table owner or BYPASSRLS role. Review every SECURITY DEFINER function, fixed search path, PUBLIC revocation, table/column grants and migration reapplication. Transaction-local user context is trusted application input; arbitrary code/SQL execution in web can impersonate it. RLS is defense against missing scope predicates, not a claim that a fully compromised web process cannot read customer data.
+- Authentication: individual local users, TOTP enrollment/replay/throttling/recovery, session fixation/expiry/revocation, OIDC signature/issuer/subject/audience/azp/nonce/PKCE/expiry. Exact pre-provisioned issuer+subject is required; no email-only account linking. Verify actual IdP configuration separately.
+- Worker integrity: stale configuration, late/replayed leases, ownership changes during network calls, overlapping sources publishing the same account/day, rollback on failed pages, approved metadata/tag capabilities, and cache authorization revalidation before AWS calls/publication.
+- Protected audit and privacy: secrets/request bodies excluded, business revision history preserved outside central security logs, runtime append-only permissions, shipped central copy, separately controlled deletion/retention. Verify actual log arrival and denied deletion.
+- Recovery/offboarding: repeat isolated restore with an approved production backup; evaluate RPO/RTO, external copies/legal holds, shared custody transfer and already-issued STS sessions. Test a failure mid-migration and a late worker after offboarding.
+
+## Evidence and exit criteria
+
+Run the full PostgreSQL suite, migration preservation, current dependency/secret/Bandit scans, all three image scans and the scale workload. The local Caddy scan identified 40 high/critical package findings; see [exact image findings](evidence/container-findings.json). These findings remain a release blocker until a supported patched image/build is scanned clean, or the authoritative upstream advisory is corrected and the current scanner confirms it. There is no ignore list or bypass in CI. The initial CI app image also has 54 high/critical Debian package findings, with no fixed version reported; see [app findings](evidence/app-container-findings.json). All final app/PostgreSQL/Caddy scan results and exact-commit CI conclusions are recorded in the PR/build report.
+
+In a separately authorized staging environment, verify real web denial of STS/collector credentials, correct/missing/wrong External ID responses, exact trust principal/identity, no public SSH/database, approved pilot access/HTTPS renewal, encrypted volumes/backups/region, actual runtime database checks and production-like recovery. Include two independently provisioned scoped users and shared-payer negative cases. Reviewers must record findings, severity, evidence, remediation retests, residual risk decisions and explicit approval tied to the release SHA. Customer consent, IAM changes and real reconciliations cannot be supplied by the implementation agent.
+
+No reviewer or customer invitation has been sent by this build. The service owner must assign an independent reviewer and release decision owner. Security/reconciliation/reviewer references are required by readiness before external invitations can be enabled.

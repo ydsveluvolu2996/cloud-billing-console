@@ -1,6 +1,14 @@
 # Alliance reporting tracker
 
-Open **Alliance reporting** in the sidebar. The selected reporting month defaults to the last calendar month. Data uses the existing six-hour AWS collection; this feature needs no new AWS permissions or infrastructure.
+Open **Monthly billing** in the sidebar. **Executive overview** is the default; **Full workbook** retains the original Excel-style monthly table, and **Alliance handoff log** retains the operational workflow. The selected reporting month defaults to the last calendar month. Data uses the existing six-hour AWS collection; this feature needs no new AWS permissions or infrastructure.
+
+## Executive overview
+
+Choose a billing month and customer, then compare the selected and previous month side by side. Customer rows expand into account costs, signed changes in amount and percent, review/data flags, and links to service-level explanations. Largest account movements are ranked by absolute amount; increases and decreases are both visible. Customer directory rows link directly to this filtered report.
+
+Only complete current/prior month pairs participate in executive variance calculations. Available month totals can include partial values, but the comparable-change card states how many accounts qualify. A customer-level change is withheld if any displayed account lacks a complete pair. Zero baselines display “New from zero”; missing data is never converted to zero or described as savings. The default month remains the last calendar month; an open/future selected month carries a notice.
+
+Executive account and customer CSV exports use these same completeness rules. Original workbook and handoff exports remain available in their tabs. All views retain customer/account authorization and effective ownership.
 
 ## Workbook mapping
 

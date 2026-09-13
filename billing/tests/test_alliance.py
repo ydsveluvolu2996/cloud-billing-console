@@ -42,7 +42,7 @@ class AllianceTests(TestCase):
         return alliance.summary(kwargs.get('month',self.month),kwargs.get('currency','USD'),Decimal('15'),kwargs.get('customer',self.customer))['rows'][0]
 
     def test_workbook_summary_calculations_and_columns(self):
-        response = self.client.get('/alliance/?month=2026-08')
+        response = self.client.get('/alliance/?month=2026-08&tab=summary')
         self.assertEqual(response.status_code,200)
         self.assertContains(response,'Customer Legal Entity')
         self.assertContains(response,'ACE Opportunity ID')
@@ -53,6 +53,45 @@ class AllianceTests(TestCase):
         self.assertIsNone(row['cells'][-1]['value'])
         self.assertEqual(row['cells'][-1]['state'],'Future')
         self.assertEqual(self.client.get(self.url).status_code,200)
+
+    def test_executive_default_and_complete_month_comparison(self):
+        response = self.client.get('/alliance/?month=2026-08')
+        self.assertContains(response, 'Executive overview')
+        self.assertContains(response, 'Customer billing comparison')
+        self.assertContains(response, 'Largest account changes')
+        self.assertNotContains(response, 'Scroll across for all 12 months')
+        executive = response.context['executive']
+        self.assertEqual(executive['comparison']['delta'], Decimal('15'))
+        self.assertEqual(executive['comparison']['percent'], Decimal('15'))
+        self.assertEqual(executive['review_count'], 1)
+        self.assertEqual(executive['groups'][0]['count'], 1)
+        self.assertEqual(executive['movements'][0]['account_id'], self.account.account_id)
+
+    def test_executive_partial_month_does_not_claim_savings(self):
+        CollectionPeriod.objects.filter(source=self.source, month=self.month).update(status='failed')
+        response = self.client.get('/alliance/?month=2026-08')
+        executive = response.context['executive']
+        self.assertEqual(response.context['spend'], Decimal('115'))
+        self.assertEqual(executive['data_count'], 1)
+        self.assertIsNone(executive['comparison']['delta'])
+        self.assertIsNone(executive['groups'][0]['comparison']['percent'])
+        self.assertEqual(executive['movements'], [])
+        self.assertContains(response, 'Complete months needed')
+        response = self.client.get('/alliance/?month=2026-08&export=executive_csv')
+        exported = list(csv.DictReader(io.StringIO(response.content.decode())))
+        self.assertEqual(exported[0]['Change'], '')
+        self.assertEqual(exported[0]['Review'], 'Check data')
+
+    def test_executive_export_and_zero_baseline(self):
+        Cost.objects.filter(source=self.source, day=self.prior).update(unblended=0)
+        response = self.client.get('/alliance/?month=2026-08')
+        self.assertContains(response, 'New from zero')
+        self.assertIsNone(response.context['executive']['comparison']['percent'])
+        response = self.client.get('/alliance/?month=2026-08&export=executive_customers_csv')
+        exported = list(csv.DictReader(io.StringIO(response.content.decode())))
+        self.assertEqual(Decimal(exported[0]['Change']), Decimal('115'))
+        self.assertEqual(exported[0]['Change percent'], '')
+        self.assertEqual(len(exported), 1)
 
     def test_decrease_and_zero_baseline(self):
         self.assertEqual(alliance.variance(Decimal(85),Decimal(100))['flag'],'REVIEW')

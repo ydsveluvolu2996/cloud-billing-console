@@ -1,0 +1,9 @@
+{% load money %}
+<p>{{ month|date:'F Y' }} · {{ currency }} · Unblended cost<br>Customer total: {{ month_total|precise_money }}</p>
+{% for node in tree %}
+<details class="portfolio-connection" open><summary>{{ node.source.account_id }} · {{ node.source.get_kind_display }} · {{ node.count }} accounts · {{ node.total|precise_money }} {{ currency }}</summary>
+<details class="connection-meta"><summary>Connection details</summary><p>{{ node.source.state }} · Inventory: {{ node.source.discovery_mode|default:'Not discovered' }}{% if node.source.discovery_mode == 'billing_only' %} (zero-spend accounts may be missing){% endif %}<br>Last attempt: {{ node.source.last_attempt|default:'None' }}<br>Last success: {{ node.source.last_success|default:'None' }}</p></details>
+{% include 'billing/includes/customer_account_table.html' with account_rows=node.members own_row=node.own %}
+</details>{% empty %}<p>No assigned connections. <a href="{% url 'customer_detail' customer.pk %}">Review account ownership</a>.</p>{% endfor %}
+{% if orphans %}<h3>Other assigned accounts</h3>{% include 'billing/includes/customer_account_table.html' with account_rows=orphans own_row=None %}{% endif %}
+<p><a href="{% url 'customer_detail' customer.pk %}">Open customer account details →</a></p>

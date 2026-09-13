@@ -50,10 +50,11 @@ class SourceForm(forms.ModelForm):
 
 
 class ConnectionForm(forms.ModelForm):
+    approved_capabilities = forms.MultipleChoiceField(required=False, choices=[(v,v.replace("_"," ").title()) for v in ("organizations","tags","cost_categories","forecasts","comparison_drivers","resources","budgets")], widget=forms.CheckboxSelectMultiple, help_text="Select only capabilities recorded in customer approval. Core billing remains available without optional access.")
     class Meta:
         model = BillingSource
-        fields = ['role_arn']
-        labels = {'role_arn': 'Role ARN from CloudFormation Outputs'}
+        fields = ['role_arn', 'approved_capabilities']
+        labels = {'role_arn': 'Customer-approved IAM role ARN'}
         widgets = {'role_arn': forms.TextInput(attrs={'placeholder': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})}
 
 
@@ -65,7 +66,7 @@ class BudgetForm(forms.ModelForm):
 
     class Meta:
         model = Budget
-        fields = ['name', 'scope', 'source', 'account_id', 'project', 'currency', 'metric', 'actual_threshold', 'forecast_threshold']
+        fields = ['owner', 'name', 'scope', 'source', 'account_id', 'project', 'currency', 'metric', 'actual_threshold', 'forecast_threshold']
 
     def __init__(self, *args, customer=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -145,6 +146,8 @@ class AllocationRuleForm(forms.ModelForm):
 
 
 class AssignmentForm(forms.Form):
+    alias=forms.CharField(max_length=200,required=False)
+    owner=forms.CharField(max_length=120,required=False)
     customer = forms.ModelChoiceField(queryset=Customer.objects.filter(active=True))
     start = forms.DateField(initial=lambda: date.today().replace(day=1), help_text='First day the customer owns this account’s spend.')
     environment = forms.ChoiceField(choices=[('', 'Unlabelled'), ('production', 'Production'), ('development', 'Development'), ('other', 'Other')], required=False)

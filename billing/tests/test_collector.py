@@ -29,7 +29,9 @@ class CollectionTests(TestCase):
         # every account in the organization becomes inventory assigned to the customer
         self.assertEqual(AccountAssignment.objects.filter(customer=self.customer, end__isnull=True).count(), 3)
 
-    def test_new_account_in_billing_data_auto_assigned_for_non_shared_payer(self):
+    def test_approved_new_account_in_billing_data_assigned_for_non_shared_payer(self):
+        from billing.models import CustomerApproval
+        CustomerApproval.objects.create(customer=self.customer,status='approved',expected_accounts=['444444444444'])
         pages = [ce_page([('444444444444', 'Amazon EC2', '7')], date(2026, 9, 1))]
         collect_source(self.source, months=[date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)
         self.assertEqual(Cost.objects.get(account_id='444444444444').customer, self.customer)
@@ -113,7 +115,9 @@ class CollectionTests(TestCase):
         client = ce_client([ce_page([('111111111111', 'Amazon EC2', '1')], date(2026, 7, 1)),
                             ClientError({'Error': {'Code': 'DataUnavailableException'}}, 'GetCostAndUsage')])
         from billing.models import Job
-        job = Job.objects.create(kind='collect', key='resume', source=self.source, status='leased')
+        Job.objects.create(kind='collect', key='resume', source=self.source)
+        from billing.jobs import lease
+        job = lease('resume-test')
         with self.assertRaises(ClientError):
             collect_source(self.source, months=[date(2026, 7, 1), date(2026, 8, 1), date(2026, 9, 1)], client=client, meter=Meter(limit=0), today=self.today, job=job)
         self.assertEqual(job.progress['completed'], ['2026-07-01'])
@@ -170,7 +174,7 @@ class CollectionTests(TestCase):
         client.describe_budgets.side_effect = [
             {'Budgets': [{'BudgetName': 'Monthly', 'BudgetType': 'COST', 'TimeUnit': 'MONTHLY', 'BudgetLimit': {'Amount': '1000', 'Unit': 'USD'},
                           'CostFilters': {'LinkedAccount': ['222222222222']}, 'CalculatedSpend': {'ActualSpend': {'Amount': '412.5', 'Unit': 'USD'}, 'ForecastedSpend': {'Amount': '900', 'Unit': 'USD'}},
-                          'TimePeriod': {'Start': datetime(2026, 9, 1, tzinfo=dt_tz.utc), 'End': datetime(2087, 6, 15, tzinfo=dt_tz.utc)}, 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc)}], 'NextToken': 'n'},
+                          'TimePeriod': {'Start': datetime(2026, 9, 1, tzinfo=dt_tz.utc), 'End': datetime(2087, 6, 15, tzinfo=dt_tz.utc)}, 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc), 'HealthStatus': {'Status': 'HEALTHY', 'LastUpdatedTime': datetime(2026, 9, 8, tzinfo=dt_tz.utc)}}], 'NextToken': 'n'},
             {'Budgets': [{'BudgetName': 'RI coverage', 'BudgetType': 'RI_COVERAGE', 'TimeUnit': 'MONTHLY', 'BudgetLimit': {'Amount': '80', 'Unit': 'PERCENTAGE'},
                           'CalculatedSpend': {'ActualSpend': {'Amount': '65', 'Unit': 'PERCENTAGE'}}}]}]
         count = import_budgets(self.source, session=FakeSession(budgets=client), meter=Meter(limit=0))
@@ -180,6 +184,7 @@ class CollectionTests(TestCase):
         self.assertEqual(monthly.limit_amount, Decimal('1000'))
         self.assertEqual(monthly.filters, {'LinkedAccount': ['222222222222']})
         self.assertEqual(monthly.actual_amount, Decimal('412.5'))
+        self.assertEqual(monthly.raw['HealthStatus']['LastUpdatedTime'], '2026-09-08T00:00:00Z')
         self.assertEqual(monthly.owning_account_id, '111111111111')
         coverage = ImportedBudget.objects.get(name='RI coverage')
         self.assertTrue(coverage.is_percentage)

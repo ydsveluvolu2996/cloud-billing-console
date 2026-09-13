@@ -1,0 +1,6 @@
+{% for configured in row.configured_budgets %}
+<div><a href="{% url 'budget_detail' configured.budget.pk %}">{{ configured.budget.name }}</a>
+{% for alarm in configured.alarms %}<small class="text-amber">Alarm: {{ alarm.kind|title }} ≥ {{ alarm.threshold|floatformat:0 }}%</small>{% empty %}<small>{% if configured.evaluation %}{{ configured.evaluation.status }}{% else %}Not evaluated{% endif %}</small>{% endfor %}
+<small>Actual ≥ {{ configured.budget.actual_threshold|floatformat:0 }}% · Forecast ≥ {{ configured.budget.forecast_threshold|floatformat:0 }}%</small>
+{% if configured.evaluation %}<small>{{ configured.evaluation.data_status }} · Checked {{ configured.evaluation.evaluated_at|date:'d M H:i' }} UTC</small>{% endif %}</div>
+{% empty %}{% if row.aws_budgets %}<a href="{% url 'imported_budgets' %}">AWS budget imported</a><small>AWS notification settings remain managed in AWS.</small>{% elif can_edit %}<a href="{% url 'budget_add' %}?customer={{ customer.pk }}&scope=account&account={{ row.account.account_id }}">Configure budget alarm</a>{% else %}<span class="muted">Not configured</span>{% endif %}{% endfor %}

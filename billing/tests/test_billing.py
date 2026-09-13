@@ -27,6 +27,32 @@ class BillingTests(TestCase):
     def collect(self, pages, months=None):
         return collect_source(self.source, months=months or [date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)
 
+    def test_cost_overview_flentas_account_budget_and_mtd(self):
+        self.customer.name = 'Flentas'
+        self.customer.save()
+        month = timezone.now().date().replace(day=1)
+        cost(self.source, month, 10, service='Amazon EC2')
+        cost(self.source, month, 5, service='Amazon S3')
+        budget = Budget.objects.create(customer=self.customer, scope=Budget.ACCOUNT,
+                                       account_id=self.source.account_id, name='Account monthly limit')
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('300'), effective_from=month)
+        params = {'customer': str(self.customer.pk), 'start': str(month), 'end': str(month), 'service': 'Amazon EC2'}
+        result = report(params)
+        self.assertTrue(result['show_account_budgets'])
+        row = result['account_rows'][0]
+        self.assertEqual(row['amount'], Decimal('10'))
+        self.assertEqual(row['mtd'], Decimal('15'))
+        self.assertEqual(row['configured_budgets'][0]['amount'], Decimal('300'))
+        self.client.force_login(self.admin)
+        response = self.client.get('/portfolio/', params)
+        self.assertContains(response, 'Budget usage')
+        self.assertContains(response, '300.00 USD')
+        self.assertContains(response, 'MTD ·')
+        self.customer.name = 'External customer'
+        self.customer.save()
+        self.assertFalse(report(params)['show_account_budgets'])
+        self.assertNotContains(self.client.get('/portfolio/', params), 'Budget usage')
+
     def test_sync_replaces_revisions_without_duplicates(self):
         for amount in ('10.10', '11.25'):
             run = self.collect([ce_page([('123456789012', 'Amazon EC2', amount)], date(2026, 9, 1))])
@@ -146,22 +172,19 @@ class BillingTests(TestCase):
         self.assertEqual(client.get(f'/customers/{self.customer.pk}/').status_code, 200)
         self.assertEqual(client.get('/portfolio/?customer=not-a-uuid').status_code, 400)
 
-    def test_template_and_quick_create_link_use_connection_identity(self):
-        with override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector', ARTIFACT_BUCKET='bucket', AWS_REGION='ap-south-1'):
-            template = yaml.safe_load(source_template(self.source))
-            self.assertEqual(template['Parameters']['ExternalId']['Default'], self.source.external_id)
-            self.assertEqual(template['Parameters']['ExpectedAccountId']['Default'], '123456789012')
-            self.assertEqual(template['Parameters']['EnableOrganizationsDiscovery']['Default'], 'true')
-            statements = template['Resources']['CostReadRole']['Properties']['Policies'][0]['PolicyDocument']['Statement']
-            self.assertEqual(len(statements[0]['Action']), 6)
-            self.assertIn('organizations:ListAccounts', statements[1]['Fn::If'][1]['Action'])
-            self.assertEqual(statements[2]['Fn::If'][1]['Action'], ['budgets:ViewBudget'])
-            with patch('billing.onboarding.boto3.client') as s3:
-                s3.return_value.generate_presigned_url.return_value = 'https://s3.ap-south-1.amazonaws.com/bucket/templates/customer-role.yaml?sig'
-                url = quick_create_url(self.source)
-            self.assertIn('param_ExternalId=' + self.source.external_id, url)
-            self.assertIn('param_EnableOrganizationsDiscovery=true', url)
-            self.assertTrue(url.startswith('https://ap-south-1.console.aws.amazon.com/cloudformation/'))
+    def test_manual_policy_bundle_uses_connection_identity(self):
+        with override_settings(COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector'):
+            import json
+            bundle = json.loads(source_template(self.source))
+            self.assertEqual(bundle['external_id'], self.source.external_id)
+            trust = bundle['trust_policy']['Statement'][0]
+            self.assertEqual(trust['Principal'], {'AWS':'arn:aws:iam::111111111111:role/Collector'})
+            self.assertEqual(trust['Condition']['StringEquals']['sts:ExternalId'], self.source.external_id)
+            self.assertEqual(bundle['minimum_permission_policy']['Statement'][1]['Resource'], self.source.role_arn)
+            self.assertIn('organizations',bundle['optional_permission_policies'])
+            with patch('billing.onboarding.boto3.client') as client:
+                self.assertEqual(quick_create_url(self.source), f'/sources/{self.source.pk}/setup/')
+                client.assert_not_called()
 
     def test_verification_checks_identity_and_capabilities(self):
         sts = Mock(); sts.get_caller_identity.return_value = {'Account': '123456789012'}

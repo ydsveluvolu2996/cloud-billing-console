@@ -1,0 +1,9 @@
+{% load budget_usage %}{% account_usage row currency as usage %}
+{% if usage.primary %}
+<div class="compact-budget">
+{% include 'billing/includes/budget_usage_bar.html' with item=usage.primary %}
+<details class="compact-budget-details"><summary>{% if usage.count > 1 %}{{ usage.count }} budgets · highest usage{% else %}Details{% endif %}</summary>
+<div class="compact-budget-list">{% for item in usage.items %}<div><a href="{{ item.url }}">{{ item.name }}</a>{% if item.filtered %}<small>Configured AWS / dashboard filters apply</small>{% endif %}{% include 'billing/includes/budget_usage_bar.html' %}</div>{% endfor %}</div>
+</details>
+</div>
+{% else %}<span class="compact-budget-empty">No account budget</span>{% endif %}

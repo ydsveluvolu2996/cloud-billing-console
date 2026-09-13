@@ -118,8 +118,9 @@ class Command(BaseCommand):
             source = BillingSource.objects.create(customer=customer, kind='payer', account_id=payer_id, role_arn=f'arn:aws:iam::{payer_id}:role/BillingConsole/CostReadOnly',
                                                   verified_at=timezone.now(), discovered_at=timezone.now(), initial_import_done=True, last_success=timezone.now(),
                                                   discovery_mode='organizations', onboarding_step=6, capabilities={'organizations': True, 'cost_explorer': True})
+            customer_account_count = [2,15,101][i%3] if self.__module__.endswith('security_load') else per_customer
             accounts = [payer_id]
-            for _ in range(per_customer - 1):
+            for _ in range(customer_account_count - 1):
                 accounts.append(f'{account_counter:012d}')
                 account_counter += 1
             aws_accounts = [AwsAccount(account_id=a, name=f'acct-{a[-4:]}', state='ACTIVE', payer_account_id=payer_id, source=source, discovery='organizations') for a in accounts]
@@ -163,7 +164,7 @@ class Command(BaseCommand):
         tracemalloc.start()
         for source in sources:
             accounts = list(AwsAccount.objects.filter(source=source).values_list('account_id', flat=True))
-            fake = FakeCostExplorer(accounts, SERVICES[:options['services']], page_size=1000, seed=hash(source.account_id) % 1000)
+            fake = FakeCostExplorer(accounts, SERVICES[:options['services']], page_size=1000, seed=int(source.account_id) % 1000)
             meter = Meter(limit=0)
             t0 = time.monotonic()
             run = collect_source(source, months=months, client=fake, meter=meter, today=today)
@@ -183,7 +184,7 @@ class Command(BaseCommand):
                 'estimated_ce_cost_usd_per_cycle_at_0_01': round(cycle_requests * per_request_usd, 2),
                 'estimated_ce_cost_usd_per_day_4_cycles': round(cycle_requests * per_request_usd * 4, 2),
                 'projected_full_cycle_seconds_single_worker': round(total / max(len(sources), 1) * BillingSource.objects.filter(customer__name__startswith='Synthetic ').count(), 1),
-                'note': 'Fake client has zero network latency; live AWS adds roughly 0.5-2 s per request and throttles at a few requests per second per account.'}
+                'note': 'Fake client has zero network latency. Live AWS latency, quotas and throttling need separate authorized measurement.'}
 
     def evaluate_budgets(self):
         started = time.monotonic()
@@ -200,7 +201,7 @@ class Command(BaseCommand):
         paths = ['/', '/portfolio/', '/overview/', '/customers/', '/budgets/', '/onboarding/',
                  f'/portfolio/?start={start}&end={today}&granularity=monthly', '/?date_range=last_3_months&group_by=account']
         paths += [f'/customers/{pk}/' for pk in customers[:10]] + [f'/customers/{pk}/?tab=budgets' for pk in customers[:5]] + [f'/?customer={pk}' for pk in customers[:10]]
-        per_path = {}
+        per_path = {};http_failures=[]
         with override_settings(SECURE_SSL_REDIRECT=False, ALLOWED_HOSTS=['testserver'], DEBUG=True, STORAGES={'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'}}):
             client = Client()
             client.force_login(user)
@@ -213,6 +214,7 @@ class Command(BaseCommand):
                     status = response.status_code
                 except Exception as exc:  # record the failure instead of aborting the whole run
                     status = f'error: {type(exc).__name__}'
+                if status!=200:http_failures.append({'path':path,'status':status})
                 elapsed = time.monotonic() - t0
                 queries = list(connection.queries_log)
                 for other in connections.all():
@@ -240,9 +242,10 @@ class Command(BaseCommand):
                 for _ in range(per_reader):
                     t0 = time.monotonic()
                     try:
-                        c.get(rng.choice(mix))
-                    except Exception:
-                        pass
+                        response=c.get(rng.choice(mix))
+                        if response.status_code!=200:http_failures.append({'reader':index,'status':response.status_code})
+                    except Exception as exc:
+                        http_failures.append({'reader':index,'error':type(exc).__name__})
                     local.append(time.monotonic() - t0)
                 close_old_connections()
                 with lock:
@@ -257,7 +260,7 @@ class Command(BaseCommand):
             wall = time.monotonic() - t0
             current, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-        return {'per_path': summary, 'concurrent': {'readers': options['readers'], 'requests': len(latencies), 'wall_seconds': round(wall, 1),
+        return {'per_path': summary, 'failures':http_failures, 'concurrent': {'readers': options['readers'], 'requests': len(latencies), 'wall_seconds': round(wall, 1),
                                                      'throughput_rps': round(len(latencies) / wall, 1), 'p50_ms': round(percentile(latencies, 50) * 1000),
                                                      'p95_ms': round(percentile(latencies, 95) * 1000), 'max_ms': round(max(latencies) * 1000),
                                                      'python_peak_memory_mb': round(peak / 1024 / 1024, 1)},

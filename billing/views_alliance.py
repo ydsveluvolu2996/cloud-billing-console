@@ -1,3 +1,4 @@
+from django.core.paginator import Paginator
 import csv
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -50,9 +51,33 @@ def overview(request):
         rows = [r for r in rows if r['status'] == 'Closed']
     elif status == 'missing':
         rows = [r for r in rows if r['missing_ids']]
-    tab = 'handoff' if request.GET.get('tab') == 'handoff' else 'summary'
+    tab = request.GET.get('tab', 'executive')
+    if tab not in ('executive', 'summary', 'handoff'):
+        tab = 'executive'
+    executive = alliance.executive_summary(rows, threshold)
+    groups=alliance.customer_rollups(rows,threshold)
+    if request.GET.get('export') == 'executive_customers_csv':
+        audit(request, 'Executive customer totals exported', customer=customer, month=str(month), currency=currency)
+        return csv_response('monthly-customer-totals-'+month.strftime('%Y-%m'),
+            ['Customer', 'Accounts', 'Currency', 'Billing month', 'Billing month cost', 'Previous month',
+             'Previous month cost', 'Change', 'Change percent', 'Accounts to review', 'Accounts needing data checks'],
+            [[g['customer'].name, g['count'], currency, month, g['current'], data['prior_month'], g['prior'],
+              g['comparison']['delta'], g['comparison']['percent'], g['review_count'], g['data_count']]
+             for g in executive['groups']])
+    if request.GET.get('export') == 'executive_csv':
+        audit(request, 'Executive billing report exported', customer=customer, month=str(month), currency=currency)
+        return csv_response('monthly-billing-'+month.strftime('%Y-%m'),
+            ['Customer', 'Account', 'AWS account ID', 'Currency', 'Billing month', 'Billing month cost',
+             'Previous month', 'Previous month cost', 'Change', 'Change percent', 'Review', 'Billing data', 'Previous data'],
+            [[r['customer'].name, r['name'], r['account_id'], currency, month, r['current']['value'],
+              data['prior_month'], r['prior']['value'], r['comparison']['delta'], r['comparison']['percent'],
+              r['signal'], r['current']['state'], r['prior']['state']] for r in executive['accounts']])
+    if request.GET.get('export') == 'customer_csv':
+        return csv_response('alliance-customers-'+month.strftime('%Y-%m'),
+            ['Customer','Accounts','Currency',*[m.strftime('%Y-%m') for m in data['months']],'FY Total','Average per available month','Reporting month','Prior month','MoM variance','MoM percent','Status counts'],
+            [[g['customer'].name,g['count'],currency,*[c['value'] for c in g['cells']],g['fy_total'],g['average'],g['current'],g['prior'],g['delta'],g['percent'],'; '.join(f'{k}: {v}' for k,v in g['statuses'].items())] for g in groups])
     if request.GET.get('export') == 'csv':
-        if tab == 'summary':
+        if tab != 'handoff':
             headers = ['S.No','Account','Customer Legal Entity (as in Partner Central)','AWS Account ID','ACE Opportunity ID',
                        *[m.strftime('%b-%y') for m in data['months']], 'FY Total','Avg / Month','Reporting Mth','Prior Mth','MoM Var','MoM Var %','Flag',
                        'Customer','Currency','Reporting Month','Prior Month','Reporting data state','Prior data state','Months with data','Variance threshold %',
@@ -74,7 +99,7 @@ def overview(request):
         params['customer'] = str(customer.pk)
     params.update({'q':search,'status':status})
     query = urlencode(params)
-    context = {**data,'page':paginate(request,rows),'row_count':len(rows),'month':month,'currency':currency,'threshold':threshold,
+    context = {**data,'executive':executive,'is_open_month':month >= timezone.now().date().replace(day=1),'customer_groups':groups,'page':paginate(request,rows),'row_count':len(rows),'month':month,'currency':currency,'threshold':threshold,
                'filter_customer':customer,'customers':Customer.objects.all(),'currencies':sorted(set(Cost.objects.values_list('currency',flat=True))|{'USD',currency}),
                'q':search,'filter_status':status,'tab':tab,'query':query,'detail_query':urlencode({k:params[k] for k in ('month','currency','threshold')}),
                'query_string':query+'&tab='+tab,'active_page':'alliance','can_edit':can_edit(request.user),
@@ -153,11 +178,13 @@ def detail(request, customer_id, account_id):
                 saved.save()
                 for service,name in form.service_fields:
                     AllianceServiceNote.objects.update_or_create(record=saved,service=service,defaults={'commentary':form.cleaned_data[name]})
+                from .models import AllianceRevision
+                AllianceRevision.objects.create(record=saved,revision=saved.revision,actor=request.user.username,snapshot=saved.snapshot,fields={name:str(form.cleaned_data.get(name,'')) for name in form.Meta.fields},service_notes={service:form.cleaned_data[name] for service,name in form.service_fields})
                 audit(request,'Alliance figures recorded' if action=='capture' else 'Alliance tracking updated',customer=customer,
                       account=account_id,month=str(month),currency=currency,revision=saved.revision,apn_marked=saved.apn_marked,
                       snapshot=saved.snapshot,fields={name:str(form.cleaned_data.get(name,'')) for name in form.Meta.fields},
                       service_notes={service:form.cleaned_data[name] for service,name in form.service_fields})
-                messages.success(request,'AWS figures recorded. Handoff history is preserved in the audit log.' if action=='capture' else 'Alliance tracking saved.')
+                messages.success(request,'AWS figures recorded. Handoff history is preserved in the customer revision history.' if action=='capture' else 'Alliance tracking saved.')
                 return redirect(reverse('alliance_detail',args=[customer.pk,account_id])+'?'+urlencode({'month':month.strftime('%Y-%m'),'currency':currency,'threshold':str(threshold)}))
     notes = dict(record.service_notes.values_list('service','commentary')) if record.pk else {}
     for row,(_,name) in zip(data['services'],form.service_fields):
@@ -174,6 +201,7 @@ def detail(request, customer_id, account_id):
     return render(request,'billing/alliance_detail.html',{**data,'record':record,'form':form,'metadata_fields':[form[name] for name in form.Meta.fields],
         'customer':customer,'account':account,'month':month,'prior_month':month-alliance.relativedelta(months=1),'currency':currency,'threshold':threshold,
         'query':urlencode({'month':month.strftime('%Y-%m'),'currency':currency,'threshold':str(threshold)}),
+        'history_page':Paginator(record.revisions.all() if record.pk else [],20).get_page(request.GET.get('history_page')),
         'recorded_spend':Decimal(record.snapshot['current']) if record.snapshot.get('current') is not None else None,
         'recorded_percent':Decimal(record.snapshot['percent']) if record.snapshot.get('percent') is not None else None,
         'captured_at':parse_datetime(record.snapshot['captured_at']) if record.snapshot.get('captured_at') else None,

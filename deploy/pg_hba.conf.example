@@ -1,0 +1,7 @@
+# Substitute approved private addresses; never add a public network.
+local all billing_admin scram-sha-256
+hostssl billing billing_web WEB_DOCKER_NETWORK scram-sha-256
+hostssl billing billing_collector COLLECTOR_PRIVATE_IP/32 scram-sha-256
+hostssl billing billing_admin ADMIN_PRIVATE_IP/32 scram-sha-256
+host all all 0.0.0.0/0 reject
+host all all ::0/0 reject

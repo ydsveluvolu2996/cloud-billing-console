@@ -217,3 +217,61 @@ def snapshot(detail, threshold):
                          for item in result['services'] if any(item[k] is not None and Decimal(item[k]) != 0 for k in ('current','prior'))]
     result['fingerprint'] = sha256(json.dumps(basis,sort_keys=True).encode()).hexdigest()
     return result
+
+
+def customer_rollups(rows, threshold=Decimal('15')):
+    """Sum monetary cells only; recompute ratios and count non-additive statuses."""
+    groups={}
+    for row in rows:
+        groups.setdefault(row['customer'].pk,{'customer':row['customer'],'rows':[]})['rows'].append(row)
+    result=[]
+    for group in groups.values():
+        accounts=group['rows'];cells=[]
+        for index in range(len(accounts[0]['cells'])):
+            parts=[r['cells'][index] for r in accounts]
+            value=available_sum([c['value'] for c in parts])
+            cells.append({'value':value,'complete':all(c['state'] in ('Complete','Not owned') for c in parts),'estimated':any(c['estimated'] for c in parts)})
+        current=available_sum([r['current']['value'] for r in accounts]);prior=available_sum([r['prior']['value'] for r in accounts])
+        statuses={}
+        for row in accounts:statuses[row['status']]=statuses.get(row['status'],0)+1
+        total=available_sum([c['value'] for c in cells]);loaded=sum(c['value'] is not None for c in cells)
+        result.append({**group,'cells':cells,'count':len(accounts),'current':current,'prior':prior,'fy_total':total,
+                       'average':total/loaded if loaded else None,'statuses':statuses,**variance(current,prior,threshold)})
+    return result
+
+
+def executive_summary(rows, threshold=Decimal('15')):
+    """Compare only complete month pairs; partial totals never imply savings."""
+    accounts = []
+    for row in rows:
+        complete = all(row[p]['state'] == 'Complete' and row[p]['value'] is not None for p in ('current', 'prior'))
+        change = variance(row['current']['value'], row['prior']['value'], threshold) if complete else variance(None, None, threshold)
+        signal = ('New spend' if change.get('zero_baseline') else 'Review change' if change['flag'] == 'REVIEW' else 'Within threshold') if complete else 'Check data'
+        accounts.append({**row, 'comparison': change, 'comparable': complete, 'signal': signal})
+    accounts.sort(key=lambda r: (not (r['comparable'] and r['comparison']['flag'] == 'REVIEW'),
+                                 -abs(r['comparison']['delta'] or 0), r['customer'].name.lower(), r['account_id']))
+    groups = {}
+    for row in accounts:
+        group = groups.setdefault(row['customer'].pk, {'customer': row['customer'], 'rows': []})
+        group['rows'].append(row)
+    customer_rows = []
+    for group in groups.values():
+        items = group['rows']
+        current = available_sum([r['current']['value'] for r in items])
+        prior = available_sum([r['prior']['value'] for r in items])
+        complete = all(r['comparable'] for r in items)
+        customer_rows.append({**group, 'count': len(items), 'current': current, 'prior': prior,
+                              'comparable': complete, 'comparison': variance(current, prior, threshold) if complete else variance(None, None),
+                              'review_count': sum(r['comparison']['flag'] == 'REVIEW' for r in items),
+                              'data_count': sum(not r['comparable'] for r in items)})
+    customer_rows.sort(key=lambda g: (-g['review_count'], -(g['current'] or 0), g['customer'].name.lower()))
+    comparable = [r for r in accounts if r['comparable']]
+    current = available_sum([r['current']['value'] for r in comparable])
+    prior = available_sum([r['prior']['value'] for r in comparable])
+    return {'groups': customer_rows, 'accounts': accounts, 'customer_count': len(customer_rows),
+            'comparable_count': len(comparable), 'comparison': variance(current, prior, threshold),
+            'prior_total': available_sum([r['prior']['value'] for r in accounts]),
+            'data_count': len(accounts) - len(comparable),
+            'review_count': sum(r['comparison']['flag'] == 'REVIEW' for r in accounts),
+            'movements': sorted([r for r in comparable if r['comparison']['delta']],
+                                key=lambda r: -abs(r['comparison']['delta']))[:5]}

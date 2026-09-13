@@ -99,7 +99,10 @@ def aws_forecast(budget, month, today):
             request['Filter'] = parts[0]
         elif parts:
             request['Filter'] = {'And': parts}
-        query = get_query(source, 'get_cost_forecast', request, customer=budget.customer)
+        if settings.REQUIRE_CONNECTION_APPROVAL and not source.capabilities.get('forecasts'):
+            return None
+        from .scope import source_account_filter
+        query = get_query(source, 'get_cost_forecast', request, customer=budget.customer, account_filter=source_account_filter(source,budget.customer))
         if not query.data or not query.data.get('ForecastResultsByTime'):
             return None
         total += sum(Decimal(p['MeanValue']) for p in query.data['ForecastResultsByTime'])

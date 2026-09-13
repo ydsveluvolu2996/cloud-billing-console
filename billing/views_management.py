@@ -27,7 +27,8 @@ STATES = ['Awaiting customer setup', 'Connection verified', 'Account discovery c
 
 def month_param(request):
     try:
-        return date.fromisoformat(request.GET.get('month', '')).replace(day=1)
+        raw=request.GET.get('month','')
+        return date.fromisoformat(raw+'-01' if len(raw)==7 else raw).replace(day=1)
     except ValueError:
         return timezone.now().date().replace(day=1)
 
@@ -84,7 +85,7 @@ def customers(request):
     elif show == 'offboarded':
         items = items.filter(active=False)
     if query:
-        items = items.filter(Q(name__icontains=query) | Q(reference__icontains=query) | Q(owner__icontains=query) | Q(sources__account_id__icontains=query) | Q(assignments__account__account_id__icontains=query)).distinct()
+        items = items.filter(Q(name__icontains=query) | Q(reference__icontains=query) | Q(owner__icontains=query) | Q(sources__account_id__icontains=query) | Q(assignments__account__account_id__icontains=query) | Q(assignments__metadata__alias__icontains=query)).distinct()
     mtd = {r['customer_id']: r['v'] for r in Cost.objects.filter(customer__in=items, currency='USD', day__gte=month, day__lte=today).values('customer_id').annotate(v=Sum('unblended'))}
     accounts = {r['customer_id']: r['n'] for r in AccountAssignment.objects.filter(customer__in=items, end__isnull=True).values('customer_id').annotate(n=Count('account_id', distinct=True))}
     evaluations = {e.budget.customer_id: e for e in BudgetEvaluation.objects.filter(month=month, budget__scope=Budget.CUSTOMER, budget__active=True, budget__customer__in=items).select_related('budget')}
@@ -100,9 +101,12 @@ def customers(request):
     keyfn = {'name': lambda r: r['customer'].name.lower(), 'mtd': lambda r: (r['mtd'] is None, r['mtd'] or 0), 'accounts': lambda r: r['accounts'],
              'status': lambda r: r['status'], 'last_success': lambda r: (r['last_success'] is None, r['last_success'] or timezone.now())}[sort]
     rows.sort(key=keyfn, reverse=direction == 'desc')
-    page = paginate(request, rows, 25)
+    internal_rows = [r for r in rows if r['customer'].name.strip().casefold() == 'flentas']
+    external_rows = [r for r in rows if r['customer'].name.strip().casefold() != 'flentas']
+    page = paginate(request, external_rows, 25)
     all_statuses = [r['status'] for r in rows]
     return render(request, 'billing/customers.html', {
+        'internal_rows': internal_rows, 'customer_count': len(rows),
         'page': page, 'q': query, 'status_filter': status_filter, 'show': show, 'sort': sort, 'dir': direction, 'active_page': 'customers', 'month': month,
         'connected_count': all_statuses.count('Connected'), 'attention_count': sum(s in ('Stale data', 'Permission problem', 'Partial data', 'Awaiting setup', 'Awaiting customer setup') for s in all_statuses),
         'paused_count': all_statuses.count('Paused'), 'states': ['Awaiting setup'] + STATES,
@@ -168,11 +172,31 @@ def account_tree(customer, month, today, currency):
     for a in assignments:
         entry = accounts.setdefault(a.account.account_id, {'account': a.account, 'current': False, 'history': []})
         entry['history'].append(a)
+        if len(entry['history'])==1:
+            account_metadata(entry['account'],a)
         if a.end is None:
             entry['current'] = True
     sources = {s.pk: s for s in customer.sources.all()}
-    for s in BillingSource.objects.filter(pk__in=[e['account'].source_id for e in accounts.values() if e['account'].source_id]).select_related('customer'):
+    for s in BillingSource.objects.filter(pk__in=[e['account'].source_id for e in accounts.values() if e['account'].source_id]):
         sources.setdefault(s.pk, s)
+    show_account_budgets = customer.name.strip().casefold() == 'flentas'
+    account_budgets = {}
+    if show_account_budgets:
+        budget_list = list(customer.budgets.filter(active=True, scope=Budget.ACCOUNT, currency=currency,
+                                                  metric='unblended').prefetch_related('amounts'))
+        evaluations = budgeting.latest_evaluations(budget_list, month)
+        alarms = {}
+        for alert in Alert.objects.filter(budget__in=budget_list, month=month, acknowledged_at__isnull=True):
+            alarms.setdefault(alert.budget_id, []).append(alert)
+        for budget in budget_list:
+            account_budgets.setdefault(budget.account_id, []).append({
+                'budget': budget, 'amount': budget.amount_for(month),
+                'evaluation': evaluations.get(budget.pk), 'alarms': alarms.get(budget.pk, [])})
+    from .aws_budget_display import account_snapshots
+    imported = account_snapshots([customer], month, currency) if show_account_budgets else {}
+    for account_id, entry in accounts.items():
+        entry['aws_budgets'] = imported.get((customer.pk, account_id), [])
+        entry['configured_budgets'] = account_budgets.get(account_id, [])
     tree = []
     used = set()
     for source in sorted(sources.values(), key=lambda s: s.account_id):
@@ -195,7 +219,17 @@ def account_tree(customer, month, today, currency):
         tree.append({'source': source, 'own': own, 'members': members, 'count': len(members) + (1 if own else 0), 'total': total if (own and own['spend']) or any(r['spend'] for r in members) else None,
                      'periods': CollectionPeriod.objects.filter(source=source).order_by('-month')[:3]})
     orphans = [{**entry, 'spend': spend.get(account_id)} for account_id, entry in sorted(accounts.items()) if account_id not in used]
-    return {'tree': tree, 'orphans': orphans, 'month_end': month_end, 'month_total': sum((r['v'] for r in spend.values()), Decimal(0)) if spend else None}
+    return {'show_account_budgets': show_account_budgets, 'is_current_month': month == today.replace(day=1), 'tree': tree, 'orphans': orphans, 'month_end': month_end, 'month_total': sum((r['v'] for r in spend.values()), Decimal(0)) if spend else None}
+
+
+@never_cache
+@login_required
+def customer_tree(request, pk):
+    customer=get_object_or_404(Customer,pk=pk)
+    month=month_param(request)
+    currency=request.GET.get('currency','USD')
+    return render(request,'billing/includes/customer_tree.html',dict(
+        customer=customer,month=month,currency=currency,can_edit=scoping.can_edit(request.user),**account_tree(customer,month,timezone.now().date(),currency)))
 
 
 @require_POST
@@ -203,7 +237,10 @@ def account_tree(customer, month, today, currency):
 def customer_offboard(request, pk):
     customer = get_object_or_404(Customer, pk=pk)
     if customer.active:
-        onboarding.offboard_customer(customer, actor=request.user.username)
+        try:
+            onboarding.offboard_customer(customer, actor=request.user.username)
+        except ValueError as exc:
+            return HttpResponseBadRequest(str(exc))
         messages.success(request, 'Customer offboarded. Collection stopped; historical records are retained.')
     else:
         onboarding.reactivate_customer(customer, actor=request.user.username)
@@ -249,7 +286,8 @@ def source_detail(request, pk):
     if request.method == 'POST' and request.POST.get('action') == 'connection':
         form = ConnectionForm(request.POST, instance=source)
         if form.is_valid():
-            changed = form.cleaned_data['role_arn'] != BillingSource.objects.get(pk=pk).role_arn
+            previous = BillingSource.objects.get(pk=pk)
+            changed = (form.cleaned_data['role_arn'] != previous.role_arn or form.cleaned_data.get('approved_capabilities',[]) != previous.approved_capabilities)
             source = form.save(commit=False)
             if changed:
                 source.connection_version += 1
@@ -257,6 +295,8 @@ def source_detail(request, pk):
             source.onboarding_step = max(source.onboarding_step, 4)
             source.last_error = ''
             source.save()
+            from .iam import request_allowlist
+            request_allowlist(source, request.user.username)
             scheduler.request_verification(source, actor=request.user.username)
             audit(request, 'Role ARN saved; verification queued', customer=source.customer, source=source)
             messages.success(request, 'Role ARN saved. Verification runs in the background within a minute; reload to see the result.')
@@ -278,23 +318,26 @@ def source_template(request, pk):
         body = onboarding.source_template(source)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
-    response = HttpResponse(body, content_type='application/x-yaml')
-    response['Content-Disposition'] = f'attachment; filename="customer-billing-role-{source.account_id}.yaml"'
+    response = HttpResponse(body, content_type='application/json')
+    response['Content-Disposition'] = f'attachment; filename="customer-billing-role-{source.account_id}.json"'
     return response
 
 
 @staff_required
 def source_setup(request, pk):
     source = get_object_or_404(BillingSource.objects.select_related('customer'), pk=pk)
+    import json
+    from .iam import policy_bundle
     try:
-        url = onboarding.quick_create_url(source)
-    except Exception:
-        url = ''
-    if not url:
-        messages.error(request, 'Setup link is unavailable. Download the template and upload it in AWS CloudFormation.')
-        return redirect('source_detail', pk=pk)
-    BillingSource.objects.filter(pk=pk, onboarding_step__lt=3).update(onboarding_step=3)
-    return render(request, 'billing/setup_link.html', {'source': source, 'customer': source.customer, 'setup_url': url, 'active_page': 'customers'})
+        bundle = policy_bundle(source)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+    return render(request, 'billing/setup_link.html', {
+        'source': source, 'customer': source.customer, 'active_page': 'customers',
+        'trust_json': json.dumps(bundle['trust_policy'], indent=2),
+        'minimum_json': json.dumps(bundle['minimum_permission_policy'], indent=2),
+        'optional_json': {k: json.dumps(v, indent=2) for k, v in bundle['optional_permission_policies'].items()},
+    })
 
 
 @require_POST
@@ -320,7 +363,7 @@ def source_action(request, pk, action):
         messages.success(request, 'Refresh queued.')
     elif action == 'rotate':
         onboarding.rotate_external_id(source, actor=actor)
-        messages.success(request, 'New external ID issued. Share the new setup link so the customer updates their stack, then verify again.')
+        messages.success(request, 'New external ID issued. Share the new trust JSON so the customer updates their role, then verify again.')
     elif action == 'pause':
         onboarding.set_paused(source, True, actor=actor)
         messages.success(request, 'Collection paused for this connection.')
@@ -348,7 +391,7 @@ def source_action(request, pk, action):
 @never_cache
 @login_required
 def account_detail(request, account_id):
-    account = AwsAccount.objects.filter(account_id=account_id).select_related('source', 'source__customer').first()
+    account = AwsAccount.objects.filter(account_id=account_id).select_related('source').first()
     try:
         scope = scoping.resolve({'customer': request.GET.get('customer', ''), 'account': account_id})
     except ValueError as exc:
@@ -368,12 +411,14 @@ def account_detail(request, account_id):
     else:
         series = list(in_month.values('day').annotate(u=Sum('unblended'), a=Sum('amortized')).order_by('day'))
     assignments = AccountAssignment.objects.filter(account__account_id=account_id).select_related('customer').order_by('-start')
+    assignments=list(assignments)
+    if account and assignments:account_metadata(account,assignments[0])
     budgets = Budget.objects.filter(scope=Budget.ACCOUNT, account_id=account_id, active=True)
     return render(request, 'billing/account_detail.html', {
         'account': account, 'account_id': account_id, 'scope': scope, 'today': today, 'month': month, 'month_end': month_end, 'currency': currency,
         'granularity': granularity, 'services': services, 'series': series, 'assignments': assignments, 'budgets': budgets,
         'total': in_month.aggregate(v=Sum('unblended'))['v'], 'estimated': in_month.filter(estimated=True).exists(),
-        'form': AssignmentForm(initial={'customer': scope.customer.pk if scope.customer else None, 'environment': account.environment if account else ''}),
+        'form': AssignmentForm(initial={'customer': scope.customer.pk if scope.customer else None, 'environment': account.environment if account else '', 'alias':getattr(account,'alias',''), 'owner':getattr(account,'owner','')}),
         'active_page': 'customers', 'can_edit': scoping.can_edit(request.user), 'customer': scope.customer,
         'currencies': sorted(set(Cost.objects.filter(account_id=account_id).values_list('currency', flat=True).distinct()) | {currency})})
 
@@ -387,30 +432,55 @@ def account_assign(request, account_id):
         messages.error(request, 'Choose a customer and a valid start date.')
         return redirect('account_detail', account_id=account_id)
     customer = form.cleaned_data['customer']
+    from django.conf import settings
+    from .models import CustomerApproval
+    metadata={key:form.cleaned_data.get(key,'') for key in ('alias','owner','environment')}
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        approval=CustomerApproval.objects.filter(customer=customer,status='approved').first()
+        if any(value and (not approval or key not in approval.metadata) for key,value in metadata.items()):
+            return HttpResponseBadRequest('Record approval for the selected optional account metadata before saving it.')
     try:
-        ensure_assignment(account, customer, start=form.cleaned_data['start'], note=form.cleaned_data['note'], actor=request.user.username)
+        assignment=ensure_assignment(account, customer, start=form.cleaned_data['start'], note=form.cleaned_data['note'], actor=request.user.username)
     except (ValueError, ValidationError) as exc:
         messages.error(request, str(exc) if isinstance(exc, ValueError) else '; '.join(exc.messages))
         return redirect('account_detail', account_id=account_id)
-    if form.cleaned_data.get('environment') is not None:
-        AwsAccount.objects.filter(pk=account.pk).update(environment=form.cleaned_data['environment'])
+    assignment.metadata={**assignment.metadata,**metadata};assignment.save(update_fields=['metadata'])
     restamp(account, form.cleaned_data['start'])
     audit(request, 'Account assigned', customer=customer, details={'account_id': account_id, 'start': form.cleaned_data['start'].isoformat()})
     messages.success(request, f'Account {account_id} assigned to {customer.name} from {form.cleaned_data["start"]}. Earlier spend keeps its previous owner.')
     nxt = request.POST.get('next', '')
-    if nxt.startswith('/'):
+    if nxt.startswith('/') and not nxt.startswith('//'):
         return redirect(nxt)
     return redirect('account_detail', account_id=account_id)
 
 
+def account_metadata(account,assignment):
+    data=assignment.metadata or {}
+    account.alias=data.get('alias','');account.owner=data.get('owner','')
+    account.name=account.alias or data.get('name') or (account.name if assignment.end is None else 'Historical account')
+    account.environment=data.get('environment',account.environment if assignment.end is None else '')
+
+
 def restamp(account, start):
-    """Re-stamp stored facts from ``start`` onward with the assignment active on each day."""
-    assignments = list(account.assignments.all())
-    for row in Cost.objects.filter(account_id=account.account_id, day__gte=start).only('id', 'day', 'customer_id'):
-        match = next((a for a in assignments if a.covers(row.day)), None)
-        owner = match.customer_id if match else None
-        if owner != row.customer_id:
-            Cost.objects.filter(pk=row.pk).update(customer_id=owner)
+    """Validate both sides, then change only effective ownership, never cost values."""
+    from django.conf import settings
+    from django.db import connection
+    from .access import current_access,context
+    from django.core.exceptions import PermissionDenied
+    if connection.vendor=='postgresql' and settings.DATABASE_RLS_ENABLED:
+        with connection.cursor() as cursor:cursor.execute('SELECT billing_restamp_ownership(%s,%s)',[account.account_id,start])
+        return
+    access=current_access.get()
+    with context(None):
+        assignments=list(account.assignments.all())
+        rows=list(Cost.objects.filter(account_id=account.account_id,day__gte=start).only('id','day','customer_id'))
+        changes=[(row,next((a.customer_id for a in assignments if a.covers(row.day)),None)) for row in rows]
+        if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
+            ids={cid for row,new in changes for cid in (row.customer_id,new)}
+            if any(cid not in access.editable or (access.accounts.get(cid) and account.account_id not in access.accounts[cid]) for cid in ids):
+                raise PermissionDenied('Ownership transfer requires authorized old and new customer scopes.')
+        for row,owner in changes:
+            if owner!=row.customer_id:Cost.objects.filter(pk=row.pk).update(customer_id=owner)
 
 
 @never_cache
@@ -616,7 +686,7 @@ def alert_ack(request, pk):
     alert = get_object_or_404(Alert.objects.select_related('budget'), pk=pk)
     Alert.objects.filter(pk=pk).update(acknowledged_by=request.user.username, acknowledged_at=timezone.now())
     audit(request, 'Budget alert acknowledged', customer=alert.budget.customer, details={'alert': pk})
-    return redirect(request.POST.get('next') if request.POST.get('next', '').startswith('/') else 'budget_list')
+    return redirect(request.POST.get('next') if (request.POST.get('next', '').startswith('/') and not request.POST.get('next', '').startswith('//')) else 'budget_list')
 
 
 @never_cache
@@ -626,7 +696,9 @@ def imported_budgets(request):
     query = request.GET.get('q', '').strip()
     if query:
         items = items.filter(Q(name__icontains=query) | Q(owning_account_id__icontains=query) | Q(source__customer__name__icontains=query))
-    return render(request, 'billing/imported_budgets.html', {'page': paginate(request, items), 'q': query, 'active_page': 'budgets'})
+    from .aws_budget_display import overview as aws_overview
+    coverage = aws_overview(Customer.objects.filter(name__iexact='Flentas'))
+    return render(request, 'billing/imported_budgets.html', {**coverage, 'page': paginate(request, items), 'q': query, 'active_page': 'budgets'})
 
 
 @staff_required
@@ -642,10 +714,15 @@ def onboarding_bulk(request):
 
 
 def bulk_view(request, kind, parser, applier, template, title, columns, done_url):
+    from .access import for_user,scope_fingerprint
+    fingerprint=scope_fingerprint(for_user(request.user))
     form = CsvUploadForm()
     preview = None
     if request.method == 'POST' and request.POST.get('action') == 'apply':
-        preview = get_object_or_404(BulkImport, pk=request.POST.get('import_id'), kind=kind, applied_at__isnull=True)
+        preview = get_object_or_404(BulkImport.objects.select_for_update(), pk=request.POST.get('import_id'), kind=kind, requested_by=request.user,scope_fingerprint=fingerprint)
+        if preview.applied_at:
+            messages.success(request, 'This preview was already applied; no records were duplicated.')
+            return redirect(done_url)
         if preview.errors:
             messages.error(request, 'Fix the validation problems and upload the file again.')
         else:
@@ -667,7 +744,7 @@ def bulk_view(request, kind, parser, applier, template, title, columns, done_url
                 form.add_error('file', 'The file must be UTF-8 encoded CSV.')
             else:
                 rows, errors = parser(text)
-                preview = BulkImport.objects.create(kind=kind, uploaded_by=request.user.username, rows=rows, errors=errors)
+                preview = BulkImport.objects.create(kind=kind, uploaded_by=request.user.username,requested_by=request.user,scope_fingerprint=fingerprint, rows=rows, errors=errors)
     return render(request, template, {'form': form, 'preview': preview, 'title': title, 'columns': columns, 'kind': kind, 'active_page': 'onboarding' if kind == 'customers' else 'budgets'})
 
 

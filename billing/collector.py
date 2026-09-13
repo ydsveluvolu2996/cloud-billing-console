@@ -4,12 +4,14 @@ Baseline facts are DAILY costs grouped by LINKED_ACCOUNT and SERVICE. Each month
 published atomically; a failed month keeps its previous successful snapshot. Costs are
 stamped with the customer that owned the linked account on that day.
 """
+import json
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from botocore.exceptions import ClientError
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.utils import timezone
 from .aws import Meter, RequestBudgetExceeded, Session, paginate
@@ -51,7 +53,8 @@ def safe_error(exc):
         }
         return f'{code}: {explanations.get(code, "AWS could not complete the request. Check account access and retry.")}'
     if isinstance(exc, ValueError):
-        return f'Validation failed: {str(exc)[:300]}'
+        from .redaction import redact
+        return f'Validation failed: {redact(str(exc))[:300]}'
     return 'Collection failed. Previous data has been retained; check application logs.'
 
 
@@ -74,6 +77,12 @@ def verify_source(source, session=None, meter=None):
     """Assume the role, confirm the account identity and probe optional capabilities."""
     meter = meter or Meter()
     session = session or Session(source)
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        import boto3
+        from .aws import AWS_CONFIG
+        from .iam import verify_trust
+        checks = verify_trust(source, session, boto3.client('sts', region_name=settings.AWS_REGION, config=AWS_CONFIG), meter)
+        BillingSource.objects.filter(pk=source.pk).update(trust_checks=checks)
     sts = session.client('sts')
     identity = meter.call(sts, 'get_caller_identity')
     if identity.get('Account') != source.account_id:
@@ -85,9 +94,10 @@ def verify_source(source, session=None, meter=None):
         meter.call(ce, 'get_cost_and_usage', TimePeriod={'Start': (today - timedelta(days=2)).isoformat(), 'End': today.isoformat()},
                    Granularity='DAILY', Metrics=['UnblendedCost'])
         capabilities['cost_explorer'] = True
-    if source.kind == BillingSource.PAYER:
+    if source.kind == BillingSource.PAYER and ('organizations' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL):
         try:
             org = meter.call(session.client('organizations'), 'describe_organization')['Organization']
+            meter.call(session.client('organizations'),'list_accounts',MaxResults=1)
             capabilities['organizations'] = True
             capabilities['management_account'] = org.get('MasterAccountId', '')
             if capabilities['management_account'] and capabilities['management_account'] != source.account_id:
@@ -95,14 +105,46 @@ def verify_source(source, session=None, meter=None):
                 capabilities['organizations'] = False
         except ClientError as exc:
             capabilities['organizations_error'] = exc.response.get('Error', {}).get('Code', 'AccessDenied')
-    try:
-        meter.call(session.client('budgets'), 'describe_budgets', AccountId=source.account_id, MaxResults=1)
-        capabilities['budgets'] = True
-    except ClientError as exc:
-        capabilities['budgets_error'] = exc.response.get('Error', {}).get('Code', 'AccessDenied')
+    if 'budgets' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL:
+        try:
+            meter.call(session.client('budgets'), 'describe_budgets', AccountId=source.account_id, MaxResults=1)
+            capabilities['budgets'] = True
+        except ClientError as exc:
+            capabilities['budgets_error'] = exc.response.get('Error', {}).get('Code', 'Unavailable')
+    for name in ('organizations', 'budgets', 'tags', 'cost_categories', 'forecasts', 'comparison_drivers', 'resources'):
+        capabilities.setdefault(name, False)
+        if name not in source.approved_capabilities:
+            capabilities.setdefault(name + '_error', 'Not approved; core billing remains available.')
+    if settings.REQUIRE_CONNECTION_APPROVAL and source.collects_costs:
+        window = {'Start': (today - timedelta(days=2)).isoformat(), 'End': today.isoformat()}
+        probes = {
+            'tags': ('get_tags', {'TimePeriod': window}),
+            'cost_categories': ('get_cost_categories', {'TimePeriod': window}),
+            'forecasts': ('get_cost_forecast', {'TimePeriod': {'Start': today.isoformat(), 'End': (today + timedelta(days=2)).isoformat()}, 'Metric':'UNBLENDED_COST', 'Granularity':'DAILY'}),
+            'resources': ('get_cost_and_usage_with_resources', {'TimePeriod': window, 'Granularity':'DAILY', 'Metrics':['UnblendedCost'], 'Filter': {'Dimensions': {'Key':'SERVICE', 'Values':['Amazon Elastic Compute Cloud - Compute']}}, 'GroupBy':[{'Type':'DIMENSION','Key':'RESOURCE_ID'}]}),
+        }
+        from dateutil.relativedelta import relativedelta
+        month=today.replace(day=1)
+        probes['comparison_drivers']=('get_cost_comparison_drivers',{'BaselineTimePeriod':{'Start':str(month-relativedelta(months=2)),'End':str(month-relativedelta(months=1))},'ComparisonTimePeriod':{'Start':str(month-relativedelta(months=1)),'End':str(month)},'MetricForComparison':'UnblendedCost','MaxResults':1})
+        for name, (operation, args) in probes.items():
+            if name in source.approved_capabilities:
+                try:
+                    meter.call(ce, operation, **args)
+                    capabilities[name] = True
+                    if name=='tags':
+                        from .models import CustomerApproval
+                        approval=CustomerApproval.objects.filter(customer=source.customer).first()
+                        permitted=set(approval.metadata if approval else [])
+                        active=paginate(meter,ce,'list_cost_allocation_tags','CostAllocationTags',Status='Active')
+                        capabilities['active_tag_keys']=[tag['TagKey'] for tag in active if 'tag:'+tag['TagKey'] in permitted]
+                except ClientError as exc:
+                    capabilities[name + '_error'] = safe_error(exc)
     now = timezone.now()
-    BillingSource.objects.filter(pk=source.pk).update(capabilities=capabilities, verified_at=now, last_error='',
-                                                      onboarding_step=max(source.onboarding_step, 5))
+    with transaction.atomic():
+        current = BillingSource.objects.select_for_update().get(pk=source.pk)
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
+            raise ConnectionChanged()
+        BillingSource.objects.filter(pk=source.pk).update(capabilities=capabilities, verified_at=now, last_error='', onboarding_step=max(source.onboarding_step, 5))
     source.capabilities, source.verified_at, source.last_error = capabilities, now, ''
     return capabilities
 
@@ -135,13 +177,16 @@ def discover_accounts(source, session=None, meter=None, today=None):
         mode = 'billing_only'
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version:
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
             raise ConnectionChanged()
         for account_id, info in found.items():
             account, created = AwsAccount.objects.get_or_create(account_id=account_id, defaults={
                 'source': source, 'payer_account_id': source.account_id, 'first_seen': now})
             account.name = info.get('name') or account.name
-            account.email = info.get('email') or account.email
+            from .models import CustomerApproval
+            approval = CustomerApproval.objects.filter(customer=source.customer).first() if settings.REQUIRE_CONNECTION_APPROVAL else None
+            if not settings.REQUIRE_CONNECTION_APPROVAL or (approval and 'email' in approval.metadata):
+                account.email = info.get('email') or account.email
             account.state = info.get('state', account.state)
             account.joined_at = info.get('joined_at') or account.joined_at
             account.discovery = info.get('discovery', account.discovery)
@@ -149,9 +194,11 @@ def discover_accounts(source, session=None, meter=None, today=None):
             account.source = source
             account.last_seen, account.missing_since = now, None
             account.save()
-            if not source.shared and not account.assignments.filter(end__isnull=True).exists():
+            approved_account = not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
+            if approved_account and not source.shared and not account.assignments.filter(end__isnull=True).exists():
                 ensure_assignment(account, source.customer, note='Auto-assigned from non-shared connection')
-        AwsAccount.objects.filter(source=source, missing_since__isnull=True).exclude(account_id__in=list(found)).update(missing_since=now)
+        if mode=='organizations':
+            AwsAccount.objects.filter(source=source, missing_since__isnull=True).exclude(account_id__in=list(found)).update(missing_since=now)
         BillingSource.objects.filter(pk=source.pk).update(discovered_at=now, discovery_mode=mode, onboarding_step=max(source.onboarding_step, 6), last_error='')
     source.discovered_at, source.discovery_mode = now, mode
     return found
@@ -159,19 +206,21 @@ def discover_accounts(source, session=None, meter=None, today=None):
 
 def ensure_assignment(account, customer, start=None, note='', actor=''):
     """Assign an account without overwriting history. A later start ends the prior assignment."""
-    start = start or EPOCH
-    open_assignment = account.assignments.filter(end__isnull=True).order_by('-start').first()
-    if open_assignment and open_assignment.customer_id == customer.pk:
-        return open_assignment
-    if open_assignment:
-        if start <= open_assignment.start:
-            raise ValueError('The transfer date must be after the current assignment started.')
-        open_assignment.end = start
-        open_assignment.save(update_fields=['end'])
-    assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor)
-    assignment.full_clean()
-    assignment.save()
-    return assignment
+    with transaction.atomic():
+        account = AwsAccount.objects.select_for_update().get(pk=account.pk)
+        start = start or EPOCH
+        open_assignment = account.assignments.filter(end__isnull=True).order_by('-start').first()
+        if open_assignment and open_assignment.customer_id == customer.pk:
+            return open_assignment
+        if open_assignment:
+            if start <= open_assignment.start:
+                raise ValueError('The transfer date must be after the current assignment started.')
+            open_assignment.end = start
+            open_assignment.save(update_fields=['end'])
+        assignment = AccountAssignment(account=account, customer=customer, start=start, note=note, created_by=actor,metadata={'name':account.name})
+        assignment.full_clean()
+        assignment.save()
+        return assignment
 
 
 # --- cost collection ----------------------------------------------------------------------
@@ -225,7 +274,10 @@ def owner_lookup(source, records):
             account = AwsAccount.objects.create(account_id=account_id, source=source, payer_account_id=source.account_id,
                                                 state='UNKNOWN', discovery='billing', first_seen=now, last_seen=now)
             accounts[account_id] = account
-        if not source.shared and not account.assignments.filter(end__isnull=True).exists():
+        from .models import CustomerApproval
+        approval=CustomerApproval.objects.filter(customer=source.customer,status='approved').first() if settings.REQUIRE_CONNECTION_APPROVAL else None
+        approved=not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
+        if approved and not source.shared and not account.assignments.filter(end__isnull=True).exists():
             ensure_assignment(account, source.customer, note='Auto-assigned from billing data')
         assignments = list(account.assignments.all())
         for record in (r for r in records if r['account_id'] == account_id):
@@ -246,14 +298,27 @@ def check_overlap(source, records, first, last):
             raise OverlappingBillingScope(account_id, f'connection {other_account}')
 
 
-def publish_month(source, month, records, days, estimated, meter, started, attempts=1):
+def publish_month(source, month, records, days, estimated, meter, started, attempts=1, job=None):
     """Atomically replace one month for one source. Old rows survive any failure."""
     first, last = month, month + relativedelta(months=1)
     period, _ = CollectionPeriod.objects.get_or_create(source=source, month=month)
     with transaction.atomic():
+        if isinstance(getattr(job,'pk',None),int):
+            from .models import Job
+            if not Job.objects.select_for_update().filter(pk=job.pk,status=Job.LEASED,worker=job.worker,attempts=job.attempts,lease_expires__gt=timezone.now()).exists():
+                raise ConnectionChanged()
         locked = BillingSource.objects.select_for_update().get(pk=source.pk)
         if not locked.enabled or locked.connection_version != source.connection_version or locked.role_arn != source.role_arn:
             raise ConnectionChanged()
+        from django.db import connection
+        if connection.vendor=='postgresql':
+            import hashlib
+            # Different source leases still must not publish the same account/day.
+            # Stable ordered account locks cover first-ever imports as well.
+            with connection.cursor() as cursor:
+                for account in sorted({r['account_id'] for r in records}):
+                    key=int.from_bytes(hashlib.sha256(account.encode()).digest()[:8],'big',signed=True)
+                    cursor.execute('SELECT pg_advisory_xact_lock(%s)',[key])
         check_overlap(source, records, first, last)
         owners = owner_lookup(source, records)
         rows = [Cost(source=source, customer_id=owners[(r['account_id'], r['day'])], **r) for r in records]
@@ -293,7 +358,7 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
             before = meter.requests
             try:
                 records, days, estimated = fetch_month(ce, meter, first, last)
-                total_rows += publish_month(source, month, records, days, estimated, meter, started)
+                total_rows += publish_month(source, month, records, days, estimated, meter, started,job=job)
             except Exception as exc:
                 CollectionPeriod.objects.filter(pk=period.pk).update(status='failed' if period.status != 'complete' else 'partial',
                     attempts=period.attempts + 1, last_attempt=timezone.now(), last_error=safe_error(exc),
@@ -351,11 +416,11 @@ def import_budgets(source, session=None, meter=None):
             actual_amount=to_decimal(actual.get('Amount')), actual_unit=actual.get('Unit', ''),
             forecast_amount=to_decimal(forecast.get('Amount')), forecast_unit=forecast.get('Unit', ''),
             calculated_at=b.get('LastUpdatedTime'), aws_updated_at=b.get('LastUpdatedTime'),
-            raw={k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in b.items() if k not in ('CalculatedSpend', 'BudgetLimit', 'TimePeriod', 'CostFilters', 'FilterExpression')},
+            raw=json.loads(json.dumps({k: v for k, v in b.items() if k not in ('CalculatedSpend', 'BudgetLimit', 'TimePeriod', 'CostFilters', 'FilterExpression')}, cls=DjangoJSONEncoder)),
             imported_at=now))
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version:
+        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
             raise ConnectionChanged()
         ImportedBudget.objects.filter(source=source).delete()
         ImportedBudget.objects.bulk_create(snapshots)

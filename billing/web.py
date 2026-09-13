@@ -24,7 +24,9 @@ def staff_required(view):
     def wrapped(request, *args, **kwargs):
         if not scoping.can_edit(request.user):
             return HttpResponseForbidden('An operator or administrator must perform this action.')
-        return view(request, *args, **kwargs)
+        from .access import editing
+        with editing():
+            return view(request, *args, **kwargs)
     return wrapped
 
 
@@ -38,7 +40,8 @@ def paginate(request, items, per_page=25):
 
 
 def audit(request, action, customer=None, source=None, **details):
-    AuditEvent.objects.create(actor=request.user.username, action=action, customer=customer, source=source, details=details)
+    from .authentication import security_event
+    security_event(request.user.username,action,customer=customer,source=source,**details)
 
 
 @never_cache
@@ -157,8 +160,15 @@ def export_report(request):
         writer.writerow([safe_csv(row['label']), str(row['total']), *[str(v) if v is not None else '' for v in row['cells']]])
     if data.get('comparison_rows'):
         writer.writerow([]); writer.writerow(['Comparison', 'Previous', 'Selected', 'Change', 'Change %'])
+        writer.writerow(['Total',data['comparison_total'],data['total'],data['comparison_delta'],data['comparison_percent']])
         for row in data['comparison_rows']:
             writer.writerow([safe_csv(row['label']), row['before'], row['after'], row['delta'], row['percent']])
+    if data.get('driver_rows'):
+        writer.writerow([]);writer.writerow(['AWS comparison drivers','Customer','Group','Driver','Metric','Unit','Previous','Selected','Change'])
+        for row in data['driver_rows']:
+            for fact in row['facts']:
+                writer.writerow(['Driver',safe_csv(row['customer']),safe_csv(row['label']),safe_csv(fact['name']),safe_csv(fact['metric']),safe_csv(fact['unit']),fact['before'],fact['after'],fact['delta']])
+    for note in data.get('driver_notes',[]):writer.writerow(['Comparison driver note',safe_csv(note)])
     if data.get('forecast_rows'):
         writer.writerow([]); writer.writerow(['AWS forecast', 'Customer', 'Start (UTC)', 'End (exclusive UTC)', 'Mean USD', '80% lower USD', '80% upper USD'])
         for row in data['forecast_rows']:
@@ -201,17 +211,26 @@ def explorer_metadata(request):
         return JsonResponse({'error': 'Key is too long.'}, status=400)
     today = timezone.now().date()
     try:
-        start = date.fromisoformat(request.GET.get('start', str(today.replace(day=1))))
-        end = min(date.fromisoformat(request.GET.get('end', str(today))), today)
-        if start > end or (end - start).days > 731:
-            raise ValueError()
-        scope = scoping.resolve(request.GET)
-    except (ValueError, TypeError):
-        return JsonResponse({'error': 'Choose valid dates and customer.'}, status=400)
-    units = scoping.report_units(scope.customer) if scope.customer else scoping.report_units(None)
+        params=request.GET.copy()
+        # Choices follow the other filters, never their own current selection. Metadata
+        # is independent of incomplete comparison/group/usage controls in the form.
+        params.update(group_by='none',group_key='',report_mode='standard',measure='cost',normalized='0',forecast='1',granularity='daily')
+        params.setlist(kind,[])
+        if kind in ('tag','cost_category'):
+            params['untagged' if kind=='tag' else 'uncategorized']='0'
+        p=contract.normalize(params)
+        start=date.fromisoformat(p['start']);end=min(date.fromisoformat(p['end']),today)
+        scope = scoping.resolve(p)
+    except (ValueError, TypeError) as exc:
+        return JsonResponse({'error': str(exc) or 'Choose valid dates and customer.'}, status=400)
+    units = scoping.report_units(scope.customer,start=start,end=end+timedelta(days=1))
+    if scope.source:units=[u for u in units if u[0].pk==scope.source.pk]
     if kind == 'resource':
-        start = max(start, today - timedelta(days=13))
+        if start<today-timedelta(days=13):
+            return JsonResponse({'error':'Resource values require a date range within the last 14 days and AWS resource-data opt-in.'},status=400)
     req = {'TimePeriod': {'Start': str(start), 'End': str(end + timedelta(days=1))}}
+    filters=contract.expression(p)
+    if filters:req['Filter']=filters
     if kind in ('tag', 'cost_category'):
         operation = 'get_tags' if kind == 'tag' else 'get_cost_categories'
         if key:
@@ -221,25 +240,31 @@ def explorer_metadata(request):
         operation = 'get_dimension_values'
         req.update(Dimension=contract.DIMENSIONS[kind][1], Context='COST_AND_USAGE')
         if kind == 'resource':
-            req['Filter'] = {'Dimensions': {'Key': 'SERVICE', 'Values': [contract.EC2]}}
+            service={'Dimensions': {'Key': 'SERVICE', 'Values': [contract.EC2]}}
+            req['Filter']={'And':[req['Filter'],service]} if req.get('Filter') else service
         result_key = 'DimensionValues'
-    options = set(); errors = []; pending = False; dates = []
+    options = set(); labels = {}; errors = []; pending = False; dates = []
     for source, customer, accounts in units:
-        q = get_query(source, operation, req, customer=customer, account_filter=accounts)
-        pending = pending or q.requested
-        if q.error:
-            errors.append(source.customer.name + ': ' + q.error)
-        if q.last_success:
-            dates.append(q.last_success.isoformat())
-        if q.data:
-            for v in q.data.get(result_key, []):
-                value = v['Value'] if isinstance(v, dict) else v
-                if kind == 'account' and accounts is not None and value not in accounts:
-                    continue  # never expose another customer's linked accounts through metadata
-                options.add(value)
-    if kind == 'account' and scope.customer:
-        options &= set(scoping.customer_accounts(scope.customer)) | set(Cost.objects.filter(customer=scope.customer).values_list('account_id', flat=True).distinct())
-    return JsonResponse({'values': sorted(options), 'pending': pending, 'errors': errors, 'snapshots': dates})
+        for left,right,owned in scoping.ownership_windows(source,customer,start,end+timedelta(days=1)):
+            window_req=req|{'TimePeriod':{'Start':str(left),'End':str(right)}}
+            try:
+                q = get_query(source, operation, window_req, customer=customer, account_filter=owned)
+            except ValueError as exc:
+                errors.append((customer or source.customer).name + ': ' + str(exc))
+                continue
+            pending = pending or q.requested
+            if q.error:errors.append((customer or source.customer).name + ': ' + q.error)
+            if q.last_success:dates.append(q.last_success.isoformat())
+            if q.data:
+                for v in q.data.get(result_key, []):
+                    value = v['Value'] if isinstance(v, dict) else v
+                    if kind == 'account' and owned is not None and value not in owned:
+                        continue  # metadata obeys the same ownership dates as cost reports
+                    options.add(value)
+                    if kind=='account' and isinstance(v,dict):
+                        name=v.get('Attributes',{}).get('description','')
+                        if name:labels[value]=f'{name} ({value})'
+    return JsonResponse({'values': sorted(options), 'labels':{v:labels[v] for v in options if v in labels}, 'pending': pending, 'errors': errors, 'snapshots': dates})
 
 
 @never_cache
@@ -260,12 +285,12 @@ def explorer_status(request):
 def save_report(request):
     try:
         p = contract.normalize(request.POST)
-        scoping.resolve(p)
+        resolved_scope = scoping.resolve(p)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
-    saved = SavedReport.objects.create(name=p['report_name'], parameters=p, created_by=request.user.username)
+    saved = SavedReport.objects.create(name=p['report_name'], parameters=p, customer=resolved_scope.customer, created_by=request.user.username)
     audit(request, 'Explorer report saved')
-    messages.success(request, 'Report saved to the shared library.')
+    messages.success(request, 'Report saved to your authorized customer library.')
     return redirect('/reports/' + str(saved.pk) + '/')
 
 

@@ -5,12 +5,14 @@ Cost facts are collected once per source and stamped with the customer that owne
 the linked account on that day, based on effective-dated ``AccountAssignment`` rows.
 """
 import secrets
+import re
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
+from .access import ScopedManager, validate_object
 from django.db.models import Q
 from django.utils import timezone
 
@@ -24,7 +26,16 @@ def new_external_id():
     return secrets.token_hex(20)
 
 
-class Customer(models.Model):
+class ScopedModel(models.Model):
+    objects = ScopedManager()
+    class Meta:
+        abstract = True
+    def save(self, *args, **kwargs):
+        validate_object(self)
+        return super().save(*args, **kwargs)
+
+
+class Customer(ScopedModel):
     """A business customer. Primary keys are preserved from earlier releases."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=120, unique=True)
@@ -77,7 +88,7 @@ class Customer(models.Model):
         return self.active and any(s.enabled for s in self.cost_sources)
 
 
-class BillingSource(models.Model):
+class BillingSource(ScopedModel):
     """One IAM role connection. A payer source covers its whole organization."""
     PAYER, STANDALONE, MEMBER_BUDGETS = 'payer', 'standalone', 'member_budgets'
     KINDS = [(PAYER, 'Management / payer account'), (STANDALONE, 'Standalone account'),
@@ -89,12 +100,15 @@ class BillingSource(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='sources')
     kind = models.CharField(max_length=20, choices=KINDS, default=PAYER)
     account_id = models.CharField(max_length=12, validators=[ACCOUNT_ID])
-    role_arn = models.CharField(max_length=300, blank=True)
-    external_id = models.CharField(max_length=64, default=new_external_id, editable=False)
+    role_arn = models.CharField(max_length=2048, blank=True)
+    external_id = models.CharField(max_length=64, default=new_external_id, editable=False, unique=True)
     shared = models.BooleanField(default=False, help_text='Payer serves several customers; accounts need explicit assignment.')
     enabled = models.BooleanField(default=True)
     connection_version = models.PositiveIntegerField(default=1)
+    ownership_version = models.PositiveIntegerField(default=1)
     capabilities = models.JSONField(default=dict, blank=True)
+    approved_capabilities = models.JSONField(default=list, blank=True)
+    trust_checks = models.JSONField(default=dict, blank=True)
     discovery_mode = models.CharField(max_length=20, blank=True)  # organizations | billing_only
     onboarding_step = models.PositiveSmallIntegerField(default=2)
     sync_requested = models.BooleanField(default=False)
@@ -108,12 +122,12 @@ class BillingSource(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['customer__name', 'account_id']
+        ordering = ['account_id']
         constraints = [models.UniqueConstraint(fields=['account_id'], condition=Q(kind__in=['payer', 'standalone']),
                                                name='unique_cost_source_account')]
 
     def __str__(self):
-        return f'{self.customer.name} · {self.account_id}'
+        return f'{self.account_id} · {self.get_kind_display()}'
 
     @property
     def expected_role_arn(self):
@@ -121,8 +135,9 @@ class BillingSource(models.Model):
 
     def clean(self):
         super().clean()
-        if self.role_arn and self.role_arn != self.expected_role_arn:
-            raise ValidationError({'role_arn': 'Use the CostReadOnly role created by this customer’s onboarding template.'})
+        if self.role_arn:
+            from .iam import validate_role_arn
+            validate_role_arn(self.role_arn, self.account_id)
 
     @property
     def collects_costs(self):
@@ -149,7 +164,7 @@ class BillingSource(models.Model):
         return 'Connected'
 
 
-class AwsAccount(models.Model):
+class AwsAccount(ScopedModel):
     """Inventory of every AWS account seen through any connection."""
     account_id = models.CharField(max_length=12, unique=True, validators=[ACCOUNT_ID])
     name = models.CharField(max_length=200, blank=True)
@@ -178,7 +193,8 @@ class AwsAccount(models.Model):
         return next((a for a in self.assignments.all() if a.covers(day)), None)
 
 
-class AccountAssignment(models.Model):
+class AccountAssignment(ScopedModel):
+    metadata=models.JSONField(default=dict,blank=True,help_text='Approved customer-specific alias, owner and environment; retained with this ownership interval.')
     """Effective-dated ownership of an account by a customer."""
     account = models.ForeignKey(AwsAccount, on_delete=models.PROTECT, related_name='assignments')
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='assignments')
@@ -204,7 +220,7 @@ class AccountAssignment(models.Model):
                 raise ValidationError('Assignments for one account cannot overlap. End the previous assignment first.')
 
 
-class Cost(models.Model):
+class Cost(ScopedModel):
     """Daily cost facts grouped by linked account and service; additive."""
     source = models.ForeignKey(BillingSource, on_delete=models.PROTECT, related_name='costs', null=True)
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='costs', null=True, blank=True)
@@ -222,7 +238,7 @@ class Cost(models.Model):
                    models.Index(fields=['account_id', 'day']), models.Index(fields=['customer', 'currency', 'day'], name='billing_cost_scope_day_idx')]
 
 
-class CollectionPeriod(models.Model):
+class CollectionPeriod(ScopedModel):
     """Per-source, per-month coverage and publication metadata."""
     source = models.ForeignKey(BillingSource, on_delete=models.CASCADE, related_name='periods')
     month = models.DateField()
@@ -245,7 +261,7 @@ class CollectionPeriod(models.Model):
         constraints = [models.UniqueConstraint(fields=['source', 'month'], name='unique_collection_period')]
 
 
-class SyncRun(models.Model):
+class SyncRun(ScopedModel):
     source = models.ForeignKey(BillingSource, on_delete=models.PROTECT, related_name='syncs', null=True)
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='syncs', null=True)
     started_at = models.DateTimeField(default=timezone.now)
@@ -259,7 +275,7 @@ class SyncRun(models.Model):
         ordering = ['-started_at']
 
 
-class Project(models.Model):
+class Project(ScopedModel):
     """Logical cost allocation spanning a customer's accounts."""
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='projects')
     name = models.CharField(max_length=120)
@@ -279,7 +295,7 @@ class Project(models.Model):
         return next((r for r in self.rules.all() if r.active and r.covers(day)), None)
 
 
-class AllocationRule(models.Model):
+class AllocationRule(ScopedModel):
     """Versioned, effective-dated disjoint allocation rule for one project."""
     ACCOUNTS, TAG, COST_CATEGORY, ACCOUNT_TAG, ACCOUNT_CATEGORY = 'accounts', 'tag', 'cost_category', 'account_tag', 'account_category'
     KINDS = [(ACCOUNTS, 'Linked accounts'), (TAG, 'Cost allocation tag'), (COST_CATEGORY, 'AWS cost category'),
@@ -322,7 +338,7 @@ class AllocationRule(models.Model):
         return ' and '.join(parts)
 
 
-class ProjectCost(models.Model):
+class ProjectCost(ScopedModel):
     """Allocated daily cost per project; derived from facts or scoped AWS queries."""
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='costs')
     rule = models.ForeignKey(AllocationRule, on_delete=models.CASCADE, related_name='costs')
@@ -340,7 +356,7 @@ class ProjectCost(models.Model):
         indexes = [models.Index(fields=['project', 'day'])]
 
 
-class Budget(models.Model):
+class Budget(ScopedModel):
     """Dashboard-defined budget at customer, payer, account or project scope."""
     CUSTOMER, SOURCE, ACCOUNT, PROJECT = 'customer', 'source', 'account', 'project'
     SCOPES = [(CUSTOMER, 'Customer'), (SOURCE, 'Payer connection'), (ACCOUNT, 'Linked account'), (PROJECT, 'Project')]
@@ -356,6 +372,7 @@ class Budget(models.Model):
     actual_threshold = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('80'))
     forecast_threshold = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('100'))
     active = models.BooleanField(default=True)
+    owner = models.CharField(max_length=150, blank=True)
     created_by = models.CharField(max_length=150, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -400,7 +417,7 @@ class Budget(models.Model):
         return 'Customer'
 
 
-class BudgetAmount(models.Model):
+class BudgetAmount(ScopedModel):
     """Recurring monthly limits (effective-dated) or specific-month overrides."""
     budget = models.ForeignKey(Budget, on_delete=models.CASCADE, related_name='amounts')
     amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
@@ -413,7 +430,7 @@ class BudgetAmount(models.Model):
         ordering = ['-month', '-effective_from']
 
 
-class BudgetEvaluation(models.Model):
+class BudgetEvaluation(ScopedModel):
     budget = models.ForeignKey(Budget, on_delete=models.CASCADE, related_name='evaluations')
     month = models.DateField()
     evaluated_at = models.DateTimeField(default=timezone.now)
@@ -442,7 +459,7 @@ class BudgetEvaluation(models.Model):
         return None if self.amount is None or self.forecast is None else self.forecast - self.amount
 
 
-class ImportedBudget(models.Model):
+class ImportedBudget(ScopedModel):
     """Read-only snapshot of an AWS Budget owned by the connected account."""
     source = models.ForeignKey(BillingSource, on_delete=models.CASCADE, related_name='imported_budgets')
     owning_account_id = models.CharField(max_length=12)
@@ -476,7 +493,7 @@ class ImportedBudget(models.Model):
         return (self.limit_unit or '').upper() in ('PERCENTAGE', 'PERCENT')
 
 
-class Alert(models.Model):
+class Alert(ScopedModel):
     budget = models.ForeignKey(Budget, on_delete=models.CASCADE, related_name='alerts')
     month = models.DateField()
     kind = models.CharField(max_length=10)  # actual | forecast
@@ -492,7 +509,7 @@ class Alert(models.Model):
         constraints = [models.UniqueConstraint(fields=['budget', 'month', 'kind', 'threshold'], name='unique_alert')]
 
 
-class Job(models.Model):
+class Job(ScopedModel):
     """Durable PostgreSQL-backed job with leases, retries and coalescing keys."""
     QUEUED, LEASED, DONE, FAILED = 'queued', 'leased', 'done', 'failed'
     kind = models.CharField(max_length=40)
@@ -519,7 +536,7 @@ class Job(models.Model):
         constraints = [models.UniqueConstraint(fields=['key'], condition=Q(status__in=['queued', 'leased']), name='unique_active_job_key')]
 
 
-class AuditEvent(models.Model):
+class AuditEvent(ScopedModel):
     at = models.DateTimeField(auto_now_add=True)
     actor = models.CharField(max_length=150)
     action = models.CharField(max_length=100)
@@ -531,7 +548,9 @@ class AuditEvent(models.Model):
         ordering = ['-at']
 
 
-class ExplorerQuery(models.Model):
+class ExplorerQuery(ScopedModel):
+    scope_fingerprint = models.CharField(max_length=64, blank=True)
+    requested_by = models.ForeignKey('auth.User',null=True,blank=True,on_delete=models.SET_NULL)
     """A single connection/AWS request; old data survives unsuccessful refreshes."""
     source = models.ForeignKey(BillingSource, on_delete=models.CASCADE, related_name='explorer_queries', null=True)
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='explorer_queries', null=True, blank=True)
@@ -551,7 +570,8 @@ class ExplorerQuery(models.Model):
         indexes = [models.Index(fields=['requested', 'last_used'])]
 
 
-class SavedReport(models.Model):
+class SavedReport(ScopedModel):
+    customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.PROTECT)
     name = models.CharField(max_length=120)
     parameters = models.JSONField(default=dict)
     created_by = models.CharField(max_length=150)
@@ -561,7 +581,9 @@ class SavedReport(models.Model):
         ordering = ['name', 'pk']
 
 
-class BulkImport(models.Model):
+class BulkImport(ScopedModel):
+    requested_by = models.ForeignKey('auth.User', null=True, blank=True, on_delete=models.SET_NULL)
+    scope_fingerprint = models.CharField(max_length=64, blank=True)
     """CSV preview/apply record for customers or budgets."""
     kind = models.CharField(max_length=20)  # customers | budgets
     uploaded_by = models.CharField(max_length=150)
@@ -578,7 +600,7 @@ class BulkImport(models.Model):
         return not self.errors
 
 
-class AllianceRecord(models.Model):
+class AllianceRecord(ScopedModel):
     """Internal handoff history for one customer's linked account and billing month."""
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='alliance_records')
     account = models.ForeignKey(AwsAccount, on_delete=models.PROTECT, related_name='alliance_records')
@@ -620,7 +642,7 @@ class AllianceRecord(models.Model):
         return 'Not started'
 
 
-class AllianceServiceNote(models.Model):
+class AllianceServiceNote(ScopedModel):
     record = models.ForeignKey(AllianceRecord, on_delete=models.CASCADE, related_name='service_notes')
     service = models.CharField(max_length=200)
     commentary = models.TextField(max_length=2000, blank=True)
@@ -628,3 +650,152 @@ class AllianceServiceNote(models.Model):
     class Meta:
         ordering = ['service']
         constraints = [models.UniqueConstraint(fields=['record', 'service'], name='unique_alliance_service_note')]
+
+
+class CustomerApproval(ScopedModel):
+    """Customer-supplied approval. Empty fields never imply consent."""
+    customer = models.OneToOneField(Customer, on_delete=models.PROTECT, related_name='approval')
+    contacts = models.JSONField(default=list, blank=True)
+    authorized_users = models.JSONField(default=list, blank=True)
+    expected_accounts = models.JSONField(default=list, blank=True)
+    billing_fields = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=list, blank=True)
+    optional_capabilities = models.JSONField(default=list, blank=True)
+    storage_region = models.CharField(max_length=30, blank=True)
+    retention_days = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=[('pending','Pending approval'),('approved','Approved'),('revoked','Revoked')], default='pending')
+    evidence = models.CharField(max_length=500, blank=True)
+    approved_by = models.CharField(max_length=150, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class RoleApproval(ScopedModel):
+    source = models.ForeignKey(BillingSource, on_delete=models.PROTECT, related_name='role_approvals')
+    role_arn = models.CharField(max_length=2048)
+    connection_version = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, default='requested')
+    evidence = models.CharField(max_length=500, blank=True)
+    requested_by = models.CharField(max_length=150)
+    approved_by = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['source','role_arn','connection_version'], name='unique_role_approval_version')]
+
+
+class CustomerMembership(models.Model):
+    user = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='customer_memberships')
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='memberships')
+    expires_at = models.DateTimeField(null=True, blank=True)
+    support_reason = models.CharField(max_length=500, blank=True)
+    role = models.CharField(max_length=12, choices=[('operator','Operator'),('viewer','Viewer'),('customer','Customer user')])
+    account_ids = models.JSONField(default=list, blank=True, help_text='Empty grants the whole customer; otherwise only these assigned accounts.')
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user','customer'], name='unique_customer_membership')]
+
+
+class UserSecurity(models.Model):
+    user = models.OneToOneField('auth.User', on_delete=models.CASCADE, related_name='security')
+    portfolio_access = models.BooleanField(default=False)
+    external = models.BooleanField(default=False)
+    session_version = models.PositiveIntegerField(default=1)
+    oidc_subject = models.CharField(max_length=255, blank=True)
+    oidc_issuer = models.URLField(blank=True)
+    recovery_hashes = models.JSONField(default=list, blank=True)
+    recovery_failed = models.PositiveIntegerField(default=0)
+    recovery_locked_until = models.DateTimeField(null=True, blank=True)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=['oidc_issuer','oidc_subject'],condition=~Q(oidc_issuer='') & ~Q(oidc_subject=''),name='unique_oidc_identity')]
+
+
+class RolloutReadiness(ScopedModel):
+    customer = models.OneToOneField(Customer, on_delete=models.PROTECT, related_name='rollout')
+    owner = models.CharField(max_length=150, blank=True)
+    planned_date = models.DateField(null=True, blank=True)
+    batch = models.CharField(max_length=80, blank=True)
+    checklist = models.JSONField(default=dict, blank=True)
+    security_evidence = models.CharField(max_length=500, blank=True)
+    independent_review = models.CharField(max_length=500, blank=True)
+    state = models.CharField(max_length=20, default='draft')
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class ReconciliationRun(ScopedModel):
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='reconciliations')
+    source = models.ForeignKey(BillingSource, null=True, blank=True, on_delete=models.PROTECT)
+    start = models.DateField()
+    end = models.DateField(help_text='Inclusive UI end date')
+    metric = models.CharField(max_length=10, choices=METRIC_CHOICES)
+    currency = models.CharField(max_length=10)
+    scope = models.JSONField(default=dict)
+    result = models.JSONField(default=dict)
+    reference = models.CharField(max_length=500)
+    synthetic = models.BooleanField(default=False)
+    created_by = models.CharField(max_length=150)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class OffboardingRecord(ScopedModel):
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
+    requested_by = models.CharField(max_length=150)
+    created_at = models.DateTimeField(auto_now_add=True)
+    allowlist_removed_at = models.DateTimeField(null=True, blank=True)
+    trust_revocation_reference = models.CharField(max_length=500, blank=True)
+    sessions_expire_after = models.DateTimeField()
+    retention_until = models.DateTimeField(null=True, blank=True)
+    deletion_approved_reference = models.CharField(max_length=500, blank=True)
+    deletion_completed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+
+
+class OperationalAlert(ScopedModel):
+    customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.PROTECT)
+    kind = models.CharField(max_length=40)
+    dedup_key = models.CharField(max_length=200, unique=True)
+    severity = models.CharField(max_length=12, default='warning')
+    message = models.CharField(max_length=500)
+    count = models.PositiveIntegerField(default=1)
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    acknowledged_by = models.CharField(max_length=150, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+
+
+class AlertRoute(ScopedModel):
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
+    kind = models.CharField(max_length=40, default='*')
+    recipients = models.JSONField(default=list)
+    severity = models.CharField(max_length=12, default='warning')
+    escalation_minutes = models.PositiveIntegerField(default=60)
+    enabled = models.BooleanField(default=False)
+
+
+class PortalInvitation(ScopedModel):
+    target_user=models.ForeignKey('auth.User',null=True,blank=True,on_delete=models.PROTECT)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT)
+    email = models.EmailField()
+    token_hash = models.CharField(max_length=64, unique=True)
+    account_ids = models.JSONField(default=list, blank=True)
+    created_by = models.CharField(max_length=150)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+
+class AllianceRevision(ScopedModel):
+    """Customer-scoped handoff history; sensitive content stays out of central logs."""
+    record=models.ForeignKey(AllianceRecord,on_delete=models.PROTECT,related_name='revisions')
+    revision=models.PositiveIntegerField()
+    actor=models.CharField(max_length=150)
+    created_at=models.DateTimeField(default=timezone.now)
+    snapshot=models.JSONField(default=dict)
+    fields=models.JSONField(default=dict)
+    service_notes=models.JSONField(default=dict)
+    class Meta:
+        ordering=['-revision']
+        constraints=[models.UniqueConstraint(fields=['record','revision'],name='unique_alliance_revision')]

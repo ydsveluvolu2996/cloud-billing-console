@@ -1,0 +1,15 @@
+{% load money %}
+{% if params.report_mode == 'compare' %}
+<section class="panel comparison-drivers">
+  <div class="panel-head"><div><h2>Cost comparison drivers</h2><p>AWS explanations of usage, discounts and commitment changes between two complete months.</p></div></div>
+  {% for note in driver_notes %}<p class="notice">{{ note }}</p>{% endfor %}
+  {% for row in driver_rows %}
+  <details class="dimension-filter" {% if forloop.counter <= 3 %}open{% endif %}>
+    <summary>{{ row.label }} · {{ row.customer }}</summary>
+    <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Metric</th><th class="number">Previous</th><th class="number">Selected</th><th class="number">Change</th></tr></thead><tbody>
+      {% for fact in row.facts %}<tr><td>{{ fact.name }}</td><td>{{ fact.metric }} · {{ fact.unit }}</td><td class="number">{{ fact.before|report_amount:fact.unit }}</td><td class="number">{{ fact.after|report_amount:fact.unit }}</td><td class="number">{{ fact.delta|report_amount:fact.unit }}</td></tr>{% endfor %}
+    </tbody></table></div>
+  </details>
+  {% empty %}{% if not driver_notes %}<p class="notice">Waiting for AWS comparison drivers. Cost totals and the comparison table remain available independently.</p>{% endif %}{% endfor %}
+</section>
+{% endif %}

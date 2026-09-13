@@ -1,13 +1,32 @@
 """URL configuration for the Cloud Billing Console."""
-from django.contrib import admin
-from django.urls import path
+from django.urls import path, include
 from django.contrib.auth import views as auth_views
-from billing import web
+from django.views.generic import RedirectView
+from billing import web, authentication, views_security, user_administration, views_access, views_insights, views_optimization, views_reconciliation
 from billing import views_management as manage
 from billing import views_alliance as alliance
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
+    path('insights/', views_insights.insights, name='insights'),
+    path('optimization/', views_optimization.optimization, name='optimization'),
+    path('reconciliation/', views_reconciliation.reconciliation, name='reconciliation'),
+    path('reports/monthly.xlsx', views_reconciliation.monthly_report, name='monthly_report'),
+    path('my-access/', views_access.my_access, name='my_access'),
+    path('users/', user_administration.users, name='users'),
+    path('users/add/', user_administration.user_edit, name='user_add'),
+    path('users/<int:pk>/', user_administration.user_edit, name='user_edit'),
+    path('customers/<uuid:pk>/tree/', manage.customer_tree, name='customer_tree'),
+    path('customers/<uuid:pk>/invite/', views_security.portal_invite, name='portal_invite'),
+    path('portal/accept/', views_security.portal_accept, name='portal_accept'),
+    path('customers/<uuid:pk>/governance/', views_security.customer_governance, name='customer_governance'),
+    path('sources/<uuid:pk>/inventory/', views_security.manual_inventory, name='manual_inventory'),
+    path('operations/', views_security.operations, name='operations'),
+    path('security/authenticator/', authentication.change_authenticator, name='change_authenticator'),
+    path('mfa/', authentication.mfa, name='mfa'),
+    path('sessions/revoke/', authentication.revoke_own_sessions, name='revoke_sessions'),
+    # Account provisioning and MFA recovery use evidence-backed administration;
+    # do not expose third-party model administration outside those workflows.
+    path('admin/', RedirectView.as_view(pattern_name='operations', permanent=False)),
     path('', web.dashboard, name='dashboard'),
     path('explorer/metadata/', web.explorer_metadata, name='explorer_metadata'),
     path('explorer/status/', web.explorer_status, name='explorer_status'),
@@ -19,7 +38,7 @@ urlpatterns = [
     path('alliance/', alliance.overview, name='alliance'),
     path('alliance/<uuid:customer_id>/<str:account_id>/', alliance.detail, name='alliance_detail'),
     path('export/report/', web.export_report, name='export_report'),
-    path('login/', auth_views.LoginView.as_view(template_name='registration/login.html'), name='login'),
+    path('login/', authentication.sign_in, name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     path('password/', auth_views.PasswordChangeView.as_view(template_name='registration/password.html', success_url='/'), name='password_change'),
     path('customers/', manage.customers, name='customers'),
@@ -54,3 +73,7 @@ urlpatterns = [
     path('activity/', web.activity, name='activity'),
     path('health/', web.health, name='health'),
 ]
+
+from django.conf import settings
+if settings.OIDC_ENABLED:
+    urlpatterns += [path('oidc/', include('mozilla_django_oidc.urls'))]

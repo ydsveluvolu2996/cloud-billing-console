@@ -6,8 +6,8 @@ from botocore.exceptions import ClientError
 from django.contrib.auth.models import User
 from django.test import TestCase, Client
 from django.utils import timezone
-from billing import jobs, onboarding, scheduler
-from billing.models import AccountAssignment, AuditEvent, BillingSource, Budget, Customer, ExplorerQuery, Job
+from billing import budgets as budgeting, jobs, onboarding, scheduler
+from billing.models import AccountAssignment, Alert, AuditEvent, BillingSource, Budget, BudgetAmount, Customer, ExplorerQuery, Job
 from .helpers import FakeSession, assign, cost, make_customer, web_settings
 
 
@@ -29,14 +29,14 @@ class OnboardingTests(TestCase):
         self.assertEqual(source.state, 'Awaiting customer setup')
         self.assertEqual(len(source.external_id), 40)
         page = self.client.get(f'/sources/{source.pk}/')
-        self.assertContains(page, 'Generate setup link')
+        self.assertContains(page, 'View and copy IAM policies')
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})
         self.assertEqual(response.status_code, 302)
         job = Job.objects.get(kind='verify', source=source)
         self.assertEqual(job.status, Job.QUEUED)
         # wrong account in the ARN is rejected by validation
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::999999999999:role/BillingConsole/CostReadOnly'})
-        self.assertContains(response, 'onboarding template')
+        self.assertContains(response, 'registered 12-digit AWS account')
 
     def test_verification_job_records_states_then_discovery_then_import(self):
         customer, source = make_customer('Flow', '123456789012', connected=False)
@@ -78,6 +78,75 @@ class OnboardingTests(TestCase):
         self.assertNotIn('secret detail', source.last_error)
         self.assertEqual(Job.objects.get(kind='verify').status, Job.FAILED)
         self.assertIsNone(source.verified_at)
+
+    def test_customer_tree_handles_accounts_without_spend_and_preserves_zero(self):
+        customer, source = make_customer('Sparse billing', '123456789012', accounts=('210987654321',))
+        month = timezone.now().date().replace(day=1)
+        url = f'/customers/{customer.pk}/tree/?month={month}'
+        response = self.client.get(url)
+        self.assertContains(response, '123456789012')
+        self.assertContains(response, '210987654321')
+        self.assertContains(response, '— USD', count=3)
+        self.assertNotContains(response, '0.00 USD')
+
+        cost(source, month, Decimal('5'))
+        response = self.client.get(url)
+        self.assertContains(response, '5.00 USD')
+        self.assertContains(response, '— USD', count=1)
+
+        cost(source, month, Decimal('0'), account_id='210987654321')
+        response = self.client.get(url)
+        self.assertContains(response, '0.00 USD')
+        self.assertNotContains(response, '— USD')
+
+    def test_flentas_account_columns_use_account_budgets_and_month_overrides(self):
+        customer, source = make_customer('Flentas', '123456789012', accounts=('210987654321', '210987654322'))
+        month = timezone.now().date().replace(day=1)
+        cost(source, month, Decimal('12.34'), account_id='210987654321')
+        budget = Budget.objects.create(customer=customer, scope=Budget.ACCOUNT, account_id='210987654321', name='Member monthly limit')
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('100'), effective_from=month)
+        BudgetAmount.objects.create(budget=budget, amount=Decimal('250'), month=month)
+        for scope, name, currency in [(Budget.CUSTOMER, 'Parent limit', 'USD'), (Budget.ACCOUNT, 'Other currency', 'EUR')]:
+            other = Budget.objects.create(customer=customer, scope=scope, account_id='210987654321', name=name, currency=currency)
+            BudgetAmount.objects.create(budget=other, amount=Decimal('9999'), effective_from=month)
+        for suffix in ['tree/', '']:
+            response = self.client.get(f'/customers/{customer.pk}/{suffix}')
+            self.assertContains(response, 'MTD (USD)')
+            self.assertContains(response, 'Budget usage (USD)')
+            self.assertContains(response, '250.00 USD')
+            self.assertContains(response, '12.34')
+            self.assertContains(response, 'No account budget')
+            self.assertNotContains(response, '9,999')
+            self.assertNotContains(response, 'Other currency')
+            rows = response.context['tree'][0]['members']
+            configured = next(r for r in rows if r['account'].account_id == '210987654321')['configured_budgets']
+            self.assertEqual([b['amount'] for b in configured], [Decimal('250')])
+        budgeting.raise_alerts(budget, month, Decimal('250'), Decimal('220'), None, timezone.now())
+        budgeting.raise_alerts(budget, month, Decimal('250'), Decimal('220'), None, timezone.now())
+        self.assertEqual(Alert.objects.filter(budget=budget, kind='actual').count(), 1)
+        response = self.client.get(f'/customers/{customer.pk}/tree/')
+        self.assertContains(response, 'Budget alarms')
+        self.assertContains(response, 'Alarm: Actual ≥ 80%')
+        self.assertContains(response, 'Configure budget alarm')
+        external, _ = make_customer('Gametion', '111111111111')
+        for suffix in ['tree/', '']:
+            self.assertNotContains(self.client.get(f'/customers/{external.pk}/{suffix}'), 'Budget usage (USD)')
+
+    def test_new_external_accounts_share_aligned_table_without_budget_columns(self):
+        customer, source = make_customer('External customer with a long legal entity name', '333333333333', accounts=('444444444444',))
+        source.accounts.update(name='Production account with a long descriptive name')
+        response = self.client.get(f'/customers/{customer.pk}/tree/')
+        self.assertContains(response, 'customer-account-table')
+        self.assertContains(response, 'Production account with a long descriptive name', count=2)
+        self.assertNotContains(response, 'Budget usage')
+        self.assertNotContains(response, 'Budget alarms')
+        html = response.content.decode()
+        header = html.split('<thead>')[1].split('</thead>')[0]
+        self.assertEqual(header.count('<th'), 3)
+        import re
+        rows = re.findall(r'<tr>(.*?)</tr>', html.split('<tbody>')[1].split('</tbody>')[0], re.S)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row.count('<td') == 3 for row in rows))
 
     def test_duplicate_payer_and_member_onboarding_detected(self):
         customer, source = make_customer('Existing', '123456789012', accounts=('210987654321',))
@@ -160,6 +229,35 @@ class OnboardingTests(TestCase):
         self.assertNotContains(response, '>Ready<')
         response = self.client.get('/onboarding/?q=1234&sort=state&dir=desc')
         self.assertContains(response, 'Ready')
+
+    def test_customer_directory_internal_and_external_sections(self):
+        internal = Customer.objects.create(name='Flentas')
+        external = Customer.objects.create(name='Gametion')
+        Customer.objects.create(name='Flentas partner')
+        response = self.client.get('/customers/')
+        self.assertEqual([r['customer'] for r in response.context['internal_rows']], [internal])
+        self.assertEqual({r['customer'].name for r in response.context['page']}, {'Gametion', 'Flentas partner'})
+        html = response.content.decode()
+        internal_html, external_html = html.split('<section class="panel" aria-labelledby="external-customers">')
+        self.assertIn('<th class="number">Customer budget</th>', internal_html)
+        self.assertNotIn('<th class="number">Customer budget</th>', external_html)
+        self.assertIn(str(external.pk), external_html)
+        self.assertNotIn(str(internal.pk), external_html)
+        self.assertIn('colspan="6"', external_html)
+        filtered = self.client.get('/customers/?q=Gametion')
+        self.assertEqual(filtered.context['internal_rows'], [])
+        self.assertEqual(filtered.context['customer_count'], 1)
+
+    def test_internal_customer_remains_visible_on_external_pages(self):
+        internal = Customer.objects.create(name=' fLeNtAs ')
+        for i in range(26):
+            Customer.objects.create(name=f'External {i:02d}')
+        response = self.client.get('/customers/?page=2')
+        self.assertEqual([r['customer'] for r in response.context['internal_rows']], [internal])
+        self.assertEqual(response.context['page'].paginator.count, 26)
+        self.assertEqual(response.context['customer_count'], 27)
+        self.assertContains(response, 'External 25')
+        self.assertContains(response, internal.name)
 
     def test_customer_directory_search_sort_pagination(self):
         for i in range(30):
