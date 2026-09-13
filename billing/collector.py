@@ -4,12 +4,14 @@ Baseline facts are DAILY costs grouped by LINKED_ACCOUNT and SERVICE. Each month
 published atomically; a failed month keeps its previous successful snapshot. Costs are
 stamped with the customer that owned the linked account on that day.
 """
+import json
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from botocore.exceptions import ClientError
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.utils import timezone
 from .aws import Meter, RequestBudgetExceeded, Session, paginate
@@ -414,7 +416,7 @@ def import_budgets(source, session=None, meter=None):
             actual_amount=to_decimal(actual.get('Amount')), actual_unit=actual.get('Unit', ''),
             forecast_amount=to_decimal(forecast.get('Amount')), forecast_unit=forecast.get('Unit', ''),
             calculated_at=b.get('LastUpdatedTime'), aws_updated_at=b.get('LastUpdatedTime'),
-            raw={k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in b.items() if k not in ('CalculatedSpend', 'BudgetLimit', 'TimePeriod', 'CostFilters', 'FilterExpression')},
+            raw=json.loads(json.dumps({k: v for k, v in b.items() if k not in ('CalculatedSpend', 'BudgetLimit', 'TimePeriod', 'CostFilters', 'FilterExpression')}, cls=DjangoJSONEncoder)),
             imported_at=now))
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
