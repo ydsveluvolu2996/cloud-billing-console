@@ -87,3 +87,20 @@ class AWSBudgetDisplayTests(TestCase):
         self.customer.name = 'External customer'
         self.customer.save()
         self.assertNotContains(self.client.get('/portfolio/', params), 'Configured budget')
+
+    def test_member_budget_credit_refund_exclusion_maps_without_service_budget(self):
+        self.source.kind = BillingSource.MEMBER_BUDGETS
+        self.source.save()
+        budget = self.snapshot(filters={'Not': {'Dimensions': {'Key': 'RECORD_TYPE', 'Values': ['Credit', 'Refund']}}})
+        self.snapshot('EC2-only', filters={'Dimensions': {'Key': 'SERVICE', 'Values': ['Amazon EC2']}})
+        self.assertEqual(account_snapshots([self.customer], self.month, 'USD')[(self.customer.pk, self.source.account_id)], [budget])
+
+    def test_budget_reader_verification_does_not_collect_inventory_or_costs(self):
+        self.source.kind = BillingSource.MEMBER_BUDGETS
+        self.source.save()
+        with patch('billing.scheduler.load_source', return_value=self.source), patch('billing.collector.verify_source', return_value={'budgets': True}), patch('billing.collector.discover_accounts') as discovery:
+            scheduler.handle_verify(Job(source=self.source))
+            self.assertEqual(scheduler.handle_discover(Job(source=self.source)), {'accounts': 0, 'mode': 'member_budgets'})
+            discovery.assert_not_called()
+        self.assertTrue(Job.objects.filter(source=self.source, kind='import_budgets').exists())
+        self.assertFalse(Job.objects.filter(source=self.source, kind='discover').exists())

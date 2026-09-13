@@ -4,6 +4,22 @@ from django.utils.dateparse import parse_datetime
 from .models import ImportedBudget, AccountAssignment, BillingSource
 
 
+def _charge_type_only(filters):
+    """Credit/refund exclusions still describe an account-wide cost budget."""
+    if not filters:
+        return True
+    if set(filters) == {'RecordType'}:
+        return True
+    if set(filters) == {'Dimensions'}:
+        return filters['Dimensions'].get('Key') == 'RECORD_TYPE'
+    if set(filters) == {'Not'}:
+        return _charge_type_only(filters['Not'])
+    for operator in ('And', 'Or'):
+        if set(filters) == {operator}:
+            return all(_charge_type_only(child) for child in filters[operator])
+    return False
+
+
 def account_snapshots(customers, month, currency, metric='unblended'):
     customers = list(customers)
     owned = {(r['customer_id'], r['account__account_id']) for r in AccountAssignment.objects.filter(customer__in=customers, end__isnull=True).values('customer_id', 'account__account_id')}
@@ -26,7 +42,7 @@ def account_snapshots(customers, month, currency, metric='unblended'):
             linked = dimensions.get('Values')
         if linked is not None:
             account = linked[0] if isinstance(linked, list) and len(linked) == 1 else None
-        elif budget.source.kind in (BillingSource.STANDALONE, BillingSource.MEMBER_BUDGETS) and not filters:
+        elif budget.source.kind in (BillingSource.STANDALONE, BillingSource.MEMBER_BUDGETS) and _charge_type_only(filters):
             account = budget.owning_account_id
         else:
             # Never assign an organization-wide payer budget to payer-own spend.

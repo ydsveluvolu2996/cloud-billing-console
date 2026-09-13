@@ -142,7 +142,8 @@ def handle_verify(job):
         message = collector.safe_error(exc)
         BillingSource.objects.filter(pk=source.pk).update(last_error=message)
         raise jobs.PermanentJobError(message)
-    request_discovery(source)
+    if source.collects_costs:
+        request_discovery(source)
     if capabilities.get('budgets'):
         jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:verified', source=source, priority=2)
     return {'capabilities': capabilities}
@@ -151,6 +152,8 @@ def handle_verify(job):
 @jobs.handler('discover')
 def handle_discover(job):
     source = load_source(job)
+    if not source.collects_costs:
+        return {'accounts': 0, 'mode': 'member_budgets'}
     try:
         found = collector.discover_accounts(source)
     except Exception as exc:
@@ -198,7 +201,10 @@ def handle_import_budgets(job):
         raise jobs.PermanentJobError('AWS budget read denied. Grant budgets:ViewBudget to this account connection.') from None
     caps = dict(source.capabilities, budgets=True, budgets_imported_at=timezone.now().isoformat())
     caps.pop('budgets_error', None)
-    BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(capabilities=caps)
+    updates = {'capabilities': caps}
+    if not source.collects_costs:
+        updates.update(last_error='', last_success=timezone.now())
+    BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(**updates)
     return {'budgets': count}
 
 
