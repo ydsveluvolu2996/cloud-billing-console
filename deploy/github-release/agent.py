@@ -206,7 +206,15 @@ class Agent:
         require('name="token"' in login and 'one-time-code' in login, 'MFA login control is missing')
         run(args + ['--fail', origin + '/static/app.js'])
 
+    def require_no_database_maintenance(self):
+        marker = self.root / '.deployment/postgres-maintenance.json'
+        if marker.exists():
+            phase = json.loads(marker.read_text()).get('phase')
+            require(phase in ('rehearsed', 'writers-reopened'),
+                    'Database maintenance is active; finish maintenance before a release')
+
     def activate(self):
+        self.require_no_database_maintenance()
         state = self.state()
         if state['phase'] == 'active':
             require(self.current.exists() and json.loads(self.current.read_text())['release_id'] == self.release_id, 'A newer release is active')
@@ -289,6 +297,7 @@ class Agent:
             raise
 
     def rollback(self):
+        self.require_no_database_maintenance()
         state = self.state()
         if state['phase'] == 'rolled_back':
             self.health()
