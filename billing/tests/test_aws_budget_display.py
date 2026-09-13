@@ -104,3 +104,8 @@ class AWSBudgetDisplayTests(TestCase):
             discovery.assert_not_called()
         self.assertTrue(Job.objects.filter(source=self.source, kind='import_budgets').exists())
         self.assertFalse(Job.objects.filter(source=self.source, kind='discover').exists())
+
+    def test_aws_metrics_selects_matching_cost_basis(self):
+        budget = self.snapshot(raw={'Metrics': ['AmortizedCost']})
+        self.assertEqual(account_snapshots([self.customer], self.month, 'USD'), {})
+        self.assertEqual(account_snapshots([self.customer], self.month, 'USD', 'amortized')[(self.customer.pk, '222222222222')], [budget])

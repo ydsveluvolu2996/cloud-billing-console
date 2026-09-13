@@ -32,8 +32,12 @@ def account_snapshots(customers, month, currency, metric='unblended'):
         end = parse_datetime(str(budget.time_period.get('End', '')))
         if (start and start.date() > timezone.now().date()) or (end and end.date() <= timezone.now().date()):
             continue
+        metrics = budget.raw.get('Metrics')
+        expected_metric = 'AmortizedCost' if metric == 'amortized' else 'UnblendedCost'
+        if metrics and set(metrics) != {expected_metric}:
+            continue
         cost_types = budget.raw.get('CostTypes') or {}
-        if cost_types.get('UseBlended') or bool(cost_types.get('UseAmortized')) != (metric == 'amortized'):
+        if not metrics and (cost_types.get('UseBlended') or bool(cost_types.get('UseAmortized')) != (metric == 'amortized')):
             continue
         filters = budget.filters or {}
         linked = filters.get('LinkedAccount')
