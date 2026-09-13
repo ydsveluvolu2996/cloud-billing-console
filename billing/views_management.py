@@ -192,7 +192,10 @@ def account_tree(customer, month, today, currency):
             account_budgets.setdefault(budget.account_id, []).append({
                 'budget': budget, 'amount': budget.amount_for(month),
                 'evaluation': evaluations.get(budget.pk), 'alarms': alarms.get(budget.pk, [])})
+    from .aws_budget_display import account_snapshots
+    imported = account_snapshots([customer], month, currency) if show_account_budgets else {}
     for account_id, entry in accounts.items():
+        entry['aws_budgets'] = imported.get((customer.pk, account_id), [])
         entry['configured_budgets'] = account_budgets.get(account_id, [])
     tree = []
     used = set()
@@ -693,7 +696,9 @@ def imported_budgets(request):
     query = request.GET.get('q', '').strip()
     if query:
         items = items.filter(Q(name__icontains=query) | Q(owning_account_id__icontains=query) | Q(source__customer__name__icontains=query))
-    return render(request, 'billing/imported_budgets.html', {'page': paginate(request, items), 'q': query, 'active_page': 'budgets'})
+    from .aws_budget_display import overview as aws_overview
+    coverage = aws_overview(Customer.objects.filter(name__iexact='Flentas'))
+    return render(request, 'billing/imported_budgets.html', {**coverage, 'page': paginate(request, items), 'q': query, 'active_page': 'budgets'})
 
 
 @staff_required

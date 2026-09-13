@@ -288,3 +288,31 @@ th.number .sort-link,th.number button{position:relative;gap:0}
 th.number .sort-link span,th.number button span{position:absolute;right:-13px}
 .customer-directory-wrap{max-height:none}.customer-directory-table{min-width:1050px}.customer-directory-table>thead>tr>th{position:static}.customer-directory-table>tbody>tr.customer-expansion>td{white-space:normal;padding:0 16px 16px}.customer-directory-table .row-actions{white-space:normal;flex-wrap:wrap;gap:8px 12px}.customer-directory-table .customer-name{white-space:normal;overflow-wrap:anywhere}.customer-directory-table .customer-cell{min-width:150px}.customer-directory-table .customer-cell small{white-space:normal;overflow-wrap:anywhere}
 [data-customer-tree]{width:100%;min-width:0;max-width:none}.portfolio-connection{margin:12px 0;padding:12px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--selected);border-radius:8px}.connection-meta{margin:0 0 10px;font-size:12px}.connection-meta p{padding:0 8px}.customer-account-wrap{max-height:480px;max-width:100%;border:1px solid var(--border);border-radius:6px}.customer-account-table{table-layout:fixed;min-width:600px}.customer-account-table.with-budgets{min-width:940px}.customer-account-table .account-id-col{width:25%}.customer-account-table .account-name-col{width:50%}.customer-account-table .account-cost-col{width:25%}.customer-account-table.with-budgets .account-id-col{width:17%}.customer-account-table.with-budgets .account-name-col{width:25%}.customer-account-table.with-budgets .account-cost-col{width:14%}.customer-account-table .account-budget-col{width:23%}.customer-account-table .account-alarm-col{width:21%}.customer-account-table td{vertical-align:top;border-bottom:1px solid var(--border)}.customer-account-table th{white-space:normal}.customer-account-table td small{display:block}.customer-account-table td:nth-child(2),.customer-account-table td:last-child,.customer-account-table td small{white-space:normal;overflow-wrap:anywhere}.customer-account-table td.number{white-space:nowrap}.customer-account-table tbody>tr:last-child>td{border-bottom:0}
+
+.account-budget small{display:block;white-space:normal;overflow-wrap:anywhere;max-width:230px;margin-left:auto}.account-budget{min-width:170px}.account-budget>div+div{margin-top:10px;padding-top:8px;border-top:1px solid var(--border)}
+
+/* Compact account controls; native disclosure remains usable without JavaScript. */
+.account-settings{border:1px solid var(--border);border-radius:var(--r-control);background:var(--surface);margin-top:8px}
+.account-settings>summary{display:flex;align-items:center;gap:10px;padding:10px;cursor:pointer;list-style:none;border-radius:var(--r-control);color:var(--text);font-size:12.5px;font-weight:600}
+.account-settings>summary::-webkit-details-marker{display:none}
+.account-settings>summary:hover{background:var(--soft)}
+.account-settings>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.account-settings svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.account-settings-icon{display:grid;place-items:center;background:var(--soft);color:var(--primary);width:32px;height:32px;border-radius:50%;flex:none}
+.account-settings-label{min-width:0;flex:1}.account-settings-label small{font-weight:400;color:var(--muted);overflow-wrap:anywhere}
+.account-settings-chevron{width:14px!important;transition:transform .15s}.account-settings[open] .account-settings-chevron{transform:rotate(180deg)}
+.account-settings-links{padding:4px 5px 6px;border-top:1px solid var(--border)}
+.account-settings-links a,.account-settings-links .logout{display:flex;align-items:center;gap:10px;min-height:40px;padding:9px 8px;font-size:12.5px;border-radius:6px;color:var(--text-2);text-decoration:none}
+.account-settings-links a:hover,.account-settings-links a[aria-current=page]{background:var(--soft);color:var(--deep)}
+.account-settings-links form{border-top:1px solid var(--border);margin:4px 0 0;padding-top:4px}
+
+/* One compact usage bar per account; extra budgets expand inside the same cell. */
+.account-budget .compact-budget{width:210px;max-width:100%;margin-left:auto;text-align:left;white-space:normal}
+.budget-usage-amount,.budget-usage-status{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-variant-numeric:tabular-nums}
+.budget-usage-amount{font-size:12px;line-height:1.4}.budget-usage-amount strong{color:var(--text);font-size:13px}.budget-usage-amount>span{color:var(--muted)}
+.budget-usage progress{display:block;width:100%;height:6px;margin:6px 0;border:0;border-radius:5px;overflow:hidden;appearance:none;background:var(--border);color:var(--primary);accent-color:var(--primary)}
+.budget-usage progress::-webkit-progress-bar{background:var(--border);border-radius:5px}.budget-usage progress::-webkit-progress-value{background:var(--primary);border-radius:5px}.budget-usage progress::-moz-progress-bar{background:var(--primary);border-radius:5px}
+.budget-usage-status{font-size:11px;line-height:1.4;color:var(--muted)}.budget-usage--breached .budget-usage-status{color:#b91c1c}.budget-usage--warning .budget-usage-status{color:#92400e}
+.budget-usage--breached progress::-webkit-progress-value{background:#dc2626}.budget-usage--breached progress::-moz-progress-bar{background:#dc2626}.budget-usage--warning progress::-webkit-progress-value{background:#d97706}.budget-usage--warning progress::-moz-progress-bar{background:#d97706}.budget-usage--unknown progress::-webkit-progress-value{background:var(--muted)}.budget-usage--unknown progress::-moz-progress-bar{background:var(--muted)}
+.compact-budget-details{margin-top:4px}.compact-budget-details>summary{cursor:pointer;color:var(--primary);font-size:11px;line-height:1.5}.compact-budget-list{margin-top:8px;max-height:260px;overflow-y:auto}.compact-budget-list>div{padding:8px 0;border-top:1px solid var(--border)}.compact-budget-list a{display:block;font-size:11px;overflow-wrap:anywhere;margin-bottom:4px}.account-budget .compact-budget-list small{font-size:10px;margin:0 0 4px}.compact-budget-empty{font-size:12px;color:var(--muted)}
+.account-cost-table .account-budget{min-width:230px}.account-cost-table th.account-budget-header{min-width:230px}

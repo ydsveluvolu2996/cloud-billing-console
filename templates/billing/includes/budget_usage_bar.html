@@ -1,0 +1,6 @@
+{% load money %}
+<div class="budget-usage budget-usage--{{ item.tone }}">
+<div class="budget-usage-amount" title="Budget limit: {{ item.limit|money }} {{ item.currency }}"><strong>{{ item.actual|price:item.currency }}</strong><span>of {{ item.limit|price:item.currency }}</span></div>
+<progress max="100" value="{{ item.fill }}" aria-label="Budget utilization" aria-valuetext="{{ item.actual|price:item.currency }} used of {{ item.limit|price:item.currency }}; {{ item.status }}">{{ item.fill }}%</progress>
+<div class="budget-usage-status"><span>{{ item.status }}</span>{% if item.percent != None %}<span>{{ item.percent|floatformat:0 }}%</span>{% endif %}</div>
+</div>

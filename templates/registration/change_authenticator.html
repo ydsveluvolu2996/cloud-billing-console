@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block title %}Change authenticator · Cloud Billing{% endblock %}{% block content %}
+<section class="auth-card"><h1>{% if recovery_codes %}Authenticator changed{% else %}Change authenticator{% endif %}</h1>
+{% if recovery_codes %}<p>Your new authenticator is active. Other sessions and previous recovery codes have been revoked.</p><p>Save these new recovery codes privately. Each works once and they will not be shown again.</p><ul>{% for code in recovery_codes %}<li><code>{{ code }}</code></li>{% endfor %}</ul><a class="button" href="/">Continue to dashboard</a>
+{% else %}
+{% if enrolling %}<p>Add this setup key to Google Authenticator, Microsoft Authenticator, or another time-based authenticator. Enter its six-digit code below within five minutes.</p><label for="new-key">New authenticator setup key</label><textarea id="new-key" readonly rows="3">{{ enrollment_key }}</textarea><p>Your current authenticator stays active until you confirm the new one. Keep this key private.</p>
+{% else %}<p>Verify your current password and authenticator code to set up a replacement. If you just signed in, wait for the next six-digit code.</p><p>If you cannot access your authenticator or do not have a local password, contact your administrator for recovery.</p>{% endif %}
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}<form method="post">{% csrf_token %}{{ form.as_p }}<button class="button" type="submit">{% if enrolling %}Activate new authenticator{% else %}Verify and continue{% endif %}</button></form>
+{% if enrolling %}<form method="post">{% csrf_token %}<button class="text-button" name="action" value="cancel">Cancel replacement</button></form>{% endif %}{% endif %}</section>
+{% endblock %}
