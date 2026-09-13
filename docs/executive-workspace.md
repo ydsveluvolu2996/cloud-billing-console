@@ -7,3 +7,15 @@
 - **My access** (`/my-access/`): effective customer/account scope, MFA enrollment and session revocation. Portfolio administrators can select **Create customer login** to prefill a read-only viewer for one customer, then review the existing user form before saving. Each user receives their own login and enrolls MFA. Existing customer-role external invitation/readiness gates are preserved; no customers, identities or access grants are automatically created by this release.
 
 Every view uses the existing account/customer authorization boundary and web database permissions. Read-only invoice previews restore read scope for POST without granting write capability. Account-restricted insights use generic billing-feed labels to avoid exposing a shared payer's identity. PostgreSQL runtime tests cover all new pages and report exports. No schema migration is required.
+
+## Monthly review workflow
+
+Executive insights accepts a billing month. Current-month comparisons use equal completed-day windows; closed months compare full calendar months and show the different month lengths. Only current-month data with complete, fresh coverage can produce a run-rate forecast. The takeaway names observed cost contributors without inventing an operational cause. The export retains month/customer/currency; finer account/source/service scopes and amortized costs use the matching CSV export.
+
+Reconciliation supports **Compare and download Excel** using the same uploaded file and filters. The result workbook contains a summary and account decisions with next actions. Invoice/AWS totals cover the identical uploaded account set; authorized accounts not uploaded are listed separately. A confirmed total difference is withheld when any uploaded account lacks complete AWS data. Uploads remain bounded and transient; users must reselect their file after a preview if they want to download it.
+
+Budget controls show recorded responsible owners, local actual/forecast thresholds, and projected overruns. An absent owner is explicitly unassigned. Imported AWS budgets count as account limits only when the snapshot matches the selected monthly currency/cost basis and account-wide scope. AWS notification settings are not imported or changed. Owner labels do not subscribe anyone to notifications.
+
+The sidebar groups My access, password/authenticator changes, operational alerts, permitted user administration and sign-out under a native **Account & settings** disclosure. Existing role-based visibility, CSRF-protected logout and authorization remain unchanged. Keyboard users can expand the disclosure and close it with Escape.
+
+Imported-budget connection status is compact, highlights permission/staleness issues, and expands to show snapshot counts and last budget import timestamps. A recent cost sync does not disguise an old budget snapshot.

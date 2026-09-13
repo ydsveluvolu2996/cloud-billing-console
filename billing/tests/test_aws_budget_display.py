@@ -109,3 +109,18 @@ class AWSBudgetDisplayTests(TestCase):
         budget = self.snapshot(raw={'Metrics': ['AmortizedCost']})
         self.assertEqual(account_snapshots([self.customer], self.month, 'USD'), {})
         self.assertEqual(account_snapshots([self.customer], self.month, 'USD', 'amortized')[(self.customer.pk, '222222222222')], [budget])
+
+    def test_connection_freshness_uses_budget_snapshot_not_cost_import(self):
+        from billing.aws_budget_display import overview
+        self.source.capabilities = {'budgets': True}
+        self.source.save()
+        old = timezone.now() - BillingSource.STALE_AFTER - timedelta(hours=1)
+        budget = self.snapshot(imported_at=old)
+        result = overview([self.customer])
+        row = result['aws_budget_connections'][0]
+        self.assertEqual(row['last_import'], budget.imported_at)
+        self.assertEqual(row['count'], 1)
+        self.assertTrue(row['attention'])
+        self.assertEqual(result['aws_budget_attention_count'], 1)
+        self.assertIn('stale', row['state'])
+        self.assertGreater(self.source.last_success, row['last_import'])

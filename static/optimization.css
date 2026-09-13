@@ -10,3 +10,6 @@
 .savings-table{min-width:1120px}
 .savings-table th:nth-child(1){width:17%}.savings-table th:nth-child(2){width:17%}.savings-table th:nth-child(3){width:12%}.savings-table th:nth-child(4){width:12%}.savings-table th:nth-child(5){width:28%}.savings-table th:nth-child(6){width:14%}
 .optimization-page .filter-row{flex-wrap:wrap}
+.budget-control-table{min-width:1080px}
+.optimization-import-status{padding:16px 24px;color:var(--text-2)}
+.optimization-import-status summary{cursor:pointer;font-weight:600}

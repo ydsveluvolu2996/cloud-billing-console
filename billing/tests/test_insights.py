@@ -98,3 +98,43 @@ class ExecutiveInsightsTests(TestCase):
             self.source.save()
             result = executive_insights({}, self.today)
             self.assertIsNone(result['forecast'])
+
+    def test_closed_month_includes_last_days_and_never_forecasts(self):
+        cost(self.source, date(2026, 7, 1), 80)
+        cost(self.source, date(2026, 8, 31), 25)
+        CollectionPeriod.objects.create(source=self.source, month=date(2026, 7, 1), status='complete', first_day=date(2026, 7, 1), last_day=date(2026, 7, 31), estimated=False)
+        CollectionPeriod.objects.filter(month=date(2026, 8, 1)).update(last_day=date(2026, 8, 31), estimated=False)
+        result = executive_insights({'month':'2026-08', 'customer':str(self.customer.pk)}, self.today)
+        self.assertEqual(result['mtd'], 125)
+        self.assertEqual(result['total'], 125)
+        self.assertEqual(result['delta'], 45)
+        self.assertIsNone(result['forecast'])
+        self.assertEqual(result['end'], date(2026, 8, 31))
+        self.assertEqual(result['prior_end'], date(2026, 7, 31))
+        self.assertIn('increased by 45.00 USD', result['takeaway'])
+        self.assertIn('Amazon EC2', result['takeaway'])
+        from urllib.parse import parse_qs, urlparse
+        self.assertEqual(parse_qs(urlparse(result['export_url']).query), {'month':['2026-08'], 'customer':[str(self.customer.pk)], 'currency':['USD']})
+
+    def test_closed_months_with_different_lengths_use_full_calendar_month(self):
+        result = executive_insights({'month':'2026-03'}, self.today)
+        self.assertEqual(result['end'], date(2026, 3, 31))
+        self.assertEqual(result['prior_end'], date(2026, 2, 28))
+
+    def test_invalid_or_future_month_rejected(self):
+        for value in ('2026-13', '2026-1', '2026-09-01', '2026-10', ''):
+            with self.subTest(month=value), self.assertRaises(ValueError):
+                executive_insights({'month':value}, self.today)
+
+    def test_export_for_narrow_scope_preserves_account_and_metric(self):
+        from urllib.parse import parse_qs, urlparse
+        result = executive_insights({'month':'2026-08','customer':str(self.customer.pk),'account':self.source.account_id,'metric':'amortized'}, self.today)
+        self.assertTrue(result['export_url'].startswith('/export/?'))
+        query = parse_qs(urlparse(result['export_url']).query)
+        self.assertEqual(query['account'], [self.source.account_id])
+        self.assertEqual(query['metric'], ['amortized'])
+        self.assertEqual(query['end'], ['2026-08-31'])
+
+    def test_minimum_calendar_month_is_rejected_without_underflow(self):
+        with self.assertRaises(ValueError):
+            executive_insights({'month': '0001-01'}, self.today)

@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 from dateutil.relativedelta import relativedelta
 from django.db.models import Sum, Max, Count, Q
 from django.utils import timezone
+from django.urls import reverse
 from . import budgets, scope
 from .models import AccountAssignment, Alert, Budget, BudgetEvaluation, CollectionPeriod, Cost
 
@@ -43,6 +44,65 @@ def review_action(service):
     return 'Service cost review', 'Open the account cost breakdown and inspect usage drivers, business ownership and resource utilization before making changes.'
 
 
+def owner_details(customer, account_id='', explicit='', assignments=()):
+    """Use recorded ownership only; a billing contact is not an alert recipient."""
+    owner, origin = explicit.strip(), 'Budget owner'
+    if not owner and account_id:
+        assignment = next((a for a in assignments if a.customer_id == customer.pk and a.account.account_id == account_id), None)
+        owner = str((assignment.metadata or {}).get('owner', '')).strip() if assignment else ''
+        origin = 'Account owner'
+    if not owner and not account_id:
+        owner, origin = customer.owner.strip(), 'Customer owner'
+    return {'owner': owner or 'Unassigned', 'owner_origin': origin if owner else '',
+            'owner_assigned': bool(owner),
+            'owner_url': (reverse('account_detail', args=[account_id]) + '?' + urlencode({'customer': customer.pk})) if account_id else reverse('customer_detail', args=[customer.pk])}
+
+
+def imported_controls(customers, month, currency, metric, selected, assignments):
+    from .aws_budget_display import overview, account_snapshots, _charge_type_only
+    imported = overview(customers)
+    mapped = account_snapshots(customers, month, currency, metric)
+    account_by_pk = {b.pk: key for key, values in mapped.items() for b in values}
+    rows = []
+    covered = set()
+    for b in imported['aws_budgets']:
+        if b.imported_at.date().replace(day=1) != month or b.limit_unit != currency or b.budget_type != 'COST' or b.time_unit != 'MONTHLY':
+            continue
+        metrics, types = b.raw.get('Metrics'), b.raw.get('CostTypes') or {}
+        expected = 'AmortizedCost' if metric == 'amortized' else 'UnblendedCost'
+        if (metrics and set(metrics) != {expected}) or (not metrics and (types.get('UseBlended') or bool(types.get('UseAmortized')) != (metric == 'amortized'))):
+            continue
+        account_key = account_by_pk.get(b.pk)
+        if selected.account_id and (not account_key or account_key[1] != selected.account_id):
+            continue
+        if selected.source and b.source_id != selected.source.pk:
+            continue
+        amount = b.limit_amount
+        actual = b.actual_amount if b.actual_unit == currency else None
+        forecast = b.forecast_amount if b.forecast_unit == currency else None
+        remaining_filters = dict(b.filters or {})
+        remaining_filters.pop('LinkedAccount', None)
+        if remaining_filters.get('Dimensions', {}).get('Key') in ('LINKED_ACCOUNT', 'LinkedAccount'):
+            remaining_filters.pop('Dimensions')
+        account_wide = _charge_type_only(remaining_filters)
+        if account_key and account_wide and amount is not None and amount > 0:
+            covered.add(account_key)
+        account_id = account_key[1] if account_key else ''
+        rows.append({'snapshot': b, 'account_id': account_id, 'account_wide': account_wide,
+            'actual_percent': actual / amount * 100 if actual is not None and amount else None,
+            'actual_overrun': max(actual - amount, Decimal(0)) if actual is not None and amount is not None else None,
+            'forecast_overrun': max(forecast - amount, Decimal(0)) if forecast is not None and amount is not None else None,
+            'forecast_percent': forecast / amount * 100 if forecast is not None and amount else None,
+            **owner_details(b.source.customer, account_id, assignments=assignments)})
+    connections = imported['aws_budget_connections']
+    if selected.source:
+        connections = [r for r in connections if r['source'].pk == selected.source.pk]
+    if selected.account_id:
+        connections = [r for r in connections if r['source'].account_id == selected.account_id or any(a.account.source_id == r['source'].pk and a.account.account_id == selected.account_id for a in assignments)]
+    rows.sort(key=lambda r: (-(r['actual_overrun'] or Decimal(0)), -(r['forecast_overrun'] or Decimal(0)), r['snapshot'].name))
+    return rows, covered, connections
+
+
 def report(month, currency, metric, selected, show_budgets=True, today=None):
     today = today or timezone.localdate()
     end = min(month + relativedelta(months=1), today + timedelta(days=1))
@@ -65,6 +125,7 @@ def report(month, currency, metric, selected, show_budgets=True, today=None):
         # Source views must not reveal whole-customer budgets or unrelated accounts.
         configured = configured.filter(scope=Budget.SOURCE, source=selected.source)
     configured = list(configured.select_related('customer', 'source', 'project').prefetch_related('amounts'))
+    owner_assignments = list(AccountAssignment.objects.filter(customer__in=internal, start__lte=today).filter(Q(end__isnull=True) | Q(end__gt=today)).select_related('account'))
     rows = []
     now = timezone.now()
     for budget in configured:
@@ -96,21 +157,29 @@ def report(month, currency, metric, selected, show_budgets=True, today=None):
                 status = 'Within budget'
         evaluation = BudgetEvaluation(budget=budget, month=month, amount=amount, actual=actual,
             forecast=forecast, forecast_method=method, status=status, data_status=data_state)
-        rows.append({'budget': budget, 'evaluation': evaluation})
+        rows.append({'budget': budget, 'evaluation': evaluation,
+            'forecast_overrun': max(forecast - amount, Decimal(0)) if forecast is not None and amount is not None else None,
+            'forecast_threshold_reached': forecast is not None and amount is not None and forecast >= amount * budget.forecast_threshold / Decimal(100),
+            **owner_details(budget.customer, budget.account_id if budget.scope == Budget.ACCOUNT else '', budget.owner, owner_assignments)})
     rows.sort(key=lambda row: (budgets.STATUS_ORDER.index(row['evaluation'].status), row['budget'].name))
-    configured_accounts = {b.account_id for b in configured if b.scope == Budget.ACCOUNT and b.amount_for(month) is not None}
+    imported_rows, imported_accounts, imported_connections = imported_controls(internal, month, currency, metric, selected, owner_assignments)
+    configured_accounts = {(b.customer_id, b.account_id) for b in configured if b.scope == Budget.ACCOUNT and b.amount_for(month) is not None} | imported_accounts
     assignments = AccountAssignment.objects.filter(customer__in=internal, start__lt=end).filter(
         Q(end__isnull=True) | Q(end__gt=month))
     if selected.account_id:
         assignments = assignments.filter(account__account_id=selected.account_id)
     if selected.source:
         assignments = assignments.none()
-    missing = list(assignments.exclude(account__account_id__in=configured_accounts).values(
-        'customer_id', 'customer__name', 'account__account_id').distinct().order_by('account__account_id'))
-    from .aws_budget_display import overview
-    imported = overview(internal)
+    missing = [r for r in assignments.values('customer_id', 'customer__name', 'account__account_id').distinct().order_by('account__account_id')
+               if (r['customer_id'], r['account__account_id']) not in configured_accounts]
+    owner_by_budget = {r['budget'].pk: r for r in rows}
+    alerts = list(Alert.objects.filter(budget__in=configured, month=month).select_related('budget')[:50])
+    for alert in alerts:
+        alert.responsible_owner = owner_by_budget[alert.budget_id]['owner']
+        alert.owner_origin = owner_by_budget[alert.budget_id]['owner_origin']
+    imported = {'imported_rows': imported_rows[:20], 'imported_total': len(imported_rows), 'aws_budget_connections': imported_connections}
     return {**imported, 'month': month, 'period_end': end - timedelta(days=1), 'currency': currency, 'metric': metric,
         'selected': selected, 'opportunities': opportunities, 'budget_rows': rows, 'missing_budgets': missing,
-        'show_budgets': bool(internal), 'alerts': Alert.objects.filter(budget__in=configured, month=month).select_related('budget')[:50],
+        'show_budgets': bool(internal), 'alerts': alerts,
         'breach_count': sum(r['evaluation'].status in ('Over budget', 'Forecast over budget') for r in rows),
         'unverified_count': sum(r['evaluation'].data_status != 'complete' for r in rows)}

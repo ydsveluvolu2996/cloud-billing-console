@@ -88,3 +88,59 @@ class MonthlyWorkbookTests(TestCase):
         data = rendered.call_args.args[2]
         self.assertNotIn('error', data)
         self.assertEqual(data['rows'][0]['account_id'], '012345678901')
+
+    def test_reconciliation_excel_download_is_read_scoped_and_provisional(self):
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory, override_settings
+        from billing.access import Access, context
+        from billing.views_reconciliation import reconciliation
+        customer, source = make_customer('Export customer', '012345678901', accounts=['999999999999'])
+        cost(source, date(2026,8,1), '10')
+        cost(source, date(2026,8,1), '999', account_id='999999999999')
+        user = User.objects.create_user('export-reader')
+        access = Access(user.pk, user.username, False, (customer.pk,), (), {customer.pk:['012345678901']}, write=True)
+        def request_for(account):
+            upload = SimpleUploadedFile('invoice.csv', f'account_id,month,currency,amount\n{account},2026-08,USD,10'.encode())
+            request = RequestFactory().post('/reconciliation/', {'month':'2026-08', 'customer':str(customer.pk), 'currency':'USD', 'invoice':upload, 'action':'export'})
+            request.user = user
+            return request
+        with override_settings(ENFORCE_CUSTOMER_AUTHORIZATION=True), context(access):
+            response = reconciliation(request_for('012345678901'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('attachment', response['Content-Disposition'])
+        self.assertIn('no-store', response['Cache-Control'])
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            summary = archive.read('xl/worksheets/sheet1.xml')
+            details = archive.read('xl/worksheets/sheet2.xml')
+        self.assertIn(b'Provisional / incomplete', summary)
+        self.assertIn(b'012345678901', details)
+        self.assertNotIn(b'999999999999', details)
+        self.assertIn(b'Wait for complete AWS collection', details)
+        with override_settings(ENFORCE_CUSTOMER_AUTHORIZATION=True), context(access):
+            denied = reconciliation(request_for('999999999999'))
+        self.assertNotIn('Content-Disposition', denied)
+        self.assertContains(denied, 'outside the selected customer')
+
+    def test_export_requires_authentication(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+        from billing.views_reconciliation import reconciliation
+        request = RequestFactory().post('/reconciliation/', {'action':'export'})
+        request.user = AnonymousUser()
+        self.assertEqual(reconciliation(request).status_code, 302)
+
+
+class ReconciliationSummaryTests(SimpleTestCase):
+    def test_total_compares_uploaded_accounts_and_withholds_incomplete_difference(self):
+        from billing.invoice_reconciliation import reconciliation_summary
+        rows = [dict(invoice=Decimal(12), aws=Decimal(10), state='Complete', status='Difference'),
+                dict(invoice=None, aws=Decimal(800), state='Complete', status='Not in upload')]
+        result = reconciliation_summary(rows)
+        self.assertEqual(result['aws_total'], Decimal(10))
+        self.assertEqual(result['difference_total'], Decimal(2))
+        self.assertEqual(result['not_uploaded'], 1)
+        rows[0]['state'] = 'Partial'
+        rows[0]['status'] = 'AWS data incomplete'
+        self.assertIsNone(reconciliation_summary(rows)['difference_total'])
+        rows[0]['aws'] = None
+        self.assertIsNone(reconciliation_summary(rows)['aws_total'])

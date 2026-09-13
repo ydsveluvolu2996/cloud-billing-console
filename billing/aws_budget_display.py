@@ -63,6 +63,9 @@ def overview(customers):
     snapshots = list(ImportedBudget.objects.filter(source__customer__in=customers).select_related('source'))
     for budget in snapshots:
         budget.snapshot_stale = bool(budget.source.capabilities.get('budgets_error')) or timezone.now() - budget.imported_at > BillingSource.STALE_AFTER
+    snapshots_by_source = {}
+    for budget in snapshots:
+        snapshots_by_source.setdefault(budget.source_id, []).append(budget)
     connections = []
     for source in BillingSource.objects.filter(customer__in=customers, enabled=True):
         if 'budgets' not in source.approved_capabilities:
@@ -73,5 +76,12 @@ def overview(customers):
             state = 'Automatic import enabled'
         else:
             state = 'Waiting for budget permission check'
-        connections.append({'source': source, 'state': state})
-    return {'aws_budgets': snapshots, 'aws_budget_connections': connections}
+        source_snapshots = snapshots_by_source.get(source.pk, [])
+        last_import = max((b.imported_at for b in source_snapshots), default=None)
+        attention = state != 'Automatic import enabled' or any(b.snapshot_stale for b in source_snapshots)
+        if state == 'Automatic import enabled' and any(b.snapshot_stale for b in source_snapshots):
+            state = 'Budget snapshots stale — check collection'
+        connections.append({'source': source, 'state': state, 'count': len(source_snapshots),
+                            'last_import': last_import, 'attention': attention})
+    return {'aws_budgets': snapshots, 'aws_budget_connections': connections,
+            'aws_budget_attention_count': sum(row['attention'] for row in connections)}

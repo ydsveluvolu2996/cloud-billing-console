@@ -110,8 +110,52 @@ def reconcile(rows, uploaded):
         status = ('Not in upload' if invoice is None else 'AWS data incomplete' if not complete else
                   'Matched' if abs(difference) <= Decimal('.01') else 'Difference')
         result.append({'account_id': account, 'customer': r['customer'], 'name': r['name'], 'invoice': invoice,
-                       'aws': aws, 'difference': difference, 'state': r['current']['state'], 'status': status})
+                       'aws': aws, 'difference': difference, 'state': r['current']['state'], 'status': status, 'next_action': NEXT_ACTIONS[status]})
     return result
+
+
+NEXT_ACTIONS = {
+    'Matched': 'No amount difference above tolerance. Check invoice taxes and agreed commercial terms before approval.',
+    'Difference': 'Review credits, taxes, reseller margin and adjustments with the billing owner. Positive difference means invoice exceeds AWS.',
+    'AWS data incomplete': 'Wait for complete AWS collection or resolve the sync issue, then compare again. Do not approve from this provisional amount.',
+    'Not in upload': 'Add this account to the invoice file, or confirm that it is intentionally excluded from this invoice.',
+}
+
+
+def reconciliation_summary(rows):
+    """Totals compare the identical uploaded account set; unavailable AWS never becomes zero."""
+    submitted = [row for row in rows if row['invoice'] is not None]
+    complete = all(row['state'] == 'Complete' for row in submitted)
+    invoice_total = sum((row['invoice'] for row in submitted), Decimal(0))
+    known = [row['aws'] for row in submitted if row['aws'] is not None]
+    aws_total = sum(known, Decimal(0)) if len(known) == len(submitted) else None
+    return {
+        'invoice_total': invoice_total, 'uploaded_count': len(submitted),
+        'aws_total': aws_total, 'totals_complete': complete,
+        'difference_total': invoice_total - aws_total if complete and aws_total is not None else None,
+        'matched': sum(row['status'] == 'Matched' for row in rows),
+        'differences': sum(row['status'] == 'Difference' for row in rows),
+        'incomplete': sum(row['status'] == 'AWS data incomplete' for row in rows),
+        'not_uploaded': sum(row['status'] == 'Not in upload' for row in rows),
+    }
+
+
+def result_sheets(rows, summary, customer, month, currency, generated_at):
+    overview = [['Invoice reconciliation', 'Value'],
+        ['Customer', customer.name], ['Billing month', month.strftime('%Y-%m')], ['Currency', currency],
+        ['Generated at (UTC)', generated_at.isoformat()], ['AWS metric', 'Unblended cost'],
+        ['Uploaded accounts', summary['uploaded_count']], ['Uploaded invoice total', summary['invoice_total']],
+        ['AWS total for uploaded accounts', summary['aws_total']], ['Confirmed invoice minus AWS total', summary['difference_total']],
+        ['AWS total status', 'Complete' if summary['totals_complete'] else 'Provisional / incomplete'],
+        ['Matched accounts', summary['matched']], ['Accounts with differences', summary['differences']],
+        ['Uploaded accounts with incomplete AWS data', summary['incomplete']], ['Authorized accounts not in upload', summary['not_uploaded']],
+        ['Match tolerance', Decimal('0.01')],
+        ['Interpretation', 'Totals cover uploaded accounts only. Blank totals are unavailable, not zero. Differences use invoice minus AWS.'],
+        ['Approval', 'This report is a comparison, not invoice approval. Confirm taxes, margins, credits and agreed commercial terms.']]
+    details = [['AWS account ID', 'Account', 'Currency', 'Invoice', 'AWS unblended', 'Invoice minus AWS', 'AWS coverage', 'Result', 'Next action']]
+    for row in rows:
+        details.append([row['account_id'], row['name'], currency, row['invoice'], row['aws'], row['difference'], row['state'], row['status'], NEXT_ACTIONS[row['status']]])
+    return [('Reconciliation summary', overview), ('Reconciliation accounts', details)]
 
 
 def workbook(sheets):
@@ -126,6 +170,10 @@ def workbook(sheets):
         for index, (name, rows) in enumerate(sheets, 1):
             summary = name == "Executive summary"
             widths = [30, 26, 24, 20, 20, 20, 60] if summary else [30, 24, 28, 22, 22, 22, 65] if name == "Service changes" else [30, 34, 22, 16, 20, 20, 20, 20, 18, 24, 24, 45]
+            if name == 'Reconciliation summary':
+                widths = [48, 95]
+            elif name == 'Reconciliation accounts':
+                widths = [22, 36, 14, 20, 20, 22, 26, 26, 85]
             columns = "".join(f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>' for i, width in enumerate(widths, 1))
             freeze = 7 if summary else 1
             cells = []
@@ -140,7 +188,7 @@ def workbook(sheets):
                     else:
                         clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(value))
                         content.append(f'<c r="{ref}" s="{1 if number == 1 or (summary and number == 7) else 0}" t="inlineStr"><is><t xml:space="preserve">{escape(clean)}</t></is></c>')
-                height = ' ht="60" customHeight="1"' if summary and number in (5, 6) else ' ht="32" customHeight="1"'
+                height = ' ht="60" customHeight="1"' if (summary and number in (5, 6)) or name.startswith('Reconciliation') else ' ht="32" customHeight="1"'
                 cells.append(f'<row r="{number}"{height}>{"".join(content)}</row>')
             archive.writestr(f'xl/worksheets/sheet{index}.xml', f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="{freeze}" topLeftCell="A{freeze+1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>{columns}</cols><sheetData>' + ''.join(cells) + '</sheetData></worksheet>')
     return output.getvalue()

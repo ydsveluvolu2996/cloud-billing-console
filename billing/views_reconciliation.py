@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render
+from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 from . import alliance
@@ -13,7 +14,7 @@ from .models import Customer, Cost
 from django.db.models import Sum
 from django.db.models.functions import TruncMonth
 from dateutil.relativedelta import relativedelta
-from .invoice_reconciliation import HEADERS, parse_upload, reconcile, workbook
+from .invoice_reconciliation import HEADERS, parse_upload, reconcile, workbook, reconciliation_summary, result_sheets
 from .web import audit
 
 
@@ -55,10 +56,12 @@ def reconciliation(request):
             uploaded = parse_upload(request.FILES['invoice'], month, currency)
             data = alliance.summary(month, currency, threshold, customer)
             context['rows'] = reconcile(data['rows'], uploaded)
-            context['matched'] = sum(r['status'] == 'Matched' for r in context['rows'])
-            context['differences'] = sum(r['status'] == 'Difference' for r in context['rows'])
-            context['incomplete'] = sum(r['status'] == 'AWS data incomplete' for r in context['rows'])
-            context['invoice_total'] = sum(uploaded.values(), Decimal(0))
+            context.update(reconciliation_summary(context['rows']))
+            context['generated_at'] = timezone.now()
+            if request.POST.get('action') == 'export':
+                audit(request, 'Invoice reconciliation exported', customer=customer, month=str(month), currency=currency, accounts=context['uploaded_count'])
+                return download('invoice-reconciliation-'+month.strftime('%Y-%m'), result_sheets(
+                    context['rows'], context, customer, month, currency, context['generated_at']))
         except ValueError as exc:
             context['error'] = str(exc)
     return render(request, 'billing/reconciliation.html', context)
