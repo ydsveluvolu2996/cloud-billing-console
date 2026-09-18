@@ -20,6 +20,16 @@ from billing.tests.helpers import make_customer
 @override_settings(ONBOARDING_BROKER_FUNCTION='test-broker', RUNTIME_ROLE='admin', AWS_REGION='ap-south-1',
                    COLLECTOR_ROLE_ARN='arn:aws:iam::999999999999:role/CloudBillingCollector')
 class ActivationTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        if connection.vendor == 'postgresql':
+            # Install production capabilities before creating any rows. Django
+            # defers FK triggers inside TestCase; ALTER TABLE after fixtures is
+            # correctly rejected by PostgreSQL while those events are pending.
+            with connection.cursor() as cursor:
+                cursor.execute((Path(__file__).parents[2] / 'deploy/database-roles.sql').read_text())
+
     def setUp(self):
         self.user = User.objects.create_superuser('activation-admin', password='test-only-activation-password')
         self.profile = UserSecurity.objects.create(user=self.user, portfolio_access=True)
@@ -37,9 +47,6 @@ class ActivationTests(TestCase):
         self.settings_override = override_settings(COLLECTOR_ALLOWLIST_FILE=str(self.path))
         self.settings_override.enable()
         self.addCleanup(self.settings_override.disable)
-        if connection.vendor == 'postgresql':
-            with connection.cursor() as cursor:
-                cursor.execute((Path(__file__).parents[2] / 'deploy/database-roles.sql').read_text())
 
     def request(self, user=None, **kwargs):
         user = user or self.user

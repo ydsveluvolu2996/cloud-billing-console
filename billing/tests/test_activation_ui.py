@@ -1,6 +1,8 @@
 """Dashboard onboarding boundaries and the customer administrator handoff."""
 import json
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from billing.forms import SourceForm
@@ -13,7 +15,19 @@ from billing.tests.helpers import make_customer, TEST_STORAGES
                    COLLECTOR_ROLE_ARN='arn:aws:iam::111111111111:role/Collector',
                    ONBOARDING_BROKER_FUNCTION='test-onboarding-broker')
 class ActivationUiTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        if connection.vendor == 'postgresql':
+            # Production installs the guarded request function with the runtime
+            # policies. Install it before fixtures create deferred FK events.
+            with connection.cursor() as cursor:
+                cursor.execute((settings.BASE_DIR / 'deploy/database-roles.sql').read_text())
+
     def setUp(self):
+        self.database_settings = override_settings(DATABASE_RLS_ENABLED=connection.vendor == 'postgresql')
+        self.database_settings.enable()
+        self.addCleanup(self.database_settings.disable)
         self.customer, self.source = make_customer('Single member customer', '123456789012', kind='standalone', connected=False)
         self.source.role_arn = self.source.expected_role_arn
         self.source.approved_capabilities = ['budgets']
