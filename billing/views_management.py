@@ -381,6 +381,8 @@ def source_detail(request, pk):
     if not activation_status['pending'] and collection['collection_pending']:
         data_scope = 'costs and selected budgets' if source.collects_costs else 'AWS budgets'
         activation_status = {'label': collection['status'], 'description': f'Your pull of {data_scope} is queued or running. You can leave this page; progress is saved.', 'pending': True}
+    elif not activation_status['pending'] and collection['status'] == 'Needs attention':
+        activation_status = {'label': 'Needs attention', 'description': collection['error'], 'pending': False}
     return render(request, 'billing/source_detail.html', {
         **collection, 'can_manage_source': True,
         'source': source, 'customer': source.customer, 'form': form, 'active_page': 'customers', 'steps': CONNECTION_SETUP_STEPS, 'step': step,

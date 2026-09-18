@@ -79,3 +79,15 @@ class CurrentCollectionStatusTests(TestCase):
         state = snapshot(self.source, [failed])
         self.assertEqual(state['status'], 'Needs attention')
         self.assertEqual(state['error'], 'Current budget error')
+
+    def test_failed_first_pull_shows_actionable_failure_and_remains_retryable(self):
+        self.source.initial_import_done = False
+        self.source.last_success = None
+        self.source.last_error = 'Older general error'
+        self.source.save(update_fields=['initial_import_done', 'last_success', 'last_error'])
+        failed = self.job('collect', Job.FAILED, 2, 'Current collection needs permission')
+        state = snapshot(self.source, [failed], can_edit=True)
+        self.assertEqual(state['status'], 'Needs attention')
+        self.assertEqual(state['error'], failed.last_error)
+        self.assertFalse(state['ready_to_pull'])
+        self.assertTrue(state['can_pull'])

@@ -18,7 +18,7 @@ def snapshot(source, recent_jobs=(), *, can_edit=False):
     for job in sorted(data_jobs, key=lambda item: item.created_at, reverse=True):
         latest_by_kind.setdefault(job.kind, job)
     failed = next((job for job in latest_by_kind.values() if job.status == Job.FAILED), None)
-    error = source.last_error or (failed.last_error if failed else '')
+    error = (failed.last_error if failed else '') or source.last_error
     if reason:
         status = 'Paused' if not source.enabled or not source.customer.active else 'Needs connection'
     elif pending:
@@ -38,7 +38,7 @@ def snapshot(source, recent_jobs=(), *, can_edit=False):
         'can_manage_source': can_edit,
         'error': error or reason, 'pending': pending, 'collection_pending': pending,
         'collection_initialized': initialized, 'collection_started': initialized or bool(data_jobs),
-        'ready_to_pull': not initialized and not reason and not pending,
+        'ready_to_pull': not initialized and not reason and not pending and not error,
         'can_pull': can_edit and not reason, 'can_refresh': can_edit and initialized and not reason,
         'next_collection_at': next_run,
     }
