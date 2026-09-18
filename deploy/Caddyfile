@@ -14,7 +14,14 @@
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; object-src 'none'"
     }
-    request_body {
+    # The invoice file is limited to 2 MiB by the application; allow its
+    # multipart form envelope without increasing limits on other endpoints.
+    @invoice_upload path /reconciliation/
+    request_body @invoice_upload {
+        max_size 3MB
+    }
+    @other_requests not path /reconciliation/
+    request_body @other_requests {
         max_size 1MB
     }
     reverse_proxy app:8000

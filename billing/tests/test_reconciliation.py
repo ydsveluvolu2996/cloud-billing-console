@@ -5,7 +5,7 @@ from decimal import Decimal
 from xml.etree import ElementTree as ET
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase
-from billing.invoice_reconciliation import parse_upload, workbook, reconcile, HEADERS
+from billing.invoice_reconciliation import parse_upload, workbook, reconcile, HEADERS, MAX_BYTES
 from billing.views_reconciliation import monthly_report
 from .helpers import web_settings, make_customer, cost
 
@@ -16,6 +16,21 @@ class InvoiceParserTests(SimpleTestCase):
 
     def test_csv_preserves_zero_account_and_negative_credit(self):
         self.assertEqual(self.parse('account_id,month,currency,amount\n012345678901,2026-08,USD,-1.50'), {'012345678901': Decimal('-1.50')})
+
+    def test_workbook_above_one_megabyte_remains_within_invoice_limit(self):
+        raw = workbook([('Invoice', [HEADERS, ['012345678901', '2026-08', 'USD', '24.5']])])
+        output = io.BytesIO(raw)
+        with zipfile.ZipFile(output, 'a', zipfile.ZIP_STORED) as archive:
+            archive.writestr('docProps/unused.bin', b'x' * (1024 * 1024))
+        raw = output.getvalue()
+        self.assertGreater(len(raw), 1024 * 1024)
+        self.assertLess(len(raw), MAX_BYTES)
+        self.assertEqual(parse_upload(SimpleUploadedFile('invoice.xlsx', raw), date(2026, 8, 1), 'USD'),
+                         {'012345678901': Decimal('24.5')})
+
+    def test_invoice_above_two_megabytes_is_rejected_before_parsing(self):
+        with self.assertRaisesRegex(ValueError, 'smaller than 2 MB'):
+            parse_upload(SimpleUploadedFile('invoice.xlsx', b'x' * (MAX_BYTES + 1)), date(2026, 8, 1), 'USD')
 
     def test_duplicate_wrong_currency_nonfinite_and_formulas_rejected(self):
         for lines in ['012345678901,2026-08,USD,NaN', '012345678901,2026-08,INR,1', '012345678901,2026-08,USD,=1+1', '012345678901,2026-08,USD,1\n012345678901,2026-08,USD,2']:

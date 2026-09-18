@@ -31,6 +31,27 @@ class ConnectionChanged(Exception):
     pass
 
 
+def _check_publication_source(current, source):
+    """Recheck authorization after AWS returns, while the source row is locked."""
+    fields = ('connection_version', 'customer_id', 'account_id', 'role_arn', 'external_id',
+              'kind', 'shared', 'approved_capabilities')
+    if (not current.enabled or not current.customer.active
+            or any(getattr(current, field) != getattr(source, field) for field in fields)):
+        raise ConnectionChanged()
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        from .iam import approval_ready
+        if not approval_ready(current):
+            raise ConnectionChanged()
+
+
+def _check_publication_job(job):
+    if isinstance(getattr(job, 'pk', None), int):
+        from .models import Job
+        if not Job.objects.select_for_update().filter(pk=job.pk, status=Job.LEASED, worker=job.worker,
+                attempts=job.attempts, lease_expires__gt=timezone.now()).exists():
+            raise ConnectionChanged()
+
+
 def safe_error(exc):
     if isinstance(exc, OverlappingBillingScope):
         return (f'Account {exc.account_id} is already collected through another connection ({exc.other}) for the same days. '
@@ -77,12 +98,12 @@ def verify_source(source, session=None, meter=None):
     """Assume the role, confirm the account identity and probe optional capabilities."""
     meter = meter or Meter()
     session = session or Session(source)
+    checks = None
     if settings.REQUIRE_CONNECTION_APPROVAL:
         import boto3
         from .aws import AWS_CONFIG
         from .iam import verify_trust
         checks = verify_trust(source, session, boto3.client('sts', region_name=settings.AWS_REGION, config=AWS_CONFIG), meter)
-        BillingSource.objects.filter(pk=source.pk).update(trust_checks=checks)
     sts = session.client('sts')
     identity = meter.call(sts, 'get_caller_identity')
     if identity.get('Account') != source.account_id:
@@ -147,9 +168,13 @@ def verify_source(source, session=None, meter=None):
     now = timezone.now()
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
-            raise ConnectionChanged()
-        BillingSource.objects.filter(pk=source.pk).update(capabilities=capabilities, verified_at=now, last_error='', onboarding_step=max(source.onboarding_step, 5))
+        _check_publication_source(current, source)
+        updates = dict(capabilities=capabilities, verified_at=now, last_error='', onboarding_step=max(source.onboarding_step, 5))
+        if checks is not None:
+            updates['trust_checks'] = checks
+        BillingSource.objects.filter(pk=source.pk).update(**updates)
+    if checks is not None:
+        source.trust_checks = checks
     source.capabilities, source.verified_at, source.last_error = capabilities, now, ''
     return capabilities
 
@@ -182,8 +207,7 @@ def discover_accounts(source, session=None, meter=None, today=None):
         mode = 'billing_only'
     with transaction.atomic():
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
-            raise ConnectionChanged()
+        _check_publication_source(current, source)
         for account_id, info in found.items():
             account, created = AwsAccount.objects.get_or_create(account_id=account_id, defaults={
                 'source': source, 'payer_account_id': source.account_id, 'first_seen': now})
@@ -312,13 +336,9 @@ def publish_month(source, month, records, days, estimated, meter, started, attem
     first, last = month, month + relativedelta(months=1)
     period, _ = CollectionPeriod.objects.get_or_create(source=source, month=month)
     with transaction.atomic():
-        if isinstance(getattr(job,'pk',None),int):
-            from .models import Job
-            if not Job.objects.select_for_update().filter(pk=job.pk,status=Job.LEASED,worker=job.worker,attempts=job.attempts,lease_expires__gt=timezone.now()).exists():
-                raise ConnectionChanged()
+        _check_publication_job(job)
         locked = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if not locked.enabled or locked.connection_version != source.connection_version or locked.role_arn != source.role_arn:
-            raise ConnectionChanged()
+        _check_publication_source(locked, source)
         if locked.kind == BillingSource.STANDALONE and any(r['account_id'] != locked.account_id for r in records):
             raise ValueError('Cannot publish costs outside the approved single-account scope')
         from django.db import connection
@@ -383,14 +403,18 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
                 from .jobs import heartbeat
                 heartbeat(job, progress)
         now = timezone.now()
-        BillingSource.objects.filter(pk=source.pk).update(last_success=now, last_error='', initial_import_done=True)
+        with transaction.atomic():
+            _check_publication_job(job)
+            current = BillingSource.objects.select_for_update().get(pk=source.pk)
+            _check_publication_source(current, source)
+            BillingSource.objects.filter(pk=source.pk).update(last_success=now, last_error='', initial_import_done=True)
         run.status, run.rows, run.requests, run.finished_at = 'success', total_rows, meter.requests, now
         run.save()
         return run
     except Exception as exc:
         run.status, run.error, run.rows, run.requests, run.finished_at = 'failed', safe_error(exc), total_rows, meter.requests, timezone.now()
         run.save()
-        BillingSource.objects.filter(pk=source.pk).update(last_error=run.error)
+        BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(last_error=run.error)
         logger.warning('Collection failed source=%s type=%s', source.pk, type(exc).__name__)
         if job is not None:
             job.progress = progress
@@ -406,7 +430,7 @@ def to_decimal(value):
         return None
 
 
-def import_budgets(source, session=None, meter=None):
+def import_budgets(source, session=None, meter=None, job=None):
     """Read-only snapshot of AWS Budgets owned by the connected account (paginated)."""
     meter = meter or Meter()
     session = session or Session(source)
@@ -432,9 +456,9 @@ def import_budgets(source, session=None, meter=None):
             raw=json.loads(json.dumps({k: v for k, v in b.items() if k not in ('CalculatedSpend', 'BudgetLimit', 'TimePeriod', 'CostFilters', 'FilterExpression')}, cls=DjangoJSONEncoder)),
             imported_at=now))
     with transaction.atomic():
+        _check_publication_job(job)
         current = BillingSource.objects.select_for_update().get(pk=source.pk)
-        if current.connection_version != source.connection_version or not current.enabled or not current.customer.active:
-            raise ConnectionChanged()
+        _check_publication_source(current, source)
         ImportedBudget.objects.filter(source=source).delete()
         ImportedBudget.objects.bulk_create(snapshots)
     return len(snapshots)

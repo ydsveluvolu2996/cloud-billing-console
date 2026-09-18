@@ -1,6 +1,6 @@
 # Manual IAM role onboarding
 
-Every customer starts in the dashboard. A customer administrator creates one read-only IAM role; no permanent access keys, agent, billing export or customer CloudFormation stack is required. Once the platform's activation service is installed, connecting a supported account requires no hosting-account or EC2 sign-in.
+The dashboard uses four setup stages: **Customer → AWS account → Customer role → Connect and import**. Every customer starts in the dashboard. A customer administrator creates one read-only IAM role; no permanent access keys, agent, billing export or customer CloudFormation stack is required. Once the platform's activation service is installed, connecting a supported account requires no hosting-account or EC2 sign-in.
 
 1. Create or select the business customer, then choose **Add an AWS account**. The default **Single AWS account (including member)** connects only the entered 12-digit account ID. It also works for a member of another organization; its payer account is not onboarded. Accounts whose costs are already covered by a connected payer cannot be connected twice.
 2. Select whether to import existing AWS budgets and save any other optional data choices. Open **View and copy IAM policies**. The page provides an exact trust policy and one combined permission policy containing the required billing/trust reads plus the selected optional reads. Budget import uses `budgets:ViewBudget` against this account's budget resources; it does not create or change budgets.
@@ -11,6 +11,8 @@ Every customer starts in the dashboard. A customer administrator creates one rea
 7. Collection continues every six hours. If the customer changes the role or selected data, save the new settings, update the generated customer policy as needed and reconnect. Existing data is retained when a connection is paused.
 
 Automatic activation supports **Single AWS account** and **Member budget reader** connections with roles under `BillingConsole/`. Management/payer and shared-payer connections can cover multiple accounts and therefore retain the reviewed workflow: record the explicit authorized inventory and optional metadata under **Approval and readiness**, approve with `security_admin` in the separate administration runtime, export and apply the exact provider policy/collector allowlist, and then use the advanced verification, discovery and import controls. Existing approved roles outside `BillingConsole/` also retain that manual path. No customer is approved from an empty record.
+
+Bulk CSV onboarding prepares connections only; it does not approve or activate them. Set `kind=standalone` for a single account, including a member. The example CSV uses this scope. To preserve existing imports, an omitted CSV kind still means `payer`, which requires the reviewed workflow. Existing customers must be identified by `customer_id` or a unique `reference`; a matching name alone is insufficient.
 
 Cost Explorer must be available for cost-collecting connections. A member account's organization administrator may need to enable member Cost Explorer access if it is unavailable; access to the payer is not otherwise required by this onboarding flow. A member-budget-only connection does not require Cost Explorer.
 

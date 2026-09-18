@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Report export is not ready · Cloud Billing{% endblock %}
+{% block content %}
+<div class="eyebrow">Cost Explorer <span>/</span> Export report</div>
+<header class="page-header"><div><h1>Report export is not ready</h1><p>{{ start|date:'d M Y' }} – {{ end|date:'d M Y' }} · {{ currency }}</p></div></header>
+<section class="panel form-panel narrow">
+  <div class="notice warning" role="alert">This report is incomplete, so its export is unavailable.</div>
+  {% if report_pending %}<p>Collection is still running. Return to the report to follow its progress; export becomes available when all required results are ready.</p>{% else %}<p>Some report data is unavailable. Review the messages below, update the report parameters or check the affected customer connections, then try again.</p>{% endif %}
+  {% for warning in warnings %}<p class="notice warning">{{ warning }}</p>{% endfor %}
+  <div class="form-actions"><a class="button" href="/?{{ export_query }}">Return to this report</a><a class="button secondary" href="{% url 'customers' %}">Review customers</a></div>
+</section>
+{% endblock %}

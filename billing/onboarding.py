@@ -1,4 +1,4 @@
-"""Onboarding: per-connection CloudFormation templates and links, bulk CSV, rotation, offboarding."""
+"""Onboarding: per-connection IAM policy bundles, bulk CSV, rotation and offboarding."""
 import csv
 import io
 import re
@@ -197,7 +197,7 @@ def customer_csv_template():
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(CUSTOMER_COLUMNS)
-    writer.writerow(['', 'Example Ltd', 'CRM-1001', 'Jane Owner', 'USD', '123456789012', 'payer', 'false', '5000'])
+    writer.writerow(['', 'Example Ltd', 'CRM-1001', 'Jane Owner', 'USD', '123456789012', 'standalone', 'false', '5000'])
     return out.getvalue()
 
 

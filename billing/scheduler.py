@@ -205,7 +205,7 @@ def handle_import_budgets(job):
         raise jobs.PermanentJobError('Budget import approval is required for this connection.')
     from botocore.exceptions import ClientError
     try:
-        count = collector.import_budgets(source)
+        count = collector.import_budgets(source, job=job)
     except ClientError as exc:
         code = exc.response.get('Error', {}).get('Code', '')
         if code not in ('AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation'):

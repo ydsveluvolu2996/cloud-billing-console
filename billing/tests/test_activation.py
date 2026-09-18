@@ -72,6 +72,9 @@ class ActivationTests(TestCase):
         self.source.discovered_at = timezone.now() if discover else None
         self.source.capabilities = {'budgets': True}
         self.source.save()
+        if not discover:
+            from billing.scheduler import request_discovery
+            request_discovery(self.source)
         Job.objects.filter(key=f'activation:{request.pk}:verify').update(status=Job.DONE)
 
     def test_mfa_and_live_portfolio_session_required(self):
@@ -218,6 +221,35 @@ class ActivationTests(TestCase):
         request.refresh_from_db()
         self.assertEqual(request.status, 'failed')
         self.assertFalse(Job.objects.filter(kind='collect').exists())
+
+    def test_queued_verification_remains_pending(self):
+        request = self.activate()
+        process_activation(request)
+        request.refresh_from_db()
+        self.assertEqual(request.status, 'verifying')
+        self.assertEqual(request.last_error, '')
+
+    def test_pause_resume_reports_missing_required_jobs_in_each_phase(self):
+        from billing.onboarding import set_paused
+        for phase in ('verification', 'discovery', 'import'):
+            with self.subTest(phase=phase):
+                request = self.activate()
+                if phase == 'discovery':
+                    self.finish_verification(request, discover=False)
+                elif phase == 'import':
+                    self.finish_verification(request)
+                    process_activation(request)
+                    request.refresh_from_db()
+                    self.assertEqual(request.status, 'importing')
+                # Pause removes queued jobs. Resuming before the coordinator
+                # polls must not leave an otherwise valid request waiting forever.
+                set_paused(self.source, True)
+                set_paused(self.source, False)
+                process_activation(request)
+                request.refresh_from_db()
+                self.assertEqual(request.status, 'failed')
+                self.assertIn('interrupted', request.last_error)
+                self.assertIn('Connect and import', request.last_error)
 
     def test_existing_customer_consent_is_appended_not_replaced(self):
         CustomerApproval.objects.create(customer=self.customer, contacts=['Original contact'], authorized_users=['original'],

@@ -2,6 +2,7 @@
 import csv
 from datetime import date, timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
 from django.contrib import messages
@@ -138,15 +139,17 @@ def customer_detail(request, pk):
     if tab not in ('accounts', 'projects', 'budgets', 'reports', 'sync'):
         tab = 'accounts'
     today = timezone.now().date()
-    month = month_param(request)
+    month = min(month_param(request), today.replace(day=1))
+    month_end = min(month + relativedelta(months=1) - timedelta(days=1), today)
     currency = request.GET.get('currency', customer.currency or 'USD')
-    context = {'customer': customer, 'tab': tab, 'active_page': 'customers', 'today': today, 'month': month, 'currency': currency,
+    context = {'customer': customer, 'tab': tab, 'active_page': 'customers', 'today': today, 'month': month, 'month_end': month_end, 'currency': currency,
+               'export_query': urlencode({'customer': customer.pk, 'start': month, 'end': month_end, 'currency': currency}),
                'sources': list(customer.sources.all()), 'can_edit': scoping.can_edit(request.user),
                'currencies': sorted(set(Cost.objects.filter(customer=customer).values_list('currency', flat=True).distinct()) | {currency})}
     if tab == 'accounts':
         context.update(account_tree(customer, month, today, currency))
     elif tab == 'projects':
-        context['reconciliation'] = allocation.reconcile(customer, month, min(month + relativedelta(months=1) - timedelta(days=1), today), currency)
+        context['reconciliation'] = allocation.reconcile(customer, month, month_end, currency)
         context['projects'] = customer.projects.prefetch_related('rules')
     elif tab == 'budgets':
         budget_list = list(customer.budgets.filter(active=True).select_related('source', 'project').prefetch_related('amounts'))

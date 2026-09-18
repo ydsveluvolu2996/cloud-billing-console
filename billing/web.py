@@ -150,7 +150,7 @@ def export_report(request):
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
     if data.get('report_incomplete'):
-        return HttpResponse('Report is incomplete. Wait for all customer queries to finish before exporting.', status=409)
+        return render(request, 'billing/report_export_unavailable.html', data, status=409)
     response = HttpResponse(content_type='text/csv')
     response['Content-Disposition'] = 'attachment; filename="cost-explorer-report.csv"'
     writer = csv.writer(response)
