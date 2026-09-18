@@ -1,8 +1,8 @@
 """Six-hour scheduling and job handlers.
 
-Slots: 00:00, 06:00, 12:00 and 18:00 UTC. Each active source gets one collect job per slot
-with configurable jitter; keys make scheduling idempotent. Older months are reconciled on the
-weekly and monthly cadence. Manual refresh requests are coalesced into one job per source.
+Ready new connections pull their initial history immediately. Thereafter, slots at 00:00,
+06:00, 12:00 and 18:00 UTC use configurable jitter and idempotent keys. Older months are
+reconciled on the weekly and monthly cadence. Manual requests share pending work.
 """
 import logging
 import random
@@ -50,7 +50,7 @@ def collection_initialized(source):
 
 
 def collection_readiness(source):
-    """An empty reason means the dashboard can request a first pull or refresh."""
+    """An empty reason means collection is authorized and setup has finished."""
     if not source.enabled or not source.customer.active:
         return 'Resume this connection and customer before pulling data.'
     if not source.role_arn or not source.verified_at:
@@ -95,46 +95,20 @@ def _budget_success(source):
 
 
 def schedule_due(now=None):
-    """Catch up one slot per initialized account; first pulls require the dashboard."""
+    """Start ready accounts immediately, then catch up one six-hour slot at a time."""
     now = now or timezone.now()
     slot = slot_for(now)
     stamp = slot.strftime('%Y%m%dT%H')
-    jitter_seconds = getattr(settings, 'SCHEDULE_JITTER_SECONDS', 900)
     created = 0
     source_ids = BillingSource.objects.filter(enabled=True, customer__active=True).exclude(role_arn='').exclude(verified_at=None).values_list('pk', flat=True)
     for source_id in list(source_ids):
         try:
             with transaction.atomic():
                 source = BillingSource.objects.select_for_update().get(pk=source_id)
-                if not collection_initialized(source) or collection_readiness(source):
+                if collection_readiness(source):
                     BillingSource.objects.filter(pk=source.pk).update(next_run=None)
                     continue
-                run_after = slot + timedelta(seconds=random.uniform(0, jitter_seconds))
-                version_key = f'{source.pk}:v{source.connection_version}:{stamp}'
-                made_for_source = 0
-                primary = None
-                if source.collects_costs and (not source.last_success or source.last_success < slot):
-                    primary = _pending_job(source, 'collect')
-                    if primary is None:
-                        primary, made = jobs.enqueue('collect', key=f'collect:{version_key}', source=source, priority=5, once=True,
-                            run_after=run_after, payload={'months_back': reconcile_months(slot), 'slot': stamp})
-                        made_for_source += made
-                    _, made = jobs.enqueue('explorer_refresh', key=f'explorer_refresh:{version_key}', source=source, priority=7, once=True,
-                        run_after=run_after + timedelta(minutes=5), payload={'scheduled': True})
-                    made_for_source += made
-                    if slot.hour == 0:
-                        _, made = jobs.enqueue('discover', key=f'discover:{version_key}', source=source, priority=6, once=True, run_after=run_after)
-                        made_for_source += made
-                budget_success = _budget_success(source)
-                if _imports_budgets(source) and (not budget_success or budget_success < slot):
-                    budget_job = _pending_job(source, 'import_budgets')
-                    if budget_job is None:
-                        budget_job, made = jobs.enqueue('import_budgets', key=f'import_budgets:{version_key}', source=source, priority=8, once=True,
-                            run_after=run_after + timedelta(minutes=2))
-                        made_for_source += made
-                    primary = primary or budget_job
-                future = primary.run_after if primary and primary.status == Job.QUEUED and primary.run_after > now else next_slot(now)
-                BillingSource.objects.filter(pk=source.pk).update(next_run=future, sync_requested=False)
+                _, made_for_source = _schedule_source(source, now)
                 created += made_for_source
         except BillingSource.DoesNotExist:
             continue
@@ -149,6 +123,50 @@ def schedule_due(now=None):
     _, made = jobs.enqueue('monitor_operations',key=f'monitor:{stamp}',priority=9,once=True,run_after=slot+timedelta(minutes=50))
     created += made
     return created
+
+
+def _slot_key(source, kind, now):
+    return f'{kind}:{source.pk}:v{source.connection_version}:{slot_for(now):%Y%m%dT%H}'
+
+
+def _schedule_source(source, now):
+    """The caller holds the source lock and has checked collection readiness."""
+    initial = not collection_initialized(source)
+    slot = slot_for(now)
+    stamp = slot.strftime('%Y%m%dT%H')
+    jitter_seconds = getattr(settings, 'SCHEDULE_JITTER_SECONDS', 900)
+    run_after = now if initial else slot + timedelta(seconds=random.uniform(0, jitter_seconds))
+    created = 0
+    primary = None
+    if source.collects_costs and (initial or not source.last_success or source.last_success < slot):
+        primary = _pending_job(source, 'collect')
+        if primary is None:
+            primary, made = jobs.enqueue('collect', key=_slot_key(source, 'collect', now), source=source,
+                priority=3 if initial else 5, once=True, run_after=run_after,
+                payload={'months_back': settings.HISTORY_MONTHS if initial else reconcile_months(slot),
+                         'initial': initial, 'slot': stamp})
+            created += made
+        if not initial:
+            _, made = jobs.enqueue('explorer_refresh', key=_slot_key(source, 'explorer_refresh', now), source=source,
+                priority=7, once=True, run_after=run_after + timedelta(minutes=5), payload={'scheduled': True})
+            created += made
+            if slot.hour == 0:
+                _, made = jobs.enqueue('discover', key=_slot_key(source, 'discover', now), source=source,
+                    priority=6, once=True, run_after=run_after)
+                created += made
+    budget_success = _budget_success(source)
+    if _imports_budgets(source) and (not budget_success or budget_success < slot):
+        budget_job = _pending_job(source, 'import_budgets')
+        if budget_job is None:
+            budget_job, made = jobs.enqueue('import_budgets', key=_slot_key(source, 'import_budgets', now), source=source,
+                priority=4 if initial else 8, once=True,
+                run_after=run_after if initial else run_after + timedelta(minutes=2),
+                payload={'initial': initial, 'slot': stamp})
+            created += made
+        primary = primary or budget_job
+    future = primary.run_after if primary and primary.status == Job.QUEUED and primary.run_after > now else next_slot(now)
+    BillingSource.objects.filter(pk=source.pk).update(next_run=future, sync_requested=False)
+    return primary, created
 
 
 def request_refresh(source, actor='', months_back=1, actor_id=None):
@@ -189,7 +207,10 @@ def _request_pull(source, *, actor, actor_id, months_back, initial=False):
                 else:
                     pending = None  # A running shorter refresh cannot satisfy a requested backfill.
                     suffix = 'backfill'
-            result = (pending, False) if pending else jobs.enqueue(kind, key=f'{kind}:{source.pk}:{suffix}:v{source.connection_version}',
+            # Initial automatic and manual requests share a slot key. An explicit
+            # retry can create new work; scheduler ticks cannot reset its retry budget.
+            key = _slot_key(source, kind, timezone.now()) if initial and suffix != 'backfill' else f'{kind}:{source.pk}:{suffix}:v{source.connection_version}'
+            result = (pending, False) if pending else jobs.enqueue(kind, key=key,
                 source=source, priority=3, payload=payload)
             if primary is None:
                 primary = result

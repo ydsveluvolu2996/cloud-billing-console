@@ -25,8 +25,8 @@ from .web import audit, paginate, staff_required
 
 STATES = ['Awaiting customer setup', 'Connection verified', 'Account discovery complete', 'Initial import running', 'Connected',
           'Partial data', 'Permission problem', 'Stale data', 'Paused']
-ONBOARDING_STATES = ['Waiting to connect', 'Authorizing connection', 'Checking AWS access', 'Ready for first pull', 'Pull queued', 'Pulling data', 'Importing billing history', 'Needs attention', *STATES]
-CONNECTION_SETUP_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Connect account'), (4, 'Pull initial data')]
+ONBOARDING_STATES = ['Waiting to connect', 'Authorizing connection', 'Checking AWS access', 'Preparing automatic pull', 'Pull queued', 'Pulling data', 'Importing billing history', 'Needs attention', *STATES]
+CONNECTION_SETUP_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Connect account'), (4, 'Automatic data pull')]
 
 
 def month_param(request):
@@ -282,7 +282,7 @@ def _can_activate_connection(request):
 def _connection_activation_status(source, activation):
     if not activation or activation.status == 'completed':
         if not scheduler.collection_initialized(source) and not scheduler.collection_readiness(source):
-            return {'label': 'Ready for first pull', 'description': 'Account connected. Choose Pull initial data once to start billing collection and automatic refresh.', 'pending': False}
+            return {'label': 'Preparing automatic pull', 'description': 'Account connected. The collector will start the first data pull automatically, then refresh every six hours.', 'pending': False}
         state = source.state
         if not source.collects_costs and source.enabled and source.verified_at and source.last_success and not source.last_error:
             state = 'Connected' if source.last_success >= timezone.now() - source.STALE_AFTER else 'Stale data'
@@ -350,7 +350,7 @@ def source_detail(request, pk):
             except ValidationError as exc:
                 activation_form.add_error(None, '; '.join(exc.messages))
             else:
-                messages.success(request, 'Connection requested. AWS access will be checked automatically. When ready, choose Pull initial data to start collection.')
+                messages.success(request, 'Connection requested. AWS access checks and the first data pull will run automatically. Collection then continues every six hours.')
                 return redirect('source_detail', pk=pk)
     if request.method == 'POST' and request.POST.get('action') == 'connection':
         form = ConnectionForm(request.POST, instance=source)
@@ -459,7 +459,7 @@ def source_action(request, pk, action):
             return redirect('source_detail', pk=pk)
         else:
             BillingSource.objects.filter(pk=pk).update(onboarding_step=6)
-            messages.success(request, 'Data pull queued. Automatic collection continues every six hours after the first successful pull.' if created else 'A data pull is already queued or running for this connection.')
+            messages.success(request, 'Data pull queued. Automatic collection continues every six hours.' if created else 'A data pull is already queued or running for this connection.')
     elif action == 'rotate':
         onboarding.rotate_external_id(source, actor=actor)
         messages.success(request, 'New external ID issued. Share the new trust JSON so the customer updates their role, then verify again.')
@@ -860,9 +860,12 @@ def csv_template(request, kind):
 @never_cache
 @login_required
 def onboarding_view(request):
+    from .collection_state import snapshot
     query = request.GET.get('q', '').strip()
     state_filter = request.GET.get('state', '')
-    sources = BillingSource.objects.select_related('customer').prefetch_related('periods', 'activation_requests')
+    data_jobs = Job.objects.filter(kind__in=['collect', 'import_budgets']).order_by('-created_at')[:12]
+    sources = BillingSource.objects.select_related('customer').prefetch_related('periods', 'activation_requests',
+        Prefetch('jobs', queryset=data_jobs, to_attr='recent_data_jobs'))
     if query:
         sources = sources.filter(Q(customer__name__icontains=query) | Q(account_id__icontains=query) | Q(customer__reference__icontains=query))
     account_counts = {r['source_id']: r['n'] for r in AwsAccount.objects.filter(source__in=sources).values('source_id').annotate(n=Count('pk'))}
@@ -874,11 +877,17 @@ def onboarding_view(request):
         activation = max(activations, key=lambda item: item.created_at) if activations else None
         activation_status = _connection_activation_status(source, activation)
         state = activation_status['label']
+        error = (activation.last_error if activation else '') or source.last_error
+        if not activation or activation.status == 'completed':
+            collection = snapshot(source, source.recent_data_jobs)
+            if collection['status'] in ('Pull queued', 'Pulling data', 'Needs attention'):
+                state = collection['status']
+                error = collection['error']
         if state_filter and state != state_filter:
             continue
         rows.append({'source': source, 'state': state, 'accounts': account_counts.get(source.pk, 0), 'step': 4 if source.verified_at else 3 if source.role_arn else 2,
                      'pending': pending_counts.get(source.pk, 0), 'activation_pending': activation_status['pending'],
-                     'error': (activation.last_error if activation else '') or source.last_error})
+                     'error': error})
     sort, direction = sort_param(request, ['customer', 'state', 'step', 'last_success'], 'customer')
     keyfn = {'customer': lambda r: (r['source'].customer.name.lower(), r['source'].account_id), 'state': lambda r: r['state'], 'step': lambda r: r['step'],
              'last_success': lambda r: (r['source'].last_success is None, r['source'].last_success or timezone.now())}[sort]

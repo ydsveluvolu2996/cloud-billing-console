@@ -319,9 +319,9 @@ def _progress(request):
                     if discovery and discovery.status == Job.FAILED:
                         raise ActivationInvalid(discovery.last_error or 'Account discovery failed. Check customer permissions and try again.')
                     raise ActivationInvalid('Account discovery was interrupted. Choose Connect account to retry.')
-            # Connecting proves access. The operator starts the first data pull
-            # from the dashboard; completed connections do not occupy the
-            # activation queue while waiting for that choice.
+            # Connecting proves access. The collector picks up this ready
+            # connection on its next scheduler tick, including after a restart.
+            # Data pulls use the same durable queue as recurring collection.
             request.status, request.finished_at = 'completed', timezone.now()
             security_event(request.requested_by.username, 'Account connection verified', customer=source.customer,
                 source=source, target=str(request.pk), account_id=source.account_id)
@@ -333,7 +333,7 @@ def _progress(request):
             if failed:
                 raise ActivationInvalid(failed.last_error or 'Initial import failed. Check customer permissions and retry.')
             if any(job is None for job in imports):
-                raise ActivationInvalid('The initial import was interrupted. Pull initial data from the dashboard to retry.')
+                raise ActivationInvalid('The initial import was interrupted. Reconnect the account to resume automatic collection.')
             if not imports or any(job.status != Job.DONE for job in imports):
                 return
             request.status, request.finished_at = 'completed', timezone.now()
