@@ -60,7 +60,7 @@ def document():
 def compatibility():
     root = HERE.parent.parent
     files = sorted(str(p.relative_to(root)) for p in (root / 'billing/migrations').glob('*.py'))
-    files += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
+    files += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'deploy/activation-requests.sql', 'deploy/onboarding-worker/activation.service', 'deploy/onboarding-worker/install.py', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}
 
 

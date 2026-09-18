@@ -56,7 +56,11 @@ def policy_bundle(source):
     for capability, actions in OPTIONAL.items():
         resource = f'arn:{parsed[1]}:budgets::{source.account_id}:budget/*' if capability == 'budgets' else '*'
         optional[capability] = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Action': actions, 'Resource': resource}]}
-    return {'role_arn': arn, 'trust_policy': trust, 'minimum_permission_policy': required,
+    combined = {'Version': '2012-10-17', 'Statement': list(required['Statement'])}
+    for capability in sorted(set(source.approved_capabilities)):
+        if capability in optional:
+            combined['Statement'].extend(optional[capability]['Statement'])
+    return {'role_arn': arn, 'trust_policy': trust, 'minimum_permission_policy': required, 'permission_policy': combined,
             'optional_permission_policies': optional, 'external_id': str(source.external_id)}
 
 

@@ -138,9 +138,23 @@ def handle_verify(job):
     source = load_source(job)
     try:
         capabilities = collector.verify_source(source)
+        if (job.payload.get('activation_id') and 'budgets' in source.approved_capabilities
+                and not capabilities.get('budgets')
+                and capabilities.get('budgets_error') in ('AccessDenied', 'AccessDeniedException', 'Throttling', 'ThrottlingException', 'TooManyRequestsException')):
+            from botocore.exceptions import ClientError
+            BillingSource.objects.filter(pk=source.pk).update(verified_at=None)
+            raise ClientError({'Error': {'Code': capabilities['budgets_error']}}, 'DescribeBudgets')
     except Exception as exc:
         message = collector.safe_error(exc)
         BillingSource.objects.filter(pk=source.pk).update(last_error=message)
+        from botocore.exceptions import ClientError
+        if job.payload.get('activation_id') and isinstance(exc, ClientError):
+            code = exc.response.get('Error', {}).get('Code', '')
+            if code in ('AccessDenied', 'AccessDeniedException', 'Throttling', 'ThrottlingException', 'TooManyRequestsException', 'ServiceUnavailable'):
+                # Newly installed IAM policies may not yet be visible to STS.
+                # The activation job has a bounded attempt count and backoff;
+                # trust-validation ValueErrors are still permanent failures.
+                raise
         raise jobs.PermanentJobError(message)
     if source.collects_costs:
         request_discovery(source)

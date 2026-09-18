@@ -3,6 +3,7 @@
   "logs": {
     "logs_collected": {"files": {"collect_list": [
       {"file_path": "/var/log/cloud-billing/collector.log", "log_group_name": "REPLACE_WITH_STACK_AUDIT_LOG_GROUP", "log_stream_name": "collector/{instance_id}"},
+      {"file_path": "/var/log/cloud-billing/activation/worker.log", "log_group_name": "REPLACE_WITH_STACK_AUDIT_LOG_GROUP", "log_stream_name": "activation/{instance_id}"},
       {"file_path": "/var/log/cloud-billing-backup.log", "log_group_name": "REPLACE_WITH_STACK_AUDIT_LOG_GROUP", "log_stream_name": "backup/{instance_id}"}
     ]}},
     "force_flush_interval": 5

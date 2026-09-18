@@ -40,3 +40,38 @@ The web has no general Cost update privilege. `billing_restamp_ownership` permit
 Approved aliases, owners and environments are stored on ownership intervals so a transfer does not disclose the new customer's metadata to the old owner. Existing account fields are retained. Alliance revisions preserve prior tracking fields, comments, service notes and snapshots in append-only customer-scoped records; old audit records are not deleted. Central security logs omit business note contents.
 
 Bulk previews bind to an immutable requesting user ID and an authorization fingerprint. A grant, revocation, role/account-scope change, expired support membership or reused username cannot reopen an older preview under different permissions. PostgreSQL policies require the server-computed current request fingerprint for both bulk previews and cached query results. Historical previews remain stored but must be uploaded again before applying under the new binding; there is no automatic grant/backfill.
+
+## Dashboard connection activation
+
+For single AWS accounts (including organization members) and member budget readers,
+MFA-verified internal portfolio administrators can now submit **Connect and import**.
+`billing_request_activation` is a request-only SECURITY DEFINER function. It locks
+and checks the live administrator, session version, source, consent and customer,
+and writes an immutable snapshot. Neither web nor collector can directly insert,
+change or approve activation requests. Shared/consolidated payer onboarding retains
+the reviewed administration path until explicit inventory approval is automated.
+
+A separate root-supervised activation process uses the administration database
+identity, verified TLS and protected files. It rechecks the saved request, current
+access, connection version, External ID hash and approvals before authorizing the
+exact role. It invokes one private Lambda, which maintains a separate, exact-ARN
+AssumeRole policy from durable, strongly consistent DynamoDB state. The collector
+has no IAM mutation permission. Its independently managed permissions boundary
+preserves existing operations, limits future customer roles to `BillingConsole/`,
+and explicitly denies IAM administration; the boundary alone grants no role access.
+The original exact-role IAM policy and its existing customer permissions are retained.
+
+The coordinator atomically updates the collector's root-owned allowlist, approves
+only the submitted account and selected capabilities, and queues trust verification.
+Missing/wrong External ID tests remain mandatory. It waits for fresh verification
+and discovery before the initial cost import, and displays completion or actionable
+failure in the dashboard. Single-account collection filters AWS requests to that ID
+and rejects results outside it before replacing any saved costs. No customer access
+keys, passwords, or hosting AWS sign-ins are part of ordinary account activation.
+
+This adds a privileged service to the existing single EC2, not a new host-isolation
+claim. Root and the approved release process remain trusted. A compromised native
+collector could invoke the broker for another `BillingConsole/` role; customer trust,
+External IDs and the exact local/database approval gates still apply. The web cannot
+reach instance metadata, the broker, admin credentials or the writable allowlist.
+See the broker and worker deployment READMEs for bootstrap, monitoring and rollback.

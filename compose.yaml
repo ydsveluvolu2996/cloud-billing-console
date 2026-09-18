@@ -63,6 +63,7 @@ services:
       CSRF_TRUSTED_ORIGINS: https://${DASHBOARD_HOST}
       AWS_REGION: ${AWS_REGION:-ap-south-1}
       COLLECTOR_ROLE_ARN: ${COLLECTOR_ROLE_ARN:-}
+      ONBOARDING_BROKER_FUNCTION: ${ONBOARDING_BROKER_FUNCTION:-}
       EXTERNAL_PORTAL_ENABLED: 'false'
     depends_on:
       db:

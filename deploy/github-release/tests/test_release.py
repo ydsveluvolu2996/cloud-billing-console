@@ -201,7 +201,7 @@ class HostRollback(unittest.TestCase):
 
     def test_migration_change_blocks_automatic_release(self):
         source = self.agent.stage/'source'
-        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']:
+        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'deploy/activation-requests.sql', 'deploy/onboarding-worker/activation.service', 'deploy/onboarding-worker/install.py', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']:
             path = source/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('baseline')
@@ -210,6 +210,18 @@ class HostRollback(unittest.TestCase):
         (source/'billing/migrations/0002_change.py').write_text('new schema')
         with self.assertRaisesRegex(ValueError, 'maintenance'):
             agent.compatible(source, expected)
+
+    def test_optional_activation_worker_is_coordinated_only_on_collector_host(self):
+        with patch.object(agent.Path, 'exists', return_value=True), patch.object(agent, 'run') as run:
+            self.agent.config['runtime'] = 'combined'
+            self.agent.activation_service('stop')
+            self.agent.activation_service('start')
+            self.assertEqual(run.call_args_list, [unittest.mock.call(['systemctl', 'stop', 'cloud-billing-activation']),
+                                                 unittest.mock.call(['systemctl', 'start', 'cloud-billing-activation'])])
+            run.reset_mock()
+            self.agent.config['runtime'] = 'web'
+            self.agent.activation_service('stop')
+            run.assert_not_called()
 
 
 class Coordination(unittest.TestCase):

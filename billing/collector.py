@@ -91,8 +91,10 @@ def verify_source(source, session=None, meter=None):
     if source.collects_costs:
         ce = session.client('ce')
         today = timezone.now().date()
+        scope_filter = ({'Filter': {'Dimensions': {'Key': 'LINKED_ACCOUNT', 'Values': [source.account_id]}}}
+                        if source.kind == BillingSource.STANDALONE else {})
         meter.call(ce, 'get_cost_and_usage', TimePeriod={'Start': (today - timedelta(days=2)).isoformat(), 'End': today.isoformat()},
-                   Granularity='DAILY', Metrics=['UnblendedCost'])
+                   Granularity='DAILY', Metrics=['UnblendedCost'], **scope_filter)
         capabilities['cost_explorer'] = True
     if source.kind == BillingSource.PAYER and ('organizations' in source.approved_capabilities or not settings.REQUIRE_CONNECTION_APPROVAL):
         try:
@@ -129,6 +131,9 @@ def verify_source(source, session=None, meter=None):
         for name, (operation, args) in probes.items():
             if name in source.approved_capabilities:
                 try:
+                    if source.kind == BillingSource.STANDALONE:
+                        account_filter = {'Dimensions': {'Key': 'LINKED_ACCOUNT', 'Values': [source.account_id]}}
+                        args['Filter'] = ({'And': [args['Filter'], account_filter]} if args.get('Filter') else account_filter)
                     meter.call(ce, operation, **args)
                     capabilities[name] = True
                     if name=='tags':
@@ -225,11 +230,13 @@ def ensure_assignment(account, customer, start=None, note='', actor=''):
 
 # --- cost collection ----------------------------------------------------------------------
 
-def fetch_month(ce, meter, first, last):
+def fetch_month(ce, meter, first, last, account_id=None):
     """Fetch daily LINKED_ACCOUNT × SERVICE costs for [first, last) with validation."""
     params = dict(TimePeriod={'Start': first.isoformat(), 'End': last.isoformat()}, Granularity='DAILY',
                   Metrics=['UnblendedCost', 'AmortizedCost'],
                   GroupBy=[{'Type': 'DIMENSION', 'Key': 'LINKED_ACCOUNT'}, {'Type': 'DIMENSION', 'Key': 'SERVICE'}])
+    if account_id:
+        params['Filter'] = {'Dimensions': {'Key': 'LINKED_ACCOUNT', 'Values': [account_id]}}
     seen_tokens = set()
     records = []
     days = set()
@@ -243,6 +250,8 @@ def fetch_month(ce, meter, first, last):
             days.add(day)
             estimated = estimated or bool(period.get('Estimated', False))
             for group in period.get('Groups', []):
+                if account_id and group['Keys'][0] != account_id:
+                    raise ValueError('AWS returned an account outside the approved single-account scope')
                 unblended = group['Metrics']['UnblendedCost']
                 amortized = group['Metrics']['AmortizedCost']
                 if unblended['Unit'] != amortized['Unit']:
@@ -310,6 +319,8 @@ def publish_month(source, month, records, days, estimated, meter, started, attem
         locked = BillingSource.objects.select_for_update().get(pk=source.pk)
         if not locked.enabled or locked.connection_version != source.connection_version or locked.role_arn != source.role_arn:
             raise ConnectionChanged()
+        if locked.kind == BillingSource.STANDALONE and any(r['account_id'] != locked.account_id for r in records):
+            raise ValueError('Cannot publish costs outside the approved single-account scope')
         from django.db import connection
         if connection.vendor=='postgresql':
             import hashlib
@@ -357,7 +368,9 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
             started = timezone.now()
             before = meter.requests
             try:
-                records, days, estimated = fetch_month(ce, meter, first, last)
+                records, days, estimated = fetch_month(
+                    ce, meter, first, last,
+                    account_id=source.account_id if source.kind == BillingSource.STANDALONE else None)
                 total_rows += publish_month(source, month, records, days, estimated, meter, started,job=job)
             except Exception as exc:
                 CollectionPeriod.objects.filter(pk=period.pk).update(status='failed' if period.status != 'complete' else 'partial',
