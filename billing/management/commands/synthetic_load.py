@@ -23,7 +23,8 @@ from django.utils import timezone
 from billing import budgets, jobs, scheduler
 from billing.aws import Meter
 from billing.collector import collect_source
-from billing.models import (AccountAssignment, AwsAccount, BillingSource, Budget, BudgetAmount, CollectionPeriod, Cost, Customer, Job)
+from billing.models import (AccountAssignment, AwsAccount, BillingSource, Budget, BudgetAmount, CollectionPeriod, Cost, Customer,
+                            CustomerApproval, Job, RoleApproval)
 
 SERVICES = ['Amazon Elastic Compute Cloud - Compute', 'Amazon Simple Storage Service', 'Amazon Relational Database Service',
             'AmazonCloudWatch', 'AWS Support (Business)', 'Amazon Virtual Private Cloud', 'EC2 - Other', 'AWS Lambda']
@@ -117,12 +118,14 @@ class Command(BaseCommand):
             account_counter += 1
             source = BillingSource.objects.create(customer=customer, kind='payer', account_id=payer_id, role_arn=f'arn:aws:iam::{payer_id}:role/BillingConsole/CostReadOnly',
                                                   verified_at=timezone.now(), discovered_at=timezone.now(), initial_import_done=True, last_success=timezone.now(),
-                                                  discovery_mode='organizations', onboarding_step=6, capabilities={'organizations': True, 'cost_explorer': True})
+                                                  discovery_mode='organizations', onboarding_step=6, approved_capabilities=['organizations'],
+                                                  capabilities={'organizations': True, 'cost_explorer': True})
             customer_account_count = [2,15,101][i%3] if self.__module__.endswith('security_load') else per_customer
             accounts = [payer_id]
             for _ in range(customer_account_count - 1):
                 accounts.append(f'{account_counter:012d}')
                 account_counter += 1
+            self.approve_fixture_source(source, accounts)
             aws_accounts = [AwsAccount(account_id=a, name=f'acct-{a[-4:]}', state='ACTIVE', payer_account_id=payer_id, source=source, discovery='organizations') for a in accounts]
             AwsAccount.objects.bulk_create(aws_accounts)
             AccountAssignment.objects.bulk_create([AccountAssignment(account=a, customer=customer, start=date(2000, 1, 1)) for a in aws_accounts])
@@ -151,6 +154,25 @@ class Command(BaseCommand):
         tracemalloc.stop()
         return {'seconds': round(time.monotonic() - started, 1), 'cost_rows': total_rows, 'accounts': AwsAccount.objects.count(), 'customers': options['customers'],
                 'days': len(days), 'python_peak_memory_mb': round(peak / 1024 / 1024, 1)}
+
+    def approve_fixture_source(self, source, accounts):
+        """Give generated sources explicit synthetic consent; never bypass collector checks."""
+        if not source.customer.name.startswith('Synthetic '):
+            raise CommandError('Synthetic approval fixtures require a generated synthetic customer.')
+        actor = 'synthetic-load'
+        evidence = 'Synthetic fixture only: generated for isolated load testing; no AWS access.'
+        approval, _ = CustomerApproval.objects.get_or_create(customer=source.customer, defaults={
+            'contacts': ['load-test@example.invalid'], 'authorized_users': ['synthetic-reader'],
+            'billing_fields': ['day', 'account_id', 'service', 'unblended', 'amortized'],
+            'metadata': [], 'storage_region': settings.AWS_REGION, 'retention_days': 365,
+            'status': 'approved', 'evidence': evidence, 'approved_by': actor, 'approved_at': timezone.now(),
+        })
+        # One generated customer may have multiple payers and standalone sources.
+        approval.expected_accounts = sorted(set(approval.expected_accounts) | set(accounts) | {source.account_id})
+        approval.optional_capabilities = sorted(set(approval.optional_capabilities) | set(source.approved_capabilities))
+        approval.save(update_fields=['expected_accounts', 'optional_capabilities', 'updated_at'])
+        RoleApproval.objects.create(source=source, role_arn=source.role_arn, connection_version=source.connection_version,
+            status='approved', requested_by=actor, approved_by=actor, approved_at=timezone.now(), evidence=evidence)
 
     # --- simulated collection ----------------------------------------------------------------
     def simulate_collection(self, options):
@@ -310,6 +332,8 @@ class Command(BaseCommand):
         from billing.models import SyncRun, AuditEvent
         SyncRun.objects.filter(source__customer__in=synthetic).delete()
         AuditEvent.objects.filter(customer__in=synthetic).delete()
+        RoleApproval.objects.filter(source__customer__in=synthetic).delete()
+        CustomerApproval.objects.filter(customer__in=synthetic).delete()
         BillingSource.objects.filter(customer__in=synthetic).delete()
         synthetic.delete()
         User.objects.filter(username='synthetic-reader').delete()
