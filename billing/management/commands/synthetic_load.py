@@ -173,6 +173,13 @@ class Command(BaseCommand):
         approval.save(update_fields=['expected_accounts', 'optional_capabilities', 'updated_at'])
         RoleApproval.objects.create(source=source, role_arn=source.role_arn, connection_version=source.connection_version,
             status='approved', requested_by=actor, approved_by=actor, approved_at=timezone.now(), evidence=evidence)
+        # These are fixture facts, not AWS verification: synthetic runs never contact AWS.
+        source.trust_checks = {
+            'correct_external_id': 'passed', 'missing_external_id': 'denied', 'wrong_external_id': 'denied',
+            'account_identity': 'passed', 'exact_collector_principal': 'passed',
+            'connection_version': source.connection_version,
+        }
+        source.save(update_fields=['trust_checks'])
 
     # --- simulated collection ----------------------------------------------------------------
     def simulate_collection(self, options):
@@ -291,7 +298,8 @@ class Command(BaseCommand):
     def measure_fairness(self, options):
         """Schedule one slot for every source and check the lease order distributes across sources."""
         Job.objects.all().delete()
-        now = timezone.now()
+        # The simulated import has already completed the current collection slot.
+        now = scheduler.next_slot(timezone.now())
         created = scheduler.schedule_due(now)
         leased_sources, order = [], []
         started = time.monotonic()

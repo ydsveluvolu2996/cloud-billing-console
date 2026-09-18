@@ -107,7 +107,7 @@ class ActivationUiTests(TestCase):
         self.assertFalse(Job.objects.filter(source=self.source, kind='verify').exists())
         page = self.client.get(self.url)
         self.assertContains(page, 'Waiting to connect')
-        self.assertContains(page, 'Connection setup is already running')
+        self.assertContains(page, 'Connection checks are already running')
 
     def test_consent_is_required_and_no_request_is_written(self):
         self.consent.pop('confirmed')
@@ -150,7 +150,7 @@ class ActivationUiTests(TestCase):
         response = self.client.get(self.url)
         self.assertContains(response, 'Needs attention')
         self.assertContains(response, 'Copy the current trust policy')
-        self.assertContains(response, 'Retry connection and import')
+        self.assertContains(response, 'Retry connection')
         response = self.client.get('/onboarding/?state=Needs+attention')
         self.assertContains(response, self.customer.name)
         self.assertContains(response, 'Copy the current trust policy')
@@ -176,11 +176,11 @@ class ActivationUiTests(TestCase):
         self.source.kind = BillingSource.PAYER
         self.source.save()
         response = self.client.get(self.url)
-        self.assertContains(response, 'Management and shared payer connections use the reviewed approval workflow')
+        self.assertContains(response, 'Management and shared payer connections require reviewed authorization')
         self.assertNotContains(response, 'name="action" value="activate"')
 
     @override_settings(ONBOARDING_BROKER_FUNCTION='')
     def test_unconfigured_automation_is_explicit_and_does_not_enqueue(self):
-        self.assertContains(self.client.get(self.url), 'Automatic setup is not available yet')
+        self.assertContains(self.client.get(self.url), 'Automatic connection setup is not available yet')
         self.client.post(self.url, self.consent)
         self.assertFalse(ActivationRequest.objects.exists())

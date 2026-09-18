@@ -4,16 +4,21 @@ Slots: 00:00, 06:00, 12:00 and 18:00 UTC. Each active source gets one collect jo
 with configurable jitter; keys make scheduling idempotent. Older months are reconciled on the
 weekly and monthly cadence. Manual refresh requests are coalesced into one job per source.
 """
+import logging
 import random
-from datetime import timedelta
+from datetime import timedelta, timezone as datetime_timezone
 from django.conf import settings
-from django.db.models import Count
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.db.models import Count, Q
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from . import collector, jobs
 from .aws import Meter, Session
 from .models import BillingSource, Job
 
 SLOT_HOURS = 6
+logger = logging.getLogger(__name__)
 
 
 def slot_for(now):
@@ -38,35 +43,105 @@ def active_sources():
     return BillingSource.objects.filter(enabled=True, customer__active=True, kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).exclude(role_arn='').exclude(verified_at=None)
 
 
+def collection_initialized(source):
+    if source.collects_costs:
+        return source.initial_import_done
+    return bool(source.initial_import_done or source.last_success or source.capabilities.get('budgets_imported_at'))
+
+
+def collection_readiness(source):
+    """An empty reason means the dashboard can request a first pull or refresh."""
+    if not source.enabled or not source.customer.active:
+        return 'Resume this connection and customer before pulling data.'
+    if not source.role_arn or not source.verified_at:
+        return 'Connect and verify this AWS account before pulling data.'
+    if source.activation_requests.filter(status__in=['queued', 'processing', 'verifying', 'importing']).exists():
+        return 'Wait for the connection setup to finish before pulling data.'
+    if source.collects_costs and not source.discovered_at:
+        return 'Wait for account discovery to finish before pulling data.'
+    if settings.REQUIRE_CONNECTION_APPROVAL:
+        from .iam import approval_ready
+        checks = {'correct_external_id': 'passed', 'missing_external_id': 'denied', 'wrong_external_id': 'denied',
+                  'account_identity': 'passed', 'exact_collector_principal': 'passed', 'connection_version': source.connection_version}
+        if not approval_ready(source):
+            return 'Current customer and role approval are required before pulling data.'
+        if any(source.trust_checks.get(key) != value for key, value in checks.items()):
+            return 'Verify the current connection settings before pulling data.'
+    if not source.collects_costs and not _imports_budgets(source):
+        return 'Approve AWS budget access before pulling data.'
+    return ''
+
+
+def _imports_budgets(source):
+    return 'budgets' in source.approved_capabilities or (not settings.REQUIRE_CONNECTION_APPROVAL and source.capabilities.get('budgets'))
+
+
+def _pending_job(source, kind):
+    return Job.objects.filter(source=source, kind=kind, status__in=[Job.QUEUED, Job.LEASED]).filter(
+        Q(payload__connection_version=source.connection_version) | Q(payload__connection_version__isnull=True)).order_by('created_at').first()
+
+
+def _budget_success(source):
+    value = source.capabilities.get('budgets_imported_at')
+    try:
+        imported = parse_datetime(value) if isinstance(value, str) else None
+    except ValueError:
+        imported = None
+    if imported and timezone.is_naive(imported):
+        imported = imported.replace(tzinfo=datetime_timezone.utc)
+    if not source.collects_costs:
+        return max((value for value in (source.last_success, imported) if value), default=None)
+    return imported
+
+
 def schedule_due(now=None):
-    """Idempotently enqueue the current slot's work plus manual refresh requests."""
+    """Catch up one slot per initialized account; first pulls require the dashboard."""
     now = now or timezone.now()
     slot = slot_for(now)
     stamp = slot.strftime('%Y%m%dT%H')
     jitter_seconds = getattr(settings, 'SCHEDULE_JITTER_SECONDS', 900)
     created = 0
-    for source in active_sources():
-        run_after = slot + timedelta(seconds=random.uniform(0, jitter_seconds))
-        _, made = jobs.enqueue('collect', key=f'collect:{source.pk}:{stamp}', source=source, priority=5, once=True,
-                               run_after=run_after, payload={'months_back': reconcile_months(slot), 'slot': stamp})
-        created += made
-        _, made = jobs.enqueue('explorer_refresh', key=f'explorer_refresh:{source.pk}:{stamp}', source=source, priority=7, once=True,
-                               run_after=run_after + timedelta(minutes=5), payload={'scheduled': True})
-        created += made
-        if 'budgets' in source.approved_capabilities or (not settings.REQUIRE_CONNECTION_APPROVAL and source.capabilities.get('budgets')):
-            _, made = jobs.enqueue('import_budgets', key=f'import_budgets:v2:{source.pk}:{stamp}', source=source, priority=8, once=True,
-                                   run_after=run_after + timedelta(minutes=2))
-            created += made
-        if slot.hour == 0:
-            _, made = jobs.enqueue('discover', key=f'discover:{source.pk}:{stamp}', source=source, priority=6, once=True, run_after=run_after)
-            created += made
-        BillingSource.objects.filter(pk=source.pk).update(next_run=run_after if source.next_run is None or source.next_run < now else source.next_run)
-    for source in BillingSource.objects.filter(kind=BillingSource.MEMBER_BUDGETS, enabled=True, customer__active=True).exclude(role_arn='').exclude(verified_at=None):
-        _, made = jobs.enqueue('import_budgets', key=f'import_budgets:v2:{source.pk}:{stamp}', source=source, priority=8, once=True, run_after=slot)
-        created += made
-    for source in active_sources().filter(sync_requested=True):
-        _, made = jobs.enqueue('collect', key=f'collect:{source.pk}:manual', source=source, priority=3, payload={'months_back': 1, 'manual': True})
-        created += made
+    source_ids = BillingSource.objects.filter(enabled=True, customer__active=True).exclude(role_arn='').exclude(verified_at=None).values_list('pk', flat=True)
+    for source_id in list(source_ids):
+        try:
+            with transaction.atomic():
+                source = BillingSource.objects.select_for_update().get(pk=source_id)
+                if not collection_initialized(source) or collection_readiness(source):
+                    BillingSource.objects.filter(pk=source.pk).update(next_run=None)
+                    continue
+                run_after = slot + timedelta(seconds=random.uniform(0, jitter_seconds))
+                version_key = f'{source.pk}:v{source.connection_version}:{stamp}'
+                made_for_source = 0
+                primary = None
+                if source.collects_costs and (not source.last_success or source.last_success < slot):
+                    primary = _pending_job(source, 'collect')
+                    if primary is None:
+                        primary, made = jobs.enqueue('collect', key=f'collect:{version_key}', source=source, priority=5, once=True,
+                            run_after=run_after, payload={'months_back': reconcile_months(slot), 'slot': stamp})
+                        made_for_source += made
+                    _, made = jobs.enqueue('explorer_refresh', key=f'explorer_refresh:{version_key}', source=source, priority=7, once=True,
+                        run_after=run_after + timedelta(minutes=5), payload={'scheduled': True})
+                    made_for_source += made
+                    if slot.hour == 0:
+                        _, made = jobs.enqueue('discover', key=f'discover:{version_key}', source=source, priority=6, once=True, run_after=run_after)
+                        made_for_source += made
+                budget_success = _budget_success(source)
+                if _imports_budgets(source) and (not budget_success or budget_success < slot):
+                    budget_job = _pending_job(source, 'import_budgets')
+                    if budget_job is None:
+                        budget_job, made = jobs.enqueue('import_budgets', key=f'import_budgets:{version_key}', source=source, priority=8, once=True,
+                            run_after=run_after + timedelta(minutes=2))
+                        made_for_source += made
+                    primary = primary or budget_job
+                future = primary.run_after if primary and primary.status == Job.QUEUED and primary.run_after > now else next_slot(now)
+                BillingSource.objects.filter(pk=source.pk).update(next_run=future, sync_requested=False)
+                created += made_for_source
+        except BillingSource.DoesNotExist:
+            continue
+        except Exception:
+            # A malformed or concurrently edited account cannot stop scheduling
+            # other customers; its transaction is rolled back and the next tick retries.
+            logger.exception('Could not schedule billing source %s', source_id)
     _, made = jobs.enqueue('evaluate_budgets', key=f'evaluate_budgets:{stamp}', priority=9, once=True, run_after=slot + timedelta(minutes=45))
     created += made
     _, made = jobs.enqueue('allocate_projects', key=f'allocate_projects:{stamp}', priority=9, once=True, run_after=slot + timedelta(minutes=40))
@@ -76,24 +151,50 @@ def schedule_due(now=None):
     return created
 
 
-def request_refresh(source, actor='', months_back=1):
+def request_refresh(source, actor='', months_back=1, actor_id=None):
     """Coalesced manual refresh: repeated clicks share one queued job."""
-    BillingSource.objects.filter(pk=source.pk).update(sync_requested=True)
-    return jobs.enqueue('collect', key=f'collect:{source.pk}:manual', source=source, priority=3, payload={'months_back': months_back, 'manual': True, 'actor': actor})
+    return _request_pull(source, actor=actor, actor_id=actor_id, months_back=months_back)
 
 
 def request_verification(source, actor=''):
-    return jobs.enqueue('verify', key=f'verify:{source.pk}', source=source, priority=1, max_attempts=1, payload={'actor': actor})
+    return jobs.enqueue('verify', key=f'verify:{source.pk}:v{source.connection_version}', source=source, priority=1, max_attempts=1, payload={'actor': actor})
 
 
 def request_discovery(source, actor=''):
-    return jobs.enqueue('discover', key=f'discover:{source.pk}:manual', source=source, priority=2, max_attempts=2, payload={'actor': actor})
+    return jobs.enqueue('discover', key=f'discover:{source.pk}:manual:v{source.connection_version}', source=source, priority=2, max_attempts=2, payload={'actor': actor})
 
 
-def request_initial_import(source, actor=''):
-    BillingSource.objects.filter(pk=source.pk).update(sync_requested=True)
-    return jobs.enqueue('collect', key=f'collect:{source.pk}:initial', source=source, priority=4,
-                        payload={'months_back': settings.HISTORY_MONTHS, 'initial': True, 'actor': actor})
+def request_initial_import(source, actor='', actor_id=None):
+    return _request_pull(source, actor=actor, actor_id=actor_id, months_back=settings.HISTORY_MONTHS, initial=True)
+
+
+def _request_pull(source, *, actor, actor_id, months_back, initial=False):
+    with transaction.atomic():
+        source = BillingSource.objects.select_for_update().get(pk=source.pk)
+        reason = collection_readiness(source)
+        if reason:
+            raise ValidationError(reason)
+        initial = initial or not collection_initialized(source)
+        payload = {'months_back': settings.HISTORY_MONTHS if initial else months_back, 'manual': True, 'initial': initial, 'actor': actor}
+        if actor_id is not None:
+            payload['actor_id'] = actor_id
+        primary = None
+        for kind in (['collect'] if source.collects_costs else []) + (['import_budgets'] if _imports_budgets(source) else []):
+            pending = _pending_job(source, kind)
+            suffix = 'manual'
+            if pending and kind == 'collect' and payload['months_back'] > pending.payload.get('months_back', 1):
+                if pending.status == Job.QUEUED:
+                    pending.payload = dict(pending.payload, **payload, connection_version=source.connection_version)
+                    pending.save(update_fields=['payload'])
+                else:
+                    pending = None  # A running shorter refresh cannot satisfy a requested backfill.
+                    suffix = 'backfill'
+            result = (pending, False) if pending else jobs.enqueue(kind, key=f'{kind}:{source.pk}:{suffix}:v{source.connection_version}',
+                source=source, priority=3, payload=payload)
+            if primary is None:
+                primary = result
+        BillingSource.objects.filter(pk=source.pk).update(sync_requested=False)
+        return primary
 
 
 def queue_summary():
@@ -109,6 +210,9 @@ def load_source(job):
     source = BillingSource.objects.select_related('customer').filter(pk=job.source_id).first()
     if source is None:
         raise jobs.PermanentJobError('The connection no longer exists.')
+    version = job.payload.get('connection_version')
+    if version is not None and version != source.connection_version:
+        raise jobs.PermanentJobError('The connection changed after this request. Pull data again for the current settings.')
     if not source.enabled or not source.customer.active:
         raise jobs.PermanentJobError('The connection is paused or the customer is offboarded.')
     if not source.role_arn:
@@ -142,11 +246,11 @@ def handle_verify(job):
                 and not capabilities.get('budgets')
                 and capabilities.get('budgets_error') in ('AccessDenied', 'AccessDeniedException', 'Throttling', 'ThrottlingException', 'TooManyRequestsException')):
             from botocore.exceptions import ClientError
-            BillingSource.objects.filter(pk=source.pk).update(verified_at=None)
+            BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(verified_at=None)
             raise ClientError({'Error': {'Code': capabilities['budgets_error']}}, 'DescribeBudgets')
     except Exception as exc:
         message = collector.safe_error(exc)
-        BillingSource.objects.filter(pk=source.pk).update(last_error=message)
+        BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(last_error=message)
         from botocore.exceptions import ClientError
         if job.payload.get('activation_id') and isinstance(exc, ClientError):
             code = exc.response.get('Error', {}).get('Code', '')
@@ -158,8 +262,8 @@ def handle_verify(job):
         raise jobs.PermanentJobError(message)
     if source.collects_costs:
         request_discovery(source)
-    if capabilities.get('budgets'):
-        jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:verified', source=source, priority=2)
+    if capabilities.get('budgets') and collection_initialized(source):
+        jobs.enqueue('import_budgets', key=f'import_budgets:{source.pk}:verified:v{source.connection_version}', source=source, priority=2)
     return {'capabilities': capabilities}
 
 
@@ -171,7 +275,7 @@ def handle_discover(job):
     try:
         found = collector.discover_accounts(source)
     except Exception as exc:
-        BillingSource.objects.filter(pk=source.pk).update(last_error=collector.safe_error(exc))
+        BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(last_error=collector.safe_error(exc))
         raise
     return {'accounts': len(found), 'mode': source.discovery_mode}
 
@@ -217,7 +321,7 @@ def handle_import_budgets(job):
     caps.pop('budgets_error', None)
     updates = {'capabilities': caps}
     if not source.collects_costs:
-        updates.update(last_error='', last_success=timezone.now())
+        updates.update(last_error='', last_success=timezone.now(), initial_import_done=True, sync_requested=False)
     BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(**updates)
     return {'budgets': count}
 

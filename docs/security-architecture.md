@@ -44,7 +44,7 @@ Bulk previews bind to an immutable requesting user ID and an authorization finge
 ## Dashboard connection activation
 
 For single AWS accounts (including organization members) and member budget readers,
-MFA-verified internal portfolio administrators can now submit **Connect and import**.
+MFA-verified internal portfolio administrators can submit **Connect account**.
 `billing_request_activation` is a request-only SECURITY DEFINER function. It locks
 and checks the live administrator, session version, source, consent and customer,
 and writes an immutable snapshot. Neither web nor collector can directly insert,
@@ -64,8 +64,11 @@ The original exact-role IAM policy and its existing customer permissions are ret
 The coordinator atomically updates the collector's root-owned allowlist, approves
 only the submitted account and selected capabilities, and queues trust verification.
 Missing/wrong External ID tests remain mandatory. It waits for fresh verification
-and discovery before the initial cost import, and displays completion or actionable
-failure in the dashboard. Single-account collection filters AWS requests to that ID
+and discovery, then displays readiness or an actionable failure in the dashboard.
+Connection activation does not queue billing or budget imports. An authorized user
+explicitly chooses **Pull initial data**, or **Pull data for all connected accounts**
+in Sync & activity. The first successful pull enables automatic six-hour collection;
+existing initialized connections continue on their schedule. Single-account collection filters AWS requests to that ID
 and rejects results outside it before replacing any saved costs. No customer access
 keys, passwords, or hosting AWS sign-ins are part of ordinary account activation.
 

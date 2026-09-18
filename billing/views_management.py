@@ -25,8 +25,8 @@ from .web import audit, paginate, staff_required
 
 STATES = ['Awaiting customer setup', 'Connection verified', 'Account discovery complete', 'Initial import running', 'Connected',
           'Partial data', 'Permission problem', 'Stale data', 'Paused']
-ONBOARDING_STATES = ['Waiting to connect', 'Authorizing connection', 'Checking AWS access', 'Importing billing history', 'Needs attention', *STATES]
-CONNECTION_SETUP_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Customer role'), (4, 'Connect and import')]
+ONBOARDING_STATES = ['Waiting to connect', 'Authorizing connection', 'Checking AWS access', 'Ready for first pull', 'Pull queued', 'Pulling data', 'Importing billing history', 'Needs attention', *STATES]
+CONNECTION_SETUP_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Connect account'), (4, 'Pull initial data')]
 
 
 def month_param(request):
@@ -281,6 +281,8 @@ def _can_activate_connection(request):
 
 def _connection_activation_status(source, activation):
     if not activation or activation.status == 'completed':
+        if not scheduler.collection_initialized(source) and not scheduler.collection_readiness(source):
+            return {'label': 'Ready for first pull', 'description': 'Account connected. Choose Pull initial data once to start billing collection and automatic refresh.', 'pending': False}
         state = source.state
         if not source.collects_costs and source.enabled and source.verified_at and source.last_success and not source.last_error:
             state = 'Connected' if source.last_success >= timezone.now() - source.STALE_AFTER else 'Stale data'
@@ -291,7 +293,7 @@ def _connection_activation_status(source, activation):
             'Partial data': 'Some billing data could not be collected. Review the recent jobs and the issue below.',
             'Permission problem': 'AWS access needs attention. Review the customer role permissions before retrying.',
         }
-        return {'label': state, 'description': descriptions.get(state, 'Create or update the customer role, then connect and import below.'), 'pending': False}
+        return {'label': state, 'description': descriptions.get(state, 'Create or update the customer role, then choose Connect account below.'), 'pending': False}
     descriptions = {
         'queued': ('Waiting to connect', 'Your request is queued. The dashboard will authorize this exact account and check its role.'),
         'processing': ('Authorizing connection', 'The dashboard is preparing the approved read-only connection.'),
@@ -348,7 +350,7 @@ def source_detail(request, pk):
             except ValidationError as exc:
                 activation_form.add_error(None, '; '.join(exc.messages))
             else:
-                messages.success(request, 'Connection requested. AWS verification and the first import will run automatically. Reload this page to follow progress.')
+                messages.success(request, 'Connection requested. AWS access will be checked automatically. When ready, choose Pull initial data to start collection.')
                 return redirect('source_detail', pk=pk)
     if request.method == 'POST' and request.POST.get('action') == 'connection':
         form = ConnectionForm(request.POST, instance=source)
@@ -366,18 +368,27 @@ def source_detail(request, pk):
                 from .iam import request_allowlist
                 request_allowlist(source, request.user.username)
             audit(request, 'Connection settings saved', customer=source.customer, source=source)
-            messages.success(request, 'Connection settings saved. Use the updated IAM policies, then choose Connect and import.')
+            messages.success(request, 'Connection settings saved. Use the updated IAM policies, then choose Connect account.')
             return redirect('source_detail', pk=pk)
     accounts = AwsAccount.objects.filter(Q(source=source) | Q(payer_account_id=source.account_id)).prefetch_related('assignments__customer').order_by('account_id')
     pending = Job.objects.filter(source=source, status__in=[Job.QUEUED, Job.LEASED]).order_by('run_after')
-    step = min(source.onboarding_step, 4)
+    step = 4 if source.verified_at else 3
     activation = source.activation_requests.order_by('-created_at').first()
     activation_status = _connection_activation_status(source, activation)
+    from .collection_state import snapshot
+    recent_jobs = list(Job.objects.filter(source=source).order_by('-created_at')[:20])
+    collection = snapshot(source, recent_jobs, can_edit=True)
+    if not activation_status['pending'] and collection['collection_pending']:
+        data_scope = 'costs and selected budgets' if source.collects_costs else 'AWS budgets'
+        activation_status = {'label': collection['status'], 'description': f'Your pull of {data_scope} is queued or running. You can leave this page; progress is saved.', 'pending': True}
+    elif not activation_status['pending'] and collection['status'] == 'Needs attention':
+        activation_status = {'label': 'Needs attention', 'description': collection['error'], 'pending': False}
     return render(request, 'billing/source_detail.html', {
+        **collection, 'can_manage_source': True,
         'source': source, 'customer': source.customer, 'form': form, 'active_page': 'customers', 'steps': CONNECTION_SETUP_STEPS, 'step': step,
         'accounts': accounts, 'pending': pending, 'periods': source.periods.all()[:8], 'runs': source.syncs.all()[:10],
         'imported_budgets': source.imported_budgets.all()[:20], 'assignment_form': AssignmentForm(initial={'customer': source.customer}),
-        'jobs': Job.objects.filter(source=source)[:10],
+        'jobs': recent_jobs[:10],
         'activation': activation, 'activation_status': activation_status, 'activation_form': activation_form,
         'can_activate': can_activate, 'activation_enabled': bool(getattr(settings, 'ONBOARDING_BROKER_FUNCTION', '')),
         'automation_supported': source.role_arn.startswith(f'arn:aws:iam::{source.account_id}:role/BillingConsole/'),
@@ -432,20 +443,23 @@ def source_action(request, pk, action):
         if not source.role_arn:
             messages.error(request, 'Save the role ARN first.')
         elif settings.REQUIRE_CONNECTION_APPROVAL and not approval_ready(source):
-            messages.error(request, 'Choose Connect and import to authorize this connection before verification.')
+            messages.error(request, 'Choose Connect account to authorize this connection before verification.')
         else:
             scheduler.request_verification(source, actor=actor)
             messages.success(request, 'Verification queued; the worker assumes the role and checks capabilities within a minute.')
     elif action == 'discover':
         scheduler.request_discovery(source, actor=actor)
         messages.success(request, 'Account discovery queued.')
-    elif action == 'import':
-        job, created = scheduler.request_initial_import(source, actor=actor)
-        BillingSource.objects.filter(pk=pk).update(onboarding_step=6)
-        messages.success(request, 'Initial import queued (six completed months plus the current month).' if created else 'An import is already queued for this connection.')
-    elif action == 'refresh':
-        scheduler.request_refresh(source, actor=actor)
-        messages.success(request, 'Refresh queued.')
+    elif action in ('import', 'refresh'):
+        try:
+            queue = scheduler.request_initial_import if action == 'import' else scheduler.request_refresh
+            job, created = queue(source, actor=actor, actor_id=request.user.pk)
+        except ValidationError as exc:
+            messages.error(request, '; '.join(exc.messages))
+            return redirect('source_detail', pk=pk)
+        else:
+            BillingSource.objects.filter(pk=pk).update(onboarding_step=6)
+            messages.success(request, 'Data pull queued. Automatic collection continues every six hours after the first successful pull.' if created else 'A data pull is already queued or running for this connection.')
     elif action == 'rotate':
         onboarding.rotate_external_id(source, actor=actor)
         messages.success(request, 'New external ID issued. Share the new trust JSON so the customer updates their role, then verify again.')
@@ -859,11 +873,10 @@ def onboarding_view(request):
         activations = list(source.activation_requests.all())
         activation = max(activations, key=lambda item: item.created_at) if activations else None
         activation_status = _connection_activation_status(source, activation)
-        if activation and activation.status != 'completed':
-            state = activation_status['label']
+        state = activation_status['label']
         if state_filter and state != state_filter:
             continue
-        rows.append({'source': source, 'state': state, 'accounts': account_counts.get(source.pk, 0), 'step': source.onboarding_step,
+        rows.append({'source': source, 'state': state, 'accounts': account_counts.get(source.pk, 0), 'step': 4 if source.verified_at else 3 if source.role_arn else 2,
                      'pending': pending_counts.get(source.pk, 0), 'activation_pending': activation_status['pending'],
                      'error': (activation.last_error if activation else '') or source.last_error})
     sort, direction = sort_param(request, ['customer', 'state', 'step', 'last_success'], 'customer')

@@ -52,6 +52,44 @@ def _check_publication_job(job):
             raise ConnectionChanged()
 
 
+def _renew_job(job, progress=None):
+    if job is not None:
+        from .jobs import heartbeat
+        if not heartbeat(job, progress):
+            raise ConnectionChanged()
+
+
+def _record_collection_failure(source, job, message, period=None, request_count=0):
+    """An obsolete worker may record its run failure, but cannot change current status."""
+    try:
+        with transaction.atomic():
+            _check_publication_job(job)
+            current = BillingSource.objects.select_for_update().get(pk=source.pk)
+            _check_publication_source(current, source)
+            if period is not None:
+                CollectionPeriod.objects.filter(pk=period.pk).update(
+                    status='failed' if period.status != 'complete' else 'partial',
+                    attempts=period.attempts + 1, last_attempt=timezone.now(), last_error=message,
+                    request_count=request_count)
+            BillingSource.objects.filter(pk=source.pk).update(last_error=message)
+    except (ConnectionChanged, BillingSource.DoesNotExist):
+        return
+
+
+class _LeasedMeter:
+    """Keep paginated work leased, stopping as soon as ownership is lost."""
+
+    def __init__(self, meter, job):
+        self.meter, self.job = meter, job
+
+    def call(self, client, operation, **kwargs):
+        _renew_job(self.job)
+        result = self.meter.call(client, operation, **kwargs)
+        # A slow response must not resurrect an expired or replaced lease.
+        _renew_job(self.job)
+        return result
+
+
 def safe_error(exc):
     if isinstance(exc, OverlappingBillingScope):
         return (f'Account {exc.account_id} is already collected through another connection ({exc.other}) for the same days. '
@@ -254,7 +292,7 @@ def ensure_assignment(account, customer, start=None, note='', actor=''):
 
 # --- cost collection ----------------------------------------------------------------------
 
-def fetch_month(ce, meter, first, last, account_id=None):
+def fetch_month(ce, meter, first, last, account_id=None, job=None):
     """Fetch daily LINKED_ACCOUNT × SERVICE costs for [first, last) with validation."""
     params = dict(TimePeriod={'Start': first.isoformat(), 'End': last.isoformat()}, Granularity='DAILY',
                   Metrics=['UnblendedCost', 'AmortizedCost'],
@@ -265,8 +303,9 @@ def fetch_month(ce, meter, first, last, account_id=None):
     records = []
     days = set()
     estimated = False
+    page_meter = _LeasedMeter(meter, job)
     while True:
-        result = meter.call(ce, 'get_cost_and_usage', **params)
+        result = page_meter.call(ce, 'get_cost_and_usage', **params)
         for period in result.get('ResultsByTime', []):
             day = date.fromisoformat(period['TimePeriod']['Start'])
             if not first <= day < last:
@@ -390,18 +429,14 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
             try:
                 records, days, estimated = fetch_month(
                     ce, meter, first, last,
-                    account_id=source.account_id if source.kind == BillingSource.STANDALONE else None)
+                    account_id=source.account_id if source.kind == BillingSource.STANDALONE else None, job=job)
                 total_rows += publish_month(source, month, records, days, estimated, meter, started,job=job)
             except Exception as exc:
-                CollectionPeriod.objects.filter(pk=period.pk).update(status='failed' if period.status != 'complete' else 'partial',
-                    attempts=period.attempts + 1, last_attempt=timezone.now(), last_error=safe_error(exc),
-                    request_count=meter.requests - before)
+                _record_collection_failure(source, job, safe_error(exc), period, meter.requests - before)
                 raise
             completed.add(month.isoformat())
             progress['completed'] = sorted(completed)
-            if job is not None:
-                from .jobs import heartbeat
-                heartbeat(job, progress)
+            _renew_job(job, progress)
         now = timezone.now()
         with transaction.atomic():
             _check_publication_job(job)
@@ -414,7 +449,7 @@ def collect_source(source, months=None, session=None, meter=None, today=None, jo
     except Exception as exc:
         run.status, run.error, run.rows, run.requests, run.finished_at = 'failed', safe_error(exc), total_rows, meter.requests, timezone.now()
         run.save()
-        BillingSource.objects.filter(pk=source.pk, connection_version=source.connection_version).update(last_error=run.error)
+        _record_collection_failure(source, job, run.error)
         logger.warning('Collection failed source=%s type=%s', source.pk, type(exc).__name__)
         if job is not None:
             job.progress = progress
@@ -435,7 +470,7 @@ def import_budgets(source, session=None, meter=None, job=None):
     meter = meter or Meter()
     session = session or Session(source)
     client = session.client('budgets')
-    items = paginate(meter, client, 'describe_budgets', 'Budgets', AccountId=source.account_id, MaxResults=100)
+    items = paginate(_LeasedMeter(meter, job), client, 'describe_budgets', 'Budgets', AccountId=source.account_id, MaxResults=100)
     now = timezone.now()
     snapshots = []
     for b in items:

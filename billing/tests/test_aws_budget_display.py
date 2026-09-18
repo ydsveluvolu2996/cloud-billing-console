@@ -44,7 +44,17 @@ class AWSBudgetDisplayTests(TestCase):
 
     @override_settings(REQUIRE_CONNECTION_APPROVAL=True)
     def test_approved_but_previously_denied_schedules_automatic_retry(self):
+        from django.conf import settings
+        from billing.models import CustomerApproval, RoleApproval
         self.source.capabilities={'budgets':False};self.source.save()
+        CustomerApproval.objects.create(customer=self.customer, status='approved', contacts=['Finance'], authorized_users=['admin'],
+            expected_accounts=[self.source.account_id], billing_fields=['cost'], optional_capabilities=['budgets'],
+            storage_region=settings.AWS_REGION, retention_days=365, evidence='Approved fixture', approved_by='admin', approved_at=timezone.now())
+        RoleApproval.objects.create(source=self.source, role_arn=self.source.role_arn, connection_version=self.source.connection_version,
+            status='approved', requested_by='admin', evidence='Approved fixture', approved_at=timezone.now())
+        self.source.trust_checks = {'correct_external_id': 'passed', 'missing_external_id': 'denied', 'wrong_external_id': 'denied',
+            'account_identity': 'passed', 'exact_collector_principal': 'passed', 'connection_version': self.source.connection_version}
+        self.source.save(update_fields=['trust_checks'])
         scheduler.schedule_due()
         self.assertTrue(Job.objects.filter(kind='import_budgets',source=self.source).exists())
         before=Job.objects.count();scheduler.schedule_due();self.assertEqual(Job.objects.count(),before)
