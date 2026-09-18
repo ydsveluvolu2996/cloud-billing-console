@@ -104,6 +104,9 @@ class Agent:
     def activation_service(self, action):
         # Optional until the separately reviewed onboarding bootstrap is installed.
         if self.has_collector and Path('/etc/systemd/system/cloud-billing-activation.service').exists():
+            # A rollback can restore a release from before the activation worker existed.
+            if action in ('start', 'is-active') and not (self.root / 'billing/management/commands/process_activations.py').is_file():
+                return
             run(['systemctl', action, 'cloud-billing-activation'])
 
     def download(self, name, version, digest):
