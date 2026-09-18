@@ -188,7 +188,8 @@ class JobQueueTests(TestCase):
         self.assertEqual(Job.objects.filter(kind='collect', source=self.source).count(), 1)
         self.assertFalse(BillingSource.objects.get(pk=self.source.pk).sync_requested)
 
-    def test_manual_first_pull_coalesces_and_only_next_slot_collects_again(self):
+    @patch('django.utils.timezone.now', return_value=datetime(2026, 9, 8, 0, 10, tzinfo=dt_tz.utc))
+    def test_manual_first_pull_coalesces_and_only_next_slot_collects_again(self, clock):
         now = timezone.now()
         self.source.initial_import_done = False
         self.source.last_success = None
@@ -270,7 +271,8 @@ class JobQueueTests(TestCase):
         scheduler.schedule_due(now)
         self.assertEqual(Job.objects.filter(source=self.source, kind='import_budgets').count(), 1)
 
-    def test_automatic_first_pull_preserves_backoff_and_recovers_in_a_later_slot(self):
+    @patch('django.utils.timezone.now', return_value=datetime(2026, 9, 8, 0, 10, tzinfo=dt_tz.utc))
+    def test_automatic_first_pull_preserves_backoff_and_recovers_in_a_later_slot(self, clock):
         now = timezone.now()
         BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None)
         scheduler.schedule_due(now)
@@ -301,7 +303,8 @@ class JobQueueTests(TestCase):
         self.assertEqual(fresh.payload['months_back'], 6)
         self.assertNotEqual(fresh.key, first.key)
 
-    def test_failed_manual_first_pull_does_not_restart_on_every_scheduler_tick(self):
+    @patch('django.utils.timezone.now', return_value=datetime(2026, 9, 8, 0, 10, tzinfo=dt_tz.utc))
+    def test_failed_manual_first_pull_does_not_restart_on_every_scheduler_tick(self, clock):
         now = timezone.now()
         BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None)
         first, _ = scheduler.request_initial_import(self.source)
