@@ -64,11 +64,13 @@ The original exact-role IAM policy and its existing customer permissions are ret
 The coordinator atomically updates the collector's root-owned allowlist, approves
 only the submitted account and selected capabilities, and queues trust verification.
 Missing/wrong External ID tests remain mandatory. It waits for fresh verification
-and discovery, then displays readiness or an actionable failure in the dashboard.
-Connection activation does not queue billing or budget imports. An authorized user
-explicitly chooses **Pull initial data**, or **Pull data for all connected accounts**
-in Sync & activity. The first successful pull enables automatic six-hour collection;
-existing initialized connections continue on their schedule. Single-account collection filters AWS requests to that ID
+and discovery, then displays progress or an actionable failure in the dashboard.
+After connection checks pass, the background engine automatically queues the first
+billing and approved budget imports, then continues collection every six hours.
+Current connection version, verification, customer activity and approval gates apply
+to initial imports and scheduled refreshes alike. Paused or unapproved sources are
+skipped. Optional dashboard pull controls request an extra refresh within the user's
+authorized scope; they are not required to start collection. Single-account collection filters AWS requests to that ID
 and rejects results outside it before replacing any saved costs. No customer access
 keys, passwords, or hosting AWS sign-ins are part of ordinary account activation.
 

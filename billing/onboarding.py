@@ -16,7 +16,7 @@ from django.utils import timezone
 from .models import AuditEvent, AwsAccount, BillingSource, Budget, BudgetAmount, Customer, ExplorerQuery, Job, new_external_id
 
 ACCOUNT_RE = re.compile(r'^\d{12}$')
-WIZARD_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Connect account'), (4, 'Pull initial data')]
+WIZARD_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Connect account'), (4, 'Automatic data pull')]
 
 
 def source_template(source):

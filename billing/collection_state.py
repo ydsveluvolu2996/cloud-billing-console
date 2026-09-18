@@ -26,13 +26,16 @@ def snapshot(source, recent_jobs=(), *, can_edit=False):
     elif error:
         status = 'Needs attention'
     elif not initialized:
-        status = 'Ready for first pull'
+        status = 'Preparing automatic pull'
     else:
         status = 'Automatic refresh enabled'
     now = timezone.now()
     next_run = None
-    if initialized and not reason:
-        next_run = source.next_run if source.next_run and source.next_run > now else scheduler.next_slot(now)
+    if not reason:
+        if not initialized and not pending and not error:
+            next_run = now
+        else:
+            next_run = source.next_run if source.next_run and source.next_run > now else scheduler.next_slot(now)
     return {
         'source': source, 'status': status, 'last_success': source.last_success,
         'can_manage_source': can_edit,

@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from billing.collection_state import snapshot
 from billing.models import CustomerMembership, Job
@@ -59,6 +60,17 @@ class CurrentCollectionStatusTests(TestCase):
         payload = {'connection_version': version} if version is not None else {}
         return Job.objects.create(source=self.source, kind=kind, key=f'fixture-{Job.objects.count()}',
             status=status, payload=payload, last_error=error)
+
+    def test_new_ready_connection_shows_automatic_pull_preparation(self):
+        self.source.initial_import_done = False
+        self.source.last_success = None
+        self.source.save(update_fields=['initial_import_done', 'last_success'])
+        now = timezone.now()
+        state = snapshot(self.source, can_edit=True)
+        self.assertEqual(state['status'], 'Preparing automatic pull')
+        self.assertTrue(state['ready_to_pull'])
+        self.assertGreaterEqual(state['next_collection_at'], now)
+        self.assertLessEqual(state['next_collection_at'], timezone.now())
 
     def test_old_version_and_unselected_budget_jobs_do_not_block_current_connection(self):
         jobs = [self.job('collect', Job.QUEUED, 1),

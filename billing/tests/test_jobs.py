@@ -194,8 +194,6 @@ class JobQueueTests(TestCase):
         self.source.last_success = None
         self.source.approved_capabilities = ['budgets']
         self.source.save()
-        scheduler.schedule_due(now)
-        self.assertFalse(Job.objects.filter(source=self.source).exists())
         first, created = scheduler.request_initial_import(self.source, actor='operator', actor_id=7)
         repeated, repeated_created = scheduler.request_refresh(self.source, actor='operator', actor_id=7)
         self.assertTrue(created)
@@ -220,7 +218,33 @@ class JobQueueTests(TestCase):
         self.source.refresh_from_db()
         self.assertGreater(self.source.next_run, later + timedelta(minutes=20))
 
-    def test_new_budget_reader_needs_first_pull_and_legacy_readers_continue(self):
+    def test_new_accounts_pull_automatically_without_slot_delay_or_extra_discovery(self):
+        now = datetime(2026, 9, 8, 0, 1, tzinfo=dt_tz.utc)
+        BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None,
+            approved_capabilities=['budgets'])
+        with self.settings(SCHEDULE_JITTER_SECONDS=900):
+            scheduler.schedule_due(now)
+            scheduler.schedule_due(now + timedelta(seconds=30))
+        account_jobs = Job.objects.filter(source=self.source)
+        self.assertCountEqual(account_jobs.values_list('kind', flat=True), ['collect', 'import_budgets'])
+        for job in account_jobs:
+            self.assertEqual(job.run_after, now)
+            self.assertEqual(job.payload['initial'], True)
+            self.assertEqual(job.payload['connection_version'], self.source.connection_version)
+        first = account_jobs.get(kind='collect')
+        self.assertEqual(first.payload['months_back'], 6)
+        repeated, created = scheduler.request_refresh(self.source)
+        self.assertEqual(repeated.pk, first.pk)
+        self.assertFalse(created)
+        self.assertEqual(account_jobs.count(), 2)
+        # Import completion in the same slot must not create a second, regular pull.
+        account_jobs.update(status=Job.DONE)
+        BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=True, last_success=now,
+            capabilities={'budgets_imported_at': now.isoformat()})
+        scheduler.schedule_due(now + timedelta(minutes=1))
+        self.assertEqual(account_jobs.count(), 2)
+
+    def test_new_budget_reader_pulls_automatically_and_legacy_readers_continue(self):
         self.source.kind = BillingSource.MEMBER_BUDGETS
         self.source.approved_capabilities = ['budgets']
         self.source.initial_import_done = False
@@ -229,9 +253,12 @@ class JobQueueTests(TestCase):
         self.source.save()
         now = timezone.now()
         scheduler.schedule_due(now)
-        self.assertFalse(Job.objects.filter(source=self.source).exists())
-        first, _ = scheduler.request_refresh(self.source)
+        first = Job.objects.get(source=self.source)
         self.assertEqual(first.kind, 'import_budgets')
+        self.assertEqual(first.run_after, now)
+        repeated, created = scheduler.request_refresh(self.source)
+        self.assertEqual(repeated.pk, first.pk)
+        self.assertFalse(created)
         self.assertFalse(Job.objects.filter(source=self.source, kind='collect').exists())
         with patch('billing.scheduler.collector.import_budgets', return_value=0):
             scheduler.handle_import_budgets(first)
@@ -242,6 +269,86 @@ class JobQueueTests(TestCase):
         BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=now - timedelta(days=1), capabilities={})
         scheduler.schedule_due(now)
         self.assertEqual(Job.objects.filter(source=self.source, kind='import_budgets').count(), 1)
+
+    def test_automatic_first_pull_preserves_backoff_and_recovers_in_a_later_slot(self):
+        now = timezone.now()
+        BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None)
+        scheduler.schedule_due(now)
+        first = Job.objects.get(source=self.source, kind='collect')
+        Job.objects.filter(pk=first.pk).update(max_attempts=2)
+        with patch('billing.scheduler.Session'), patch('billing.scheduler.collector.collect_source', side_effect=RuntimeError('Temporary outage')):
+            self.assertFalse(jobs.run_job(jobs.lease('first-attempt', now=now, kinds=['collect'])))
+            first.refresh_from_db()
+            self.assertEqual(first.status, Job.QUEUED)
+            retry_at = first.run_after
+            scheduler.schedule_due(now + timedelta(seconds=30))
+            first.refresh_from_db()
+            self.assertEqual(first.run_after, retry_at)
+            self.assertEqual(first.attempts, 1)
+            self.assertEqual(Job.objects.filter(source=self.source, kind='collect').count(), 1)
+            self.assertFalse(jobs.run_job(jobs.lease('last-attempt', now=retry_at, kinds=['collect'])))
+        first.refresh_from_db()
+        self.assertEqual(first.status, Job.FAILED)
+        for _ in range(3):
+            scheduler.schedule_due(now + timedelta(minutes=5))
+        self.assertEqual(Job.objects.filter(source=self.source, kind='collect').count(), 1)
+        later = scheduler.next_slot(now)
+        scheduler.schedule_due(later)
+        scheduler.schedule_due(later + timedelta(seconds=30))
+        fresh = Job.objects.get(source=self.source, kind='collect', status=Job.QUEUED)
+        self.assertEqual(fresh.run_after, later)
+        self.assertEqual(fresh.attempts, 0)
+        self.assertEqual(fresh.payload['months_back'], 6)
+        self.assertNotEqual(fresh.key, first.key)
+
+    def test_failed_manual_first_pull_does_not_restart_on_every_scheduler_tick(self):
+        now = timezone.now()
+        BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None)
+        first, _ = scheduler.request_initial_import(self.source)
+        Job.objects.filter(pk=first.pk).update(status=Job.FAILED)
+        scheduler.schedule_due(now)
+        scheduler.schedule_due(now)
+        self.assertEqual(Job.objects.filter(source=self.source, kind='collect').count(), 1)
+        # An explicit dashboard retry remains available before the next slot.
+        retried, made = scheduler.request_refresh(self.source)
+        self.assertTrue(made)
+        self.assertNotEqual(retried.pk, first.pk)
+
+    def test_automatic_first_pull_waits_for_activation_and_other_readiness_guards(self):
+        from django.contrib.auth.models import User
+        from billing.models import ActivationRequest
+        now = timezone.now()
+        BillingSource.objects.filter(pk=self.source.pk).update(initial_import_done=False, last_success=None)
+        user = User.objects.create_user('connecting-operator')
+        activation = ActivationRequest.objects.create(source=self.source, requested_by=user, session_version=1,
+            connection_version=self.source.connection_version, snapshot={})
+        for status in ('queued', 'processing', 'verifying', 'importing'):
+            ActivationRequest.objects.filter(pk=activation.pk).update(status=status)
+            scheduler.schedule_due(now)
+            self.assertFalse(Job.objects.filter(source=self.source).exists())
+        ActivationRequest.objects.filter(pk=activation.pk).update(status='completed')
+        for changes in ({'enabled': False}, {'verified_at': None}, {'discovered_at': None}, {'role_arn': ''}):
+            with self.subTest(changes=changes):
+                BillingSource.objects.filter(pk=self.source.pk).update(enabled=True, verified_at=now, discovered_at=now,
+                    role_arn=self.source.role_arn)
+                BillingSource.objects.filter(pk=self.source.pk).update(**changes)
+                scheduler.schedule_due(now)
+                self.assertFalse(Job.objects.filter(source=self.source).exists())
+        BillingSource.objects.filter(pk=self.source.pk).update(role_arn=self.source.role_arn)
+        self.customer.active = False
+        self.customer.save()
+        scheduler.schedule_due(now)
+        self.assertFalse(Job.objects.filter(source=self.source).exists())
+        self.customer.active = True
+        self.customer.save()
+        scheduler.schedule_due(now)
+        self.assertTrue(Job.objects.filter(source=self.source, kind='collect').exists())
+
+    def test_budget_reader_without_budget_approval_does_not_start(self):
+        BillingSource.objects.filter(pk=self.source.pk).update(kind=BillingSource.MEMBER_BUDGETS,
+            initial_import_done=False, last_success=None, discovered_at=None, approved_capabilities=[], capabilities={})
+        scheduler.schedule_due()
+        self.assertFalse(Job.objects.filter(source=self.source).exists())
 
     def test_first_connection_verification_does_not_import_budgets(self):
         self.source.initial_import_done = False
@@ -280,7 +387,7 @@ class JobQueueTests(TestCase):
                 status='approved', requested_by='operator', evidence='Authorized role', approved_at=now)
             checks = {'correct_external_id': 'passed', 'missing_external_id': 'denied', 'wrong_external_id': 'denied',
                       'account_identity': 'passed', 'exact_collector_principal': 'passed', 'connection_version': source.connection_version}
-            BillingSource.objects.filter(pk=source.pk).update(last_success=now - timedelta(days=1), trust_checks=checks)
+            BillingSource.objects.filter(pk=source.pk).update(initial_import_done=False, last_success=None, trust_checks=checks)
         RoleApproval.objects.filter(source=self.source).update(status='revoked')
         scheduler.schedule_due(now)
         self.assertFalse(Job.objects.filter(source=self.source).exists())
@@ -290,7 +397,7 @@ class JobQueueTests(TestCase):
 
     def test_scheduler_queue_failure_does_not_block_other_source_and_recovers(self):
         now = timezone.now()
-        BillingSource.objects.update(last_success=now - timedelta(days=1))
+        BillingSource.objects.update(initial_import_done=False, last_success=None)
         real_enqueue = jobs.enqueue
         def enqueue(kind, **kwargs):
             if kwargs.get('source') == self.source:

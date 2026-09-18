@@ -165,12 +165,14 @@ class ActivationTests(TestCase):
         self.assertEqual(approval.authorized_users, [self.user.username])
         self.assertFalse(Job.objects.filter(kind='collect').exists())
 
-    def test_connect_requires_fresh_verification_and_discovery_without_importing(self):
+    def test_connect_checks_finish_before_scheduler_automatically_pulls_data(self):
+        from billing import scheduler
         request = self.activate()
         self.finish_verification(request, discover=False)
         process_activation(request)
         request.refresh_from_db()
         self.assertEqual(request.status, 'verifying')
+        scheduler.schedule_due()
         self.assertFalse(Job.objects.filter(kind='collect').exists())
         self.source.discovered_at = timezone.now()
         self.source.save()
@@ -181,6 +183,27 @@ class ActivationTests(TestCase):
         self.assertFalse(Job.objects.filter(kind__in=['collect', 'import_budgets']).exists())
         self.source.refresh_from_db()
         self.assertFalse(self.source.initial_import_done)
+        with patch('boto3.client', side_effect=AssertionError('Scheduling must only enqueue work')):
+            scheduler.schedule_due()
+            scheduler.schedule_due()
+        self.assertEqual(Job.objects.filter(source=self.source, kind='collect').count(), 1)
+        self.assertEqual(Job.objects.filter(source=self.source, kind='import_budgets').count(), 1)
+        initial = Job.objects.get(source=self.source, kind='collect')
+        self.assertTrue(initial.payload['initial'])
+        self.assertFalse(initial.payload.get('manual', False))
+
+    def test_budget_reader_connects_then_automatically_imports_budgets_only(self):
+        from billing import scheduler
+        self.source.kind = BillingSource.MEMBER_BUDGETS
+        self.source.save()
+        request = self.activate()
+        self.finish_verification(request)
+        process_activation(request)
+        request.refresh_from_db()
+        self.assertEqual(request.status, 'completed')
+        scheduler.schedule_due()
+        self.assertEqual(Job.objects.filter(source=self.source, kind='import_budgets').count(), 1)
+        self.assertFalse(Job.objects.filter(source=self.source, kind='collect').exists())
 
     def test_existing_inflight_import_finishes_after_upgrade(self):
         request = self.activate()

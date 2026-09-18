@@ -1,4 +1,4 @@
-"""Dashboard pull controls respect first-pull intent and tenant boundaries."""
+"""Optional dashboard pull controls retain tenant boundaries."""
 from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.test import Client, TestCase, override_settings
@@ -68,12 +68,25 @@ class DashboardCollectionTests(TestCase):
         client.force_login(self.user)
         self.assertEqual(client.post('/sync/pull/').status_code, 403)
 
-    def test_opening_detailed_report_cannot_bypass_first_pull(self):
+    def test_opening_detailed_report_waits_for_initial_data_collection(self):
         from billing.query_cache import get_query
-        with self.assertRaisesMessage(ValueError, 'Pull initial data'):
+        with self.assertRaisesMessage(ValueError, 'The initial data pull is preparing or in progress'):
             get_query(self.source, 'get_cost_and_usage', {'TimePeriod': {'Start': '2026-09-01', 'End': '2026-09-02'}})
         self.assertFalse(ExplorerQuery.objects.exists())
         self.assertFalse(Job.objects.exists())
+
+    def test_onboarding_shows_initial_pull_progress_and_job_failure(self):
+        job = Job.objects.create(source=self.source, kind='collect', key='automatic-first-pull',
+            status=Job.LEASED, payload={'initial': True, 'connection_version': self.source.connection_version})
+        response = self.client.get('/onboarding/?state=Pulling+data')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['page'].object_list[0]['state'], 'Pulling data')
+        job.status = Job.FAILED
+        job.last_error = 'AWS permission needs attention'
+        job.save()
+        response = self.client.get('/onboarding/?state=Needs+attention')
+        self.assertEqual(response.context['page'].object_list[0]['state'], 'Needs attention')
+        self.assertContains(response, job.last_error)
 
     @override_settings(ENFORCE_CUSTOMER_AUTHORIZATION=True)
     def test_bulk_pull_cannot_collect_another_tenants_accounts(self):
