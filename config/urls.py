@@ -71,6 +71,7 @@ urlpatterns = [
     path('export/', web.export_csv, name='export_csv'),
     path('refresh/', web.refresh_costs, name='refresh_costs'),
     path('activity/', web.activity, name='activity'),
+    path('sync/pull/', web.refresh_all_sources, name='refresh_all_sources'),
     path('health/', web.health, name='health'),
 ]
 

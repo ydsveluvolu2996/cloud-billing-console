@@ -1,4 +1,4 @@
-"""Dashboard intent, privileged activation, and observable initial-import progress.
+"""Dashboard intent and privileged, observable account connection verification.
 
 The web only submits immutable requests through a guarded database function. The
 administration service can invoke one constrained IAM broker; the web and cost
@@ -298,7 +298,7 @@ def _progress(request):
         if request.status == 'verifying':
             verify = Job.objects.filter(key=f'activation:{request.pk}:verify').order_by('-created_at').first()
             if verify is None:
-                raise ActivationInvalid('Account verification was interrupted. Choose Connect and import to retry.')
+                raise ActivationInvalid('Account verification was interrupted. Choose Connect account to retry.')
             if verify.status == Job.FAILED:
                 raise ActivationInvalid(verify.last_error or 'AWS access verification failed. Check the customer role and try again.')
             if verify.status != Job.DONE:
@@ -318,27 +318,22 @@ def _progress(request):
                     discovery = Job.objects.filter(source=source, kind='discover', started_at__gte=request.activated_at).order_by('-created_at').first()
                     if discovery and discovery.status == Job.FAILED:
                         raise ActivationInvalid(discovery.last_error or 'Account discovery failed. Check customer permissions and try again.')
-                    raise ActivationInvalid('Account discovery was interrupted. Choose Connect and import to retry.')
-                from .jobs import enqueue
-                enqueue('collect', key=f'activation:{request.pk}:initial', source=source, priority=4,
-                    payload={'months_back': settings.HISTORY_MONTHS, 'initial': True, 'actor': request.requested_by.username,
-                             'actor_id': request.requested_by_id, 'activation_id': str(request.pk)})
-                request.status = 'importing'
-            else:
-                request.status = 'importing'
-            if 'budgets' in source.approved_capabilities:
-                from .jobs import enqueue
-                enqueue('import_budgets', key=f'activation:{request.pk}:budgets', source=source, priority=3,
-                    payload={'actor': request.requested_by.username, 'actor_id': request.requested_by_id,
-                             'activation_id': str(request.pk)})
+                    raise ActivationInvalid('Account discovery was interrupted. Choose Connect account to retry.')
+            # Connecting proves access. The operator starts the first data pull
+            # from the dashboard; completed connections do not occupy the
+            # activation queue while waiting for that choice.
+            request.status, request.finished_at = 'completed', timezone.now()
+            security_event(request.requested_by.username, 'Account connection verified', customer=source.customer,
+                source=source, target=str(request.pk), account_id=source.account_id)
         elif request.status == 'importing':
+            # Finish requests already importing when this release was installed.
             required = (['initial'] if source.collects_costs else []) + (['budgets'] if 'budgets' in source.approved_capabilities else [])
             imports = [Job.objects.filter(source=source, key=f'activation:{request.pk}:{name}').order_by('-created_at').first() for name in required]
             failed = next((job for job in imports if job and job.status == Job.FAILED), None)
             if failed:
                 raise ActivationInvalid(failed.last_error or 'Initial import failed. Check customer permissions and retry.')
             if any(job is None for job in imports):
-                raise ActivationInvalid('The initial import was interrupted. Choose Connect and import to retry.')
+                raise ActivationInvalid('The initial import was interrupted. Pull initial data from the dashboard to retry.')
             if not imports or any(job.status != Job.DONE for job in imports):
                 return
             request.status, request.finished_at = 'completed', timezone.now()

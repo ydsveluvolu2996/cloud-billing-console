@@ -45,6 +45,8 @@ def scoped_parameters(parameters, account_filter):
 def get_query(source, operation, parameters, customer=None, account_filter=None):
     if operation not in ALLOWED:
         raise ValueError('Unsupported billing operation.')
+    if not source.initial_import_done:
+        raise ValueError('Pull initial data from the account connection before requesting detailed reports.')
     parameters = scoped_parameters(parameters, account_filter)
     from django.conf import settings
     from .access import current_access, scope_fingerprint

@@ -7,6 +7,7 @@ before so overlapping cron invocations never double-collect.
 import fcntl
 from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
+from django.core.exceptions import ValidationError
 from django.conf import settings
 import os
 from billing import jobs, scheduler
@@ -39,7 +40,10 @@ class Command(BaseCommand):
                 sources = sources.filter(customer_id=options['customer'])
             if options['full'] or options['customer']:
                 for source in sources:
-                    scheduler.request_refresh(source, months_back=6 if options['full'] else 1)
+                    try:
+                        scheduler.request_refresh(source, months_back=6 if options['full'] else 1)
+                    except ValidationError as exc:
+                        self.stderr.write(f'Connection {source.account_id}: {"; ".join(exc.messages)}')
             if not options['queued']:
                 scheduler.schedule_due()
                 from billing.advanced_explorer import build_report

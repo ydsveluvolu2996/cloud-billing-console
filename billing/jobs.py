@@ -50,6 +50,8 @@ def enqueue(kind, key=None, source=None, payload=None, priority=5, run_after=Non
     from .access import current_access
     access = current_access.get()
     payload = dict(payload or {})
+    if source is not None:
+        payload['connection_version'] = source.connection_version
     if access and settings.ENFORCE_CUSTOMER_AUTHORIZATION:
         from .models import ExplorerQuery
         scoped_report = source is not None and kind=='explorer_refresh' and ExplorerQuery.objects.filter(source=source,requested_by_id=access.user_id).exists()
@@ -117,12 +119,14 @@ def heartbeat(job, progress=None):
     if not isinstance(getattr(job, 'pk', None), int):
         if progress is not None:
             job.progress = progress
-        return
-    fields = {'lease_expires': timezone.now() + timedelta(seconds=setting('JOB_LEASE_SECONDS', 600))}
+        return True
+    now = timezone.now()
+    fields = {'lease_expires': now + timedelta(seconds=setting('JOB_LEASE_SECONDS', 600))}
     if progress is not None:
         job.progress = progress
         fields['progress'] = progress
-    Job.objects.filter(pk=job.pk, status=Job.LEASED,worker=job.worker,attempts=job.attempts).update(**fields)
+    return Job.objects.filter(pk=job.pk, status=Job.LEASED, worker=job.worker, attempts=job.attempts,
+                              lease_expires__gt=now).update(**fields) > 0
 
 
 def complete(job, progress=None):

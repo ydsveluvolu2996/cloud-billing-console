@@ -165,7 +165,7 @@ class ActivationTests(TestCase):
         self.assertEqual(approval.authorized_users, [self.user.username])
         self.assertFalse(Job.objects.filter(kind='collect').exists())
 
-    def test_import_requires_fresh_verification_and_discovery_then_completes(self):
+    def test_connect_requires_fresh_verification_and_discovery_without_importing(self):
         request = self.activate()
         self.finish_verification(request, discover=False)
         process_activation(request)
@@ -176,15 +176,24 @@ class ActivationTests(TestCase):
         self.source.save()
         process_activation(request)
         request.refresh_from_db()
-        self.assertEqual(request.status, 'importing')
-        imported = Job.objects.get(key=f'activation:{request.pk}:initial')
-        self.assertEqual(imported.payload['actor_id'], self.user.pk)
-        imported.status = Job.DONE
-        imported.save()
+        self.assertEqual(request.status, 'completed')
+        self.assertIsNotNone(request.finished_at)
+        self.assertFalse(Job.objects.filter(kind__in=['collect', 'import_budgets']).exists())
+        self.source.refresh_from_db()
+        self.assertFalse(self.source.initial_import_done)
+
+    def test_existing_inflight_import_finishes_after_upgrade(self):
+        request = self.activate()
+        self.finish_verification(request)
+        request.status = 'importing'
+        request.save()
+        Job.objects.create(source=self.source, kind='collect', key=f'activation:{request.pk}:initial', status=Job.DONE)
+        budget = Job.objects.create(source=self.source, kind='import_budgets', key=f'activation:{request.pk}:budgets')
         process_activation(request)
         request.refresh_from_db()
         self.assertEqual(request.status, 'importing')
-        Job.objects.filter(key=f'activation:{request.pk}:budgets').update(status=Job.DONE)
+        budget.status = Job.DONE
+        budget.save()
         process_activation(request)
         request.refresh_from_db()
         self.assertEqual(request.status, 'completed')
@@ -202,17 +211,16 @@ class ActivationTests(TestCase):
         with self.assertRaises(ValidationError):
             self.request()
 
-    def test_selected_budget_failure_cannot_report_complete(self):
+    def test_selected_budget_permission_failure_cannot_report_connected(self):
         request = self.activate()
         self.finish_verification(request)
-        process_activation(request)
-        request.refresh_from_db()
-        Job.objects.filter(key=f'activation:{request.pk}:initial').update(status=Job.DONE)
-        Job.objects.filter(key=f'activation:{request.pk}:budgets').update(status=Job.FAILED, last_error='Budget read denied')
+        self.source.capabilities = {'budgets': False}
+        self.source.save()
         process_activation(request)
         request.refresh_from_db()
         self.assertEqual(request.status, 'failed')
-        self.assertIn('Budget read denied', request.last_error)
+        self.assertIn('budget access is unavailable', request.last_error)
+        self.assertFalse(Job.objects.filter(kind__in=['collect', 'import_budgets']).exists())
 
     def test_failed_verification_does_not_import(self):
         request = self.activate()
@@ -231,16 +239,11 @@ class ActivationTests(TestCase):
 
     def test_pause_resume_reports_missing_required_jobs_in_each_phase(self):
         from billing.onboarding import set_paused
-        for phase in ('verification', 'discovery', 'import'):
+        for phase in ('verification', 'discovery'):
             with self.subTest(phase=phase):
                 request = self.activate()
                 if phase == 'discovery':
                     self.finish_verification(request, discover=False)
-                elif phase == 'import':
-                    self.finish_verification(request)
-                    process_activation(request)
-                    request.refresh_from_db()
-                    self.assertEqual(request.status, 'importing')
                 # Pause removes queued jobs. Resuming before the coordinator
                 # polls must not leave an otherwise valid request waiting forever.
                 set_paused(self.source, True)
@@ -249,7 +252,7 @@ class ActivationTests(TestCase):
                 request.refresh_from_db()
                 self.assertEqual(request.status, 'failed')
                 self.assertIn('interrupted', request.last_error)
-                self.assertIn('Connect and import', request.last_error)
+                self.assertIn('Connect account', request.last_error)
 
     def test_existing_customer_consent_is_appended_not_replaced(self):
         CustomerApproval.objects.create(customer=self.customer, contacts=['Original contact'], authorized_users=['original'],

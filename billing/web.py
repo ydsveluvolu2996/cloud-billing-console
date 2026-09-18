@@ -2,8 +2,10 @@ import csv
 from functools import wraps
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import connection
+from django.db.models import Prefetch
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
@@ -82,9 +84,11 @@ def request_sync(request, pk):
     customer = get_object_or_404(Customer, pk=pk)
     queued = 0
     for source in customer.sources.filter(enabled=True).exclude(role_arn='').exclude(verified_at=None):
-        if source.collects_costs:
-            scheduler.request_refresh(source, actor=request.user.username)
-            queued += 1
+        try:
+            scheduler.request_refresh(source, actor=request.user.username, actor_id=request.user.pk)
+        except ValidationError:
+            continue
+        queued += 1
     if queued:
         audit(request, 'Sync requested', customer=customer)
         messages.success(request, f'Refresh queued for {queued} connection(s). The worker starts within a minute; large imports may take longer.')
@@ -106,10 +110,15 @@ def refresh_costs(request):
         units = scoping.report_units(Customer.objects.get(pk=data['filter_customer']))
         sources = sources.filter(pk__in=[u[0].pk for u in units])
     count = 0
+    queued_sources = []
     for source in sources:
-        scheduler.request_refresh(source, actor=request.user.username)
+        try:
+            scheduler.request_refresh(source, actor=request.user.username, actor_id=request.user.pk)
+        except ValidationError:
+            continue
         count += 1
-    ExplorerQuery.objects.filter(source__in=sources, pk__in=data.get('query_ids', [])).update(requested=True)
+        queued_sources.append(source.pk)
+    ExplorerQuery.objects.filter(source_id__in=queued_sources, pk__in=data.get('query_ids', [])).update(requested=True)
     if count:
         audit(request, f'Billing refresh requested for {count} connection(s)')
         messages.success(request, f'Refresh queued for {count} connection(s). Collection starts within a minute. Reload the page after the import completes.')
@@ -184,9 +193,53 @@ def export_report(request):
 @never_cache
 @login_required
 def activity(request):
+    from .access import editing, current_access, for_user
+    from django.conf import settings
+    from .collection_state import snapshot
+    editable = set()
+    if scoping.can_edit(request.user):
+        with editing():
+            editable = set(BillingSource.objects.values_list('pk', flat=True))
+    data_jobs = Job.objects.filter(kind__in=['collect', 'import_budgets']).order_by('-created_at')[:12]
+    sources = BillingSource.objects.select_related('customer').prefetch_related(Prefetch('jobs', queryset=data_jobs, to_attr='recent_data_jobs'))
+    access = current_access.get() or for_user(request.user)
+    if settings.ENFORCE_CUSTOMER_AUTHORIZATION and not access.portfolio:
+        # Report access through a member assignment does not grant access to
+        # payer-wide connection identifiers, errors, or collection history.
+        metadata_customers = [customer for customer in access.customers if not access.accounts.get(customer)]
+        sources = sources.filter(customer_id__in=metadata_customers)
+    rows = [snapshot(source, source.recent_data_jobs, can_edit=source.pk in editable) for source in sources]
+    eligible = sum(row['can_pull'] for row in rows)
+    upcoming = [row['next_collection_at'] for row in rows if row['next_collection_at']]
     return render(request, 'billing/activity.html', {'runs': SyncRun.objects.select_related('customer', 'source')[:100],
+        'collection_rows': rows, 'can_refresh_all': bool(eligible), 'refresh_all_count': eligible,
+        'sync_summary': {'ready': sum(row['ready_to_pull'] for row in rows), 'pending': sum(row['pending'] for row in rows),
+                         'failed': sum(bool(row['error']) for row in rows), 'next_collection_at': min(upcoming) if upcoming else None},
         'events': AuditEvent.objects.select_related('customer')[:50], 'jobs': Job.objects.select_related('source', 'source__customer')[:100],
         'queue': scheduler.queue_summary(), 'active_page': 'activity'})
+
+
+@require_POST
+@staff_required
+def refresh_all_sources(request):
+    """An explicit, tenant-scoped dashboard pull; each account is independent."""
+    queued = shared = skipped = 0
+    for source in BillingSource.objects.select_related('customer'):
+        try:
+            _, created = scheduler.request_refresh(source, actor=request.user.username, actor_id=request.user.pk)
+        except ValidationError:
+            skipped += 1
+            continue
+        queued += int(created)
+        shared += int(not created)
+    audit(request, 'All connected account data pull requested', queued=queued, already_pending=shared, skipped=skipped)
+    if queued or shared:
+        messages.success(request, f'Data pull requested: {queued} connection(s) queued, {shared} already queued or running. Progress appears below.')
+    else:
+        messages.warning(request, 'No connections are ready to pull. Connect an account and resolve any issues shown below.')
+    if skipped:
+        messages.info(request, f'{skipped} connection(s) need setup or are paused. Their existing data is preserved.')
+    return redirect('activity')
 
 
 def health(request):
