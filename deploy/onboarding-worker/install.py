@@ -100,6 +100,11 @@ def main():
             stream.flush()
             os.fsync(stream.fileno())
         subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'sh', '-c', 'kill -HUP 1'], cwd=root, check=True)
+    # StandardOutput is opened for ExecStartPre before LogsDirectory is provisioned.
+    logs = Path('/var/log/cloud-billing/activation')
+    logs.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chown(logs, 0, 0)
+    logs.chmod(0o700)
     unit = Path('/etc/systemd/system/cloud-billing-activation.service')
     atomic_text(unit, (root / 'deploy/onboarding-worker/activation.service').read_text(), 0o644)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
