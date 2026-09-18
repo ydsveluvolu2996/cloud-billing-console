@@ -18,7 +18,7 @@ class OnboardingTests(TestCase):
         self.client = Client()
         self.client.force_login(self.admin)
 
-    def test_wizard_creates_customer_connection_and_queues_verification(self):
+    def test_wizard_saves_connection_without_premature_verification(self):
         response = self.client.post('/customers/add/', {'name': 'Wizard Co', 'reference': 'CRM-1', 'owner': 'Sam', 'currency': 'USD', 'budget': '1200'})
         customer = Customer.objects.get(name='Wizard Co')
         self.assertRedirects(response, f'/customers/{customer.pk}/sources/add/')
@@ -32,8 +32,7 @@ class OnboardingTests(TestCase):
         self.assertContains(page, 'View and copy IAM policies')
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})
         self.assertEqual(response.status_code, 302)
-        job = Job.objects.get(kind='verify', source=source)
-        self.assertEqual(job.status, Job.QUEUED)
+        self.assertFalse(Job.objects.filter(kind='verify', source=source).exists())
         # wrong account in the ARN is rejected by validation
         response = self.client.post(f'/sources/{source.pk}/', {'action': 'connection', 'role_arn': 'arn:aws:iam::999999999999:role/BillingConsole/CostReadOnly'})
         self.assertContains(response, 'registered 12-digit AWS account')

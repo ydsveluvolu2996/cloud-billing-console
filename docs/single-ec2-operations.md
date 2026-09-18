@@ -38,3 +38,14 @@ Before any host restart, ensure both service enablement and Docker's metadata gu
 The web image and the native collector have independent Python runtimes. CI runs the complete application, release-helper, database-policy, migration, worker and synthetic workload checks on both Python 3.12 and 3.14. Both matrix entries must pass before the exact-SHA production deployment can run. Each version publishes separate synthetic workload evidence; security scanning also tests the actual application image before packaging it.
 
 The native Ubuntu collector intentionally remains on the host's Python 3.12. The security/package job must use Python 3.12: `package.py` downloads wheels for its running interpreter and verifies installation offline before creating the collector wheelhouse. Selecting Python 3.14 for that job would produce incompatible native wheels even if the container is healthy. Changing the container Python version does not upgrade `/usr/bin/python3`, the collector virtualenv, metadata guard or root-owned release helper. A native collector interpreter change requires a separate host maintenance plan, matching wheel packaging and rollback validation; do not upgrade the system interpreter as part of an application release.
+
+## Activation service
+
+Dashboard single-account onboarding now uses `cloud-billing-activation`, a separate
+root-supervised administrative process with a protected environment. Its only writable
+configuration is `/var/lib/cloud-billing-onboarding/approved-roles.json`; the collector
+reads this file through its group. The native host has an exact PostgreSQL HBA entry
+for TLS/SCRAM administration access. No administration credentials are mounted into
+web/collector, and metadata rules remain unchanged. The private Lambda broker and
+collector permissions boundary are installed once; routine onboarding never requires
+a hosting account sign-in. See `deploy/onboarding-worker/README.md`.

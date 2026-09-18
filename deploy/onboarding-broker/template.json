@@ -1,0 +1,90 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Private, constrained customer-role onboarding broker. Requires a preinstalled collector permissions boundary.",
+  "Parameters": {
+    "FunctionName": {
+      "Type": "String",
+      "Default": "CloudBillingOnboardingBroker",
+      "AllowedPattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    },
+    "CollectorBoundaryArn": {
+      "Type": "String",
+      "Description": "Already-attached collector permissions boundary, verified by deploy.py before deployment.",
+      "AllowedPattern": "^arn:aws:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$"
+    }
+  },
+  "Resources": {
+    "StateTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [{"AttributeName": "CollectorRoleName", "AttributeType": "S"}],
+        "KeySchema": [{"AttributeName": "CollectorRoleName", "KeyType": "HASH"}],
+        "SSESpecification": {"SSEEnabled": true},
+        "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": true}
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {"Fn::Sub": "/aws/lambda/${FunctionName}"},
+        "RetentionInDays": 90
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]
+        },
+        "Policies": [{
+          "PolicyName": "ConstrainedCustomerOnboarding",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {"Effect": "Allow", "Action": ["iam:GetRolePolicy", "iam:PutRolePolicy"], "Resource": {"Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/CloudBillingCollector"}},
+              {"Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "Resource": {"Fn::GetAtt": ["StateTable", "Arn"]}, "Condition": {"ForAllValues:StringEquals": {"dynamodb:LeadingKeys": ["CloudBillingCollector"]}}},
+              {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"], "Resource": {"Fn::GetAtt": ["LogGroup", "Arn"]}}
+            ]
+          }
+        }]
+      }
+    },
+    "Broker": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": ["LogGroup"],
+      "Properties": {
+        "FunctionName": {"Ref": "FunctionName"},
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": {"Fn::GetAtt": ["ExecutionRole", "Arn"]},
+        "MemorySize": 128,
+        "Timeout": 60,
+        "ReservedConcurrentExecutions": 1,
+        "Environment": {"Variables": {"COLLECTOR_ROLE_NAME": "CloudBillingCollector", "STATE_TABLE_NAME": {"Ref": "StateTable"}, "COLLECTOR_BOUNDARY_ARN": {"Ref": "CollectorBoundaryArn"}}},
+        "Code": {"ZipFile": "def handler(event, context):\n    raise RuntimeError('Deploy with deploy.py to install the reviewed broker source.')\n"}
+      }
+    },
+    "CollectorInvocation": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "InvokeDashboardOnboardingBroker",
+        "Roles": ["CloudBillingCollector"],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{"Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": {"Fn::GetAtt": ["Broker", "Arn"]}}]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "BrokerArn": {"Value": {"Fn::GetAtt": ["Broker", "Arn"]}},
+    "StateTableName": {"Value": {"Ref": "StateTable"}},
+    "RequiredCollectorBoundary": {"Value": {"Ref": "CollectorBoundaryArn"}}
+  }
+}

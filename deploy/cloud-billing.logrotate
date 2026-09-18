@@ -1,4 +1,4 @@
-/var/log/cloud-billing-*.log {
+/var/log/cloud-billing-*.log /var/log/cloud-billing/activation/worker.log {
   daily
   rotate 14
   compress

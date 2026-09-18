@@ -1,0 +1,45 @@
+[Unit]
+Description=Cloud Billing dashboard connection activation
+After=network-online.target docker.service cloud-billing-metadata-guard.service
+Wants=network-online.target
+Requires=cloud-billing-metadata-guard.service
+[Service]
+Type=simple
+User=root
+Group=root
+SupplementaryGroups=billing-collector
+WorkingDirectory=/opt/cloud-billing
+EnvironmentFile=/etc/cloud-billing/activation.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/usr/local/sbin/cloud-billing-metadata-guard --check
+ExecStart=/opt/cloud-billing/.venv/bin/python manage.py process_activations
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/cloud-billing-onboarding
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd/containerd.sock
+RuntimeDirectory=cloud-billing-activation
+RuntimeDirectoryMode=0700
+LogsDirectory=cloud-billing/activation
+LogsDirectoryMode=0700
+StandardOutput=append:/var/log/cloud-billing/activation/worker.log
+StandardError=append:/var/log/cloud-billing/activation/worker.log
+UMask=0077
+MemoryHigh=192M
+MemoryMax=256M
+CPUQuota=25%
+Nice=10
+[Install]
+WantedBy=multi-user.target

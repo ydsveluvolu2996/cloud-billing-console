@@ -82,7 +82,7 @@ CUSTOMER_PATHS = {
     'OffboardingRecord': 'customer_id', 'OperationalAlert': 'customer_id', 'AlertRoute': 'customer_id',
     'PortalInvitation': 'customer_id', 'SavedReport': 'customer_id', 'AuditEvent': 'customer_id',
     'SyncRun': 'customer_id', 'ExplorerQuery': 'customer_id',
-    'RoleApproval': 'source__customer_id', 'CollectionPeriod': 'source__customer_id',
+    'RoleApproval': 'source__customer_id', 'ActivationRequest': 'source__customer_id', 'CollectionPeriod': 'source__customer_id',
     'Job': 'source__customer_id', 'ImportedBudget': 'source__customer_id',
 }
 ACCOUNT_PATHS = {'Cost':'account_id', 'AccountAssignment':'account__account_id', 'AllianceRecord':'account__account_id',
@@ -139,6 +139,8 @@ class ScopedQuerySet(models.QuerySet):
         access = current_access.get()
         if access is None or not settings.ENFORCE_CUSTOMER_AUTHORIZATION:
             return
+        if self.model.__name__ == 'ActivationRequest':
+            raise PermissionDenied('Activation requests can only be changed by the activation service.')
         if self.model.__name__ in ('RoleApproval', 'CustomerApproval') and any(k in kwargs for k in ('status','approved_by','approved_at','evidence')):
             raise PermissionDenied('Approval changes require the administration command and evidence.')
         if self.model.__name__ in ('AuditEvent','AllianceRevision'):
@@ -149,7 +151,7 @@ class ScopedQuerySet(models.QuerySet):
             raise PermissionDenied('Use the validated ownership workflow to change object scope.')
 
     def delete(self):
-        if current_access.get() and self.model.__name__ in ('AuditEvent','AllianceRevision'):
+        if current_access.get() and self.model.__name__ in ('AuditEvent','AllianceRevision','ActivationRequest'):
             raise PermissionDenied('Audit records are append-only.')
         return super().delete()
 
@@ -175,6 +177,8 @@ def validate_object(obj):
     access = current_access.get()
     if access is None or not settings.ENFORCE_CUSTOMER_AUTHORIZATION:
         return
+    if obj.__class__.__name__ == 'ActivationRequest':
+        raise PermissionDenied('Use the guarded connection activation workflow.')
     if obj.__class__.__name__ in ('CustomerApproval','RoleApproval') and getattr(obj, 'status', 'pending') not in ('pending','requested'):
         raise PermissionDenied('Only the administration runtime can approve roles or customer consent.')
     if obj.__class__.__name__ in ('AuditEvent','AllianceRevision') and not obj._state.adding:

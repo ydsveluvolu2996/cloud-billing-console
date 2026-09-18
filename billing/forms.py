@@ -29,16 +29,32 @@ class CustomerForm(forms.ModelForm):
 
 
 class SourceForm(forms.ModelForm):
+    import_budgets = forms.BooleanField(label='Import existing AWS budgets', required=False, initial=True,
+        help_text='Read budgets already created in this account. This does not create or change AWS budgets.')
+
     class Meta:
         model = BillingSource
         fields = ['kind', 'account_id', 'shared']
-        labels = {'account_id': 'AWS account ID', 'shared': 'Shared payer (accounts belong to several customers)'}
+        labels = {'kind': 'Account scope', 'account_id': 'AWS account ID', 'shared': 'Shared payer (accounts belong to several customers)'}
         widgets = {'account_id': forms.TextInput(attrs={'placeholder': '123456789012', 'inputmode': 'numeric'})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['kind'].choices = [
+            (BillingSource.STANDALONE, 'Single AWS account (including member)'),
+            (BillingSource.PAYER, 'Management / payer account'),
+            (BillingSource.MEMBER_BUDGETS, 'Member budget reader (no cost collection)'),
+        ]
+        if self.instance._state.adding:
+            self.initial.setdefault('kind', BillingSource.STANDALONE)
+        self.fields['kind'].help_text = 'Choose Single AWS account to connect only this account, even if it belongs to another organization.'
 
     def clean(self):
         data = super().clean()
         account_id = data.get('account_id')
         kind = data.get('kind')
+        if data.get('shared') and kind != BillingSource.PAYER:
+            self.add_error('shared', 'Shared payer applies only to a management / payer connection.')
         if account_id and kind in (BillingSource.PAYER, BillingSource.STANDALONE):
             clash = BillingSource.objects.filter(account_id=account_id, kind__in=[BillingSource.PAYER, BillingSource.STANDALONE]).exclude(pk=self.instance.pk).select_related('customer').first()
             if clash:
@@ -48,14 +64,40 @@ class SourceForm(forms.ModelForm):
                 raise ValidationError(f'Account {account_id} is a member of organization payer {member.payer_account_id}, which is already collected. Connecting it separately would duplicate its costs.')
         return data
 
+    def save(self, commit=True):
+        source = super().save(commit=False)
+        source.approved_capabilities = ['budgets'] if self.cleaned_data.get('import_budgets') or source.kind == BillingSource.MEMBER_BUDGETS else []
+        if commit:
+            source.save()
+        return source
+
 
 class ConnectionForm(forms.ModelForm):
-    approved_capabilities = forms.MultipleChoiceField(required=False, choices=[(v,v.replace("_"," ").title()) for v in ("organizations","tags","cost_categories","forecasts","comparison_drivers","resources","budgets")], widget=forms.CheckboxSelectMultiple, help_text="Select only capabilities recorded in customer approval. Core billing remains available without optional access.")
+    approved_capabilities = forms.MultipleChoiceField(label='Optional read-only data', required=False, choices=[('budgets','Existing AWS budgets'),('forecasts','AWS cost forecasts'),('organizations','Organization account inventory'),('tags','Cost allocation tags'),('cost_categories','Cost categories'),('comparison_drivers','Cost change explanations'),('resources','Resource cost details')], widget=forms.CheckboxSelectMultiple, help_text='Save your choices before creating the IAM role. The setup page combines the required permissions for the selected data.')
     class Meta:
         model = BillingSource
         fields = ['role_arn', 'approved_capabilities']
         labels = {'role_arn': 'Customer-approved IAM role ARN'}
         widgets = {'role_arn': forms.TextInput(attrs={'placeholder': 'arn:aws:iam::123456789012:role/BillingConsole/CostReadOnly'})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['role_arn'].required = False
+        if self.instance.kind != BillingSource.PAYER:
+            self.fields['approved_capabilities'].choices = [(key, label) for key, label in self.fields['approved_capabilities'].choices if key != 'organizations']
+        if self.instance.kind == BillingSource.MEMBER_BUDGETS:
+            self.fields['approved_capabilities'].choices = [('budgets', 'Existing AWS budgets')]
+
+
+class ConnectionActivationForm(forms.Form):
+    contact = forms.CharField(label='Account owner or approval contact', max_length=150,
+        help_text='The person authorizing access to this AWS account.')
+    evidence = forms.CharField(label='Approval reference or note', max_length=500,
+        widget=forms.Textarea(attrs={'rows': 2}),
+        help_text='Record the request, ticket or authorization for this connection.')
+    retention_days = forms.IntegerField(label='Approved retention after disconnect (days)', min_value=1, max_value=3650, initial=365,
+                                       help_text='Deletion is reviewed separately after this period; existing billing history is preserved.')
+    confirmed = forms.BooleanField(label='I am authorized to connect this account and import its billing data.', required=True)
 
 
 class BudgetForm(forms.ModelForm):

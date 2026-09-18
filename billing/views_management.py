@@ -3,12 +3,13 @@ import csv
 from datetime import date, timedelta
 from decimal import Decimal
 from dateutil.relativedelta import relativedelta
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Count, Prefetch, Q, Sum
 from django.db.models.functions import TruncMonth
-from django.http import HttpResponse, HttpResponseBadRequest
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
@@ -16,13 +17,15 @@ from django.views.decorators.http import require_POST
 from . import allocation, budgets as budgeting, onboarding, scheduler
 from . import scope as scoping
 from .collector import ensure_assignment
-from .forms import (AllocationRuleForm, AssignmentForm, BudgetForm, BudgetOverrideForm, ConnectionForm, CsvUploadForm, CustomerForm, ProjectForm, SourceForm)
+from .forms import (AllocationRuleForm, AssignmentForm, BudgetForm, BudgetOverrideForm, ConnectionActivationForm, ConnectionForm, CsvUploadForm, CustomerForm, ProjectForm, SourceForm)
 from .models import (AccountAssignment, Alert, AwsAccount, BillingSource, Budget, BudgetAmount, BudgetEvaluation, BulkImport, CollectionPeriod, Cost,
                      Customer, ImportedBudget, Job, Project, ProjectCost)
 from .web import audit, paginate, staff_required
 
 STATES = ['Awaiting customer setup', 'Connection verified', 'Account discovery complete', 'Initial import running', 'Connected',
           'Partial data', 'Permission problem', 'Stale data', 'Paused']
+ONBOARDING_STATES = ['Waiting to connect', 'Authorizing connection', 'Checking AWS access', 'Importing billing history', 'Needs attention', *STATES]
+CONNECTION_SETUP_STEPS = [(1, 'Customer'), (2, 'AWS account'), (3, 'Customer role'), (4, 'Connect and import')]
 
 
 def month_param(request):
@@ -122,9 +125,9 @@ def customer_add(request):
             budget = Budget.objects.create(customer=customer, scope=Budget.CUSTOMER, name=f'{customer.name} monthly budget', currency=customer.currency, created_by=request.user.username)
             BudgetAmount.objects.create(budget=budget, amount=form.cleaned_data['budget'], effective_from=timezone.now().date().replace(day=1))
         audit(request, 'Customer added', customer=customer)
-        messages.success(request, 'Customer created. Add the management/payer or standalone account connection next.')
+        messages.success(request, 'Customer created. Add the AWS account you want to connect next.')
         return redirect('source_add', pk=customer.pk)
-    return render(request, 'billing/customer_add.html', {'form': form, 'active_page': 'customers', 'steps': onboarding.WIZARD_STEPS, 'step': 1})
+    return render(request, 'billing/customer_add.html', {'form': form, 'active_page': 'customers', 'steps': CONNECTION_SETUP_STEPS, 'step': 1})
 
 
 @never_cache
@@ -263,6 +266,41 @@ def customer_edit(request, pk):
 
 # --- connections (wizard steps 2–6) ----------------------------------------------------------------
 
+def _can_activate_connection(request):
+    """Activation is narrower than ordinary customer operator access."""
+    from .authentication import mfa_current
+    from .models import UserSecurity
+    if not request.user.is_active or not request.user.is_superuser or not mfa_current(request):
+        return False
+    profile = UserSecurity.objects.filter(user=request.user, portfolio_access=True, external=False).first()
+    return bool(profile and request.session.get('security_version') == profile.session_version)
+
+
+def _connection_activation_status(source, activation):
+    if not activation or activation.status == 'completed':
+        state = source.state
+        if not source.collects_costs and source.enabled and source.verified_at and source.last_success and not source.last_error:
+            state = 'Connected' if source.last_success >= timezone.now() - source.STALE_AFTER else 'Stale data'
+        descriptions = {
+            'Connected': 'Setup is complete. Billing data refreshes automatically every six hours.',
+            'Paused': 'Collection is paused. Resume this connection when you want to collect again.',
+            'Stale data': 'The last successful collection is older than expected. Review the recent jobs and refresh the connection.',
+            'Partial data': 'Some billing data could not be collected. Review the recent jobs and the issue below.',
+            'Permission problem': 'AWS access needs attention. Review the customer role permissions before retrying.',
+        }
+        return {'label': state, 'description': descriptions.get(state, 'Create or update the customer role, then connect and import below.'), 'pending': False}
+    descriptions = {
+        'queued': ('Waiting to connect', 'Your request is queued. The dashboard will authorize this exact account and check its role.'),
+        'processing': ('Authorizing connection', 'The dashboard is preparing the approved read-only connection.'),
+        'verifying': ('Checking AWS access', 'Checking the account identity, role trust and selected read permissions.'),
+        'importing': ('Importing billing history', 'AWS access passed. Importing available billing history and selected budgets.'),
+        'completed': ('Connected', 'Setup is complete. Billing data refreshes automatically every six hours.'),
+        'failed': ('Needs attention', 'Review the issue below, correct the customer role or connection settings, then try again.'),
+    }
+    label, description = descriptions.get(activation.status, ('Setup in progress', 'Reload this page for the latest result.'))
+    return {'label': label, 'description': description, 'pending': activation.status in ('queued', 'processing', 'verifying', 'importing')}
+
+
 @staff_required
 def source_add(request, pk):
     customer = get_object_or_404(Customer, pk=pk)
@@ -275,7 +313,7 @@ def source_add(request, pk):
         audit(request, 'Connection added', customer=customer, source=source)
         return redirect('source_detail', pk=source.pk)
     conflicts = onboarding.detect_conflicts(request.POST.get('account_id', ''), customer) if request.method == 'POST' else []
-    return render(request, 'billing/source_add.html', {'form': form, 'customer': customer, 'active_page': 'customers', 'steps': onboarding.WIZARD_STEPS, 'step': 2, 'conflicts': conflicts})
+    return render(request, 'billing/source_add.html', {'form': form, 'customer': customer, 'active_page': 'customers', 'steps': CONNECTION_SETUP_STEPS, 'step': 2, 'conflicts': conflicts})
 
 
 @never_cache
@@ -283,6 +321,32 @@ def source_add(request, pk):
 def source_detail(request, pk):
     source = get_object_or_404(BillingSource.objects.select_related('customer'), pk=pk)
     form = ConnectionForm(instance=source)
+    from .models import CustomerApproval
+    from .iam import approval_ready
+    approval = CustomerApproval.objects.filter(customer=source.customer).first()
+    initial_contact = approval.contacts[0] if approval and approval.contacts else request.user.email
+    activation_form = ConnectionActivationForm(initial={
+        'contact': initial_contact,
+        'retention_days': approval.retention_days if approval and approval.retention_days else 365,
+        'evidence': approval.evidence if approval and approval.evidence else f'Connect AWS account {source.account_id} for {source.customer.name} with the selected read-only access.',
+    })
+    can_activate = _can_activate_connection(request)
+    if request.method == 'POST' and request.POST.get('action') == 'activate':
+        if not can_activate:
+            return HttpResponseForbidden('An internal portfolio administrator with current MFA must connect this account.')
+        activation_form = ConnectionActivationForm(request.POST)
+        if activation_form.is_valid():
+            from .activation import request_activation
+            try:
+                request_activation(source, request.user, activation_form.cleaned_data,
+                                   mfa_verified=True, session_version=request.session.get('security_version'))
+            except PermissionDenied:
+                return HttpResponseForbidden('Your administration access changed. Sign in again before connecting this account.')
+            except ValidationError as exc:
+                activation_form.add_error(None, '; '.join(exc.messages))
+            else:
+                messages.success(request, 'Connection requested. AWS verification and the first import will run automatically. Reload this page to follow progress.')
+                return redirect('source_detail', pk=pk)
     if request.method == 'POST' and request.POST.get('action') == 'connection':
         form = ConnectionForm(request.POST, instance=source)
         if form.is_valid():
@@ -295,20 +359,28 @@ def source_detail(request, pk):
             source.onboarding_step = max(source.onboarding_step, 4)
             source.last_error = ''
             source.save()
-            from .iam import request_allowlist
-            request_allowlist(source, request.user.username)
-            scheduler.request_verification(source, actor=request.user.username)
-            audit(request, 'Role ARN saved; verification queued', customer=source.customer, source=source)
-            messages.success(request, 'Role ARN saved. Verification runs in the background within a minute; reload to see the result.')
+            if source.role_arn:
+                from .iam import request_allowlist
+                request_allowlist(source, request.user.username)
+            audit(request, 'Connection settings saved', customer=source.customer, source=source)
+            messages.success(request, 'Connection settings saved. Use the updated IAM policies, then choose Connect and import.')
             return redirect('source_detail', pk=pk)
     accounts = AwsAccount.objects.filter(Q(source=source) | Q(payer_account_id=source.account_id)).prefetch_related('assignments__customer').order_by('account_id')
     pending = Job.objects.filter(source=source, status__in=[Job.QUEUED, Job.LEASED]).order_by('run_after')
-    step = source.onboarding_step
+    step = min(source.onboarding_step, 4)
+    activation = source.activation_requests.order_by('-created_at').first()
+    activation_status = _connection_activation_status(source, activation)
     return render(request, 'billing/source_detail.html', {
-        'source': source, 'customer': source.customer, 'form': form, 'active_page': 'customers', 'steps': onboarding.WIZARD_STEPS, 'step': step,
+        'source': source, 'customer': source.customer, 'form': form, 'active_page': 'customers', 'steps': CONNECTION_SETUP_STEPS, 'step': step,
         'accounts': accounts, 'pending': pending, 'periods': source.periods.all()[:8], 'runs': source.syncs.all()[:10],
         'imported_budgets': source.imported_budgets.all()[:20], 'assignment_form': AssignmentForm(initial={'customer': source.customer}),
-        'jobs': Job.objects.filter(source=source)[:10]})
+        'jobs': Job.objects.filter(source=source)[:10],
+        'activation': activation, 'activation_status': activation_status, 'activation_form': activation_form,
+        'can_activate': can_activate, 'activation_enabled': bool(getattr(settings, 'ONBOARDING_BROKER_FUNCTION', '')),
+        'automation_supported': source.role_arn.startswith(f'arn:aws:iam::{source.account_id}:role/BillingConsole/'),
+        'automation_scope_supported': source.kind in (BillingSource.STANDALONE, BillingSource.MEMBER_BUDGETS) and not source.shared,
+        'can_verify': bool(source.role_arn and (not settings.REQUIRE_CONNECTION_APPROVAL or approval_ready(source))),
+        'storage_region': settings.AWS_REGION})
 
 
 @staff_required
@@ -332,10 +404,17 @@ def source_setup(request, pk):
         bundle = policy_bundle(source)
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
+    import shlex
+    role_path, _, role_name = bundle['role_arn'].split(':role/', 1)[1].rpartition('/')
+    create_role_command = f'aws iam create-role --path {shlex.quote("/" + role_path + "/" if role_path else "/")} --role-name {shlex.quote(role_name)} --assume-role-policy-document file://trust.json'
+    attach_policy_command = f'aws iam put-role-policy --role-name {shlex.quote(role_name)} --policy-name BillingReadOnly --policy-document file://permissions.json'
     return render(request, 'billing/setup_link.html', {
         'source': source, 'customer': source.customer, 'active_page': 'customers',
         'trust_json': json.dumps(bundle['trust_policy'], indent=2),
         'minimum_json': json.dumps(bundle['minimum_permission_policy'], indent=2),
+        'permission_json': json.dumps(bundle['permission_policy'], indent=2),
+        'selected_capabilities': source.approved_capabilities,
+        'create_role_command': create_role_command, 'attach_policy_command': attach_policy_command,
         'optional_json': {k: json.dumps(v, indent=2) for k, v in bundle['optional_permission_policies'].items()},
     })
 
@@ -346,8 +425,11 @@ def source_action(request, pk, action):
     source = get_object_or_404(BillingSource.objects.select_related('customer'), pk=pk)
     actor = request.user.username
     if action == 'verify':
+        from .iam import approval_ready
         if not source.role_arn:
             messages.error(request, 'Save the role ARN first.')
+        elif settings.REQUIRE_CONNECTION_APPROVAL and not approval_ready(source):
+            messages.error(request, 'Choose Connect and import to authorize this connection before verification.')
         else:
             scheduler.request_verification(source, actor=actor)
             messages.success(request, 'Verification queued; the worker assumes the role and checks capabilities within a minute.')
@@ -763,7 +845,7 @@ def csv_template(request, kind):
 def onboarding_view(request):
     query = request.GET.get('q', '').strip()
     state_filter = request.GET.get('state', '')
-    sources = BillingSource.objects.select_related('customer').prefetch_related('periods')
+    sources = BillingSource.objects.select_related('customer').prefetch_related('periods', 'activation_requests')
     if query:
         sources = sources.filter(Q(customer__name__icontains=query) | Q(account_id__icontains=query) | Q(customer__reference__icontains=query))
     account_counts = {r['source_id']: r['n'] for r in AwsAccount.objects.filter(source__in=sources).values('source_id').annotate(n=Count('pk'))}
@@ -771,10 +853,16 @@ def onboarding_view(request):
     rows = []
     for source in sources:
         state = source.state
+        activations = list(source.activation_requests.all())
+        activation = max(activations, key=lambda item: item.created_at) if activations else None
+        activation_status = _connection_activation_status(source, activation)
+        if activation and activation.status != 'completed':
+            state = activation_status['label']
         if state_filter and state != state_filter:
             continue
         rows.append({'source': source, 'state': state, 'accounts': account_counts.get(source.pk, 0), 'step': source.onboarding_step,
-                     'pending': pending_counts.get(source.pk, 0)})
+                     'pending': pending_counts.get(source.pk, 0), 'activation_pending': activation_status['pending'],
+                     'error': (activation.last_error if activation else '') or source.last_error})
     sort, direction = sort_param(request, ['customer', 'state', 'step', 'last_success'], 'customer')
     keyfn = {'customer': lambda r: (r['source'].customer.name.lower(), r['source'].account_id), 'state': lambda r: r['state'], 'step': lambda r: r['step'],
              'last_success': lambda r: (r['source'].last_success is None, r['source'].last_success or timezone.now())}[sort]
@@ -782,7 +870,7 @@ def onboarding_view(request):
     counts = {}
     for row in rows:
         counts[row['state']] = counts.get(row['state'], 0) + 1
-    return render(request, 'billing/onboarding.html', {'page': paginate(request, rows), 'q': query, 'state_filter': state_filter, 'states': STATES, 'counts': counts,
+    return render(request, 'billing/onboarding.html', {'page': paginate(request, rows), 'q': query, 'state_filter': state_filter, 'states': ONBOARDING_STATES, 'counts': counts,
                                                        'sort': sort, 'dir': direction, 'active_page': 'onboarding', 'can_edit': scoping.can_edit(request.user),
                                                        'unassigned_count': scoping.unassigned_accounts().count(), 'steps': onboarding.WIZARD_STEPS,
                                                        'query_string': '&'.join(f'{k}={v}' for k, v in request.GET.items() if k not in ('page', 'sort', 'dir') and v)})

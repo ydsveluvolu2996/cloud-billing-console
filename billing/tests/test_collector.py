@@ -17,6 +17,30 @@ class CollectionTests(TestCase):
         self.customer, self.source = make_customer('Payer Co', '111111111111', accounts=('222222222222', '333333333333'))
         self.today = date(2026, 9, 8)
 
+    def test_single_account_cost_scope_is_filtered_on_every_page(self):
+        self.source.kind = 'standalone'
+        self.source.save(update_fields=['kind'])
+        client = ce_client([
+            ce_page([('111111111111', 'Amazon EC2', '2')], date(2026, 9, 1), token='next'),
+            ce_page([('111111111111', 'Amazon S3', '3')], date(2026, 9, 1)),
+        ])
+        collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today)
+        for call in client.get_cost_and_usage.call_args_list:
+            self.assertEqual(call.kwargs['Filter'], {'Dimensions': {'Key': 'LINKED_ACCOUNT', 'Values': ['111111111111']}})
+        self.assertEqual(set(Cost.objects.filter(source=self.source).values_list('account_id', flat=True)), {'111111111111'})
+
+    def test_single_account_rejects_broader_aws_result_without_replacing_prior_costs(self):
+        self.source.kind = 'standalone'
+        self.source.save(update_fields=['kind'])
+        old = cost(self.source, date(2026, 9, 1), '8')
+        client = ce_client([ce_page([('111111111111', 'Amazon EC2', '2'), ('444444444444', 'Amazon S3', '3')], date(2026, 9, 1))])
+        with self.assertRaisesMessage(ValueError, 'outside the approved single-account scope'):
+            collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today)
+        old.refresh_from_db()
+        self.assertEqual(old.unblended, Decimal('8'))
+        self.assertFalse(AwsAccount.objects.filter(account_id='444444444444').exists())
+        self.assertFalse(Cost.objects.filter(account_id='444444444444').exists())
+
     def test_payer_with_members_and_zero_cost_account(self):
         pages = [ce_page([('111111111111', 'AWS Support', '10'), ('222222222222', 'Amazon EC2', '100'), ('333333333333', 'Amazon S3', '0')], date(2026, 9, 1))]
         run = collect_source(self.source, months=[date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)

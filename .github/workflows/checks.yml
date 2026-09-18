@@ -59,6 +59,7 @@ jobs:
       - run: python -m pip check
       - run: python -m unittest discover -s deploy/github-release/tests -v
       - run: python -m unittest discover -s deploy/postgres-maintenance/tests -v
+      - run: python -m unittest discover -s deploy/onboarding-broker/tests -v
       - run: python manage.py collectstatic --noinput
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test billing.tests --noinput
@@ -66,7 +67,7 @@ jobs:
         run: |
           PYTHONPATH=. python scripts/generate_database_roles.py
           git diff --exit-code -- deploy/database-roles.sql
-      - run: cfn-lint deploy/infrastructure.yaml
+      - run: cfn-lint deploy/infrastructure.yaml deploy/onboarding-broker/template.json
       - run: python manage.py migrate --noinput
       - run: python manage.py run_worker --once --limit 5
         env:
@@ -99,7 +100,7 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: mkdir -p /tmp/security-evidence
       - run: pip-audit -r requirements.txt --format json --output /tmp/security-evidence/dependencies.json
-      - run: bandit -r billing config scripts deploy/github-release deploy/single-ec2 -x deploy/github-release/tests -ll -ii -f json -o /tmp/security-evidence/bandit.json
+      - run: bandit -r billing config scripts deploy/github-release deploy/single-ec2 deploy/onboarding-broker deploy/onboarding-worker -x deploy/github-release/tests,deploy/onboarding-broker/tests -ll -ii -f json -o /tmp/security-evidence/bandit.json
       - run: python scripts/install_scanners.py
       - run: .deployment/tools/gitleaks git --redact --report-format json --report-path /tmp/security-evidence/secrets.json
       - name: Build deployable runtime images

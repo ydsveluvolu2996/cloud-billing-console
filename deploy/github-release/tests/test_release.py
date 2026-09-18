@@ -105,6 +105,51 @@ class HostRollback(unittest.TestCase):
         self.assertEqual((old/'original-dependencies').read_text(), 'preserved')
         self.assertEqual(self.agent.state()['phase'], 'rolled_back')
 
+    def test_activation_failure_rolls_back_to_release_without_activation_command(self):
+        self.agent.config['runtime'] = 'collector'
+        old = self.root/'.venv'
+        old.mkdir()
+        (old/'original-dependencies').write_text('preserved')
+        (self.agent.stage/'venv').mkdir()
+        command_name = 'billing/management/commands/process_activations.py'
+        staged_command = self.agent.stage/'source'/command_name
+        staged_command.parent.mkdir(parents=True)
+        staged_command.write_text('new activation worker')
+        command = self.root/command_name
+        unit = Path('/etc/systemd/system/cloud-billing-activation.service')
+        original_exists = Path.exists
+        activation_calls = []
+
+        def exists(path):
+            return path == unit or original_exists(path)
+
+        def run(args, **kwargs):
+            if args[0] == 'systemctl' and args[-1] == 'cloud-billing-activation':
+                activation_calls.append((args[1], command.is_file()))
+                if args[1] in ('start', 'is-active') and not command.is_file():
+                    raise ValueError('activation command is missing')
+                if args[1] == 'is-active':
+                    raise ValueError('activation worker unhealthy')
+            return ''
+
+        with patch.object(agent.Path, 'exists', exists), patch.object(agent, 'run', side_effect=run) as execute, \
+             patch.object(agent.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'activation worker unhealthy'):
+                self.agent.activate()
+            # A retry must also accept the healthy previous runtime with the installed unit stopped.
+            self.agent.rollback()
+
+        self.assertEqual(activation_calls, [('stop', False), ('start', True)] +
+                         [('is-active', True)] * 20 + [('stop', True)])
+        self.assertEqual((self.root/'billing/old.py').read_text(), 'previous version')
+        self.assertFalse(command.exists())
+        self.assertEqual((old/'original-dependencies').read_text(), 'preserved')
+        self.assertEqual(self.agent.state()['phase'], 'rolled_back')
+        self.assertFalse(self.agent.current.exists())
+        calls = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(calls.count(['systemctl', 'start', 'cloud-billing-collector']), 2)
+        self.assertEqual(calls.count(['systemctl', 'is-active', '--quiet', 'cloud-billing-collector']), 2)
+
     def test_combined_failure_restores_image_source_and_virtualenv_together(self):
         self.agent.config['runtime'] = 'combined'
         state = json.loads(self.agent.journal.read_text())
@@ -201,7 +246,7 @@ class HostRollback(unittest.TestCase):
 
     def test_migration_change_blocks_automatic_release(self):
         source = self.agent.stage/'source'
-        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']:
+        for name in ['billing/migrations/__init__.py', 'deploy/database-roles.sql', 'deploy/user-administration.sql', 'deploy/activation-requests.sql', 'deploy/onboarding-worker/activation.service', 'deploy/onboarding-worker/install.py', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']:
             path = source/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('baseline')
@@ -210,6 +255,21 @@ class HostRollback(unittest.TestCase):
         (source/'billing/migrations/0002_change.py').write_text('new schema')
         with self.assertRaisesRegex(ValueError, 'maintenance'):
             agent.compatible(source, expected)
+
+    def test_optional_activation_worker_is_coordinated_only_on_collector_host(self):
+        command = self.root/'billing/management/commands/process_activations.py'
+        command.parent.mkdir(parents=True)
+        command.write_text('activation worker')
+        with patch.object(agent.Path, 'exists', return_value=True), patch.object(agent, 'run') as run:
+            self.agent.config['runtime'] = 'combined'
+            self.agent.activation_service('stop')
+            self.agent.activation_service('start')
+            self.assertEqual(run.call_args_list, [unittest.mock.call(['systemctl', 'stop', 'cloud-billing-activation']),
+                                                 unittest.mock.call(['systemctl', 'start', 'cloud-billing-activation'])])
+            run.reset_mock()
+            self.agent.config['runtime'] = 'web'
+            self.agent.activation_service('stop')
+            run.assert_not_called()
 
 
 class Coordination(unittest.TestCase):

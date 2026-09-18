@@ -72,7 +72,7 @@ def safe_extract(path, destination, limit=2_000_000_000):
 
 def compatible(source, expected):
     paths = sorted(str(p.relative_to(source)) for p in (source / 'billing/migrations').glob('*.py'))
-    paths += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
+    paths += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'deploy/activation-requests.sql', 'deploy/onboarding-worker/activation.service', 'deploy/onboarding-worker/install.py', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
     actual = {name: sha256(source / name) for name in paths}
     require(actual == expected, 'Schema, database policy or service configuration changed; a separate maintenance deployment is required')
 
@@ -100,6 +100,14 @@ class Agent:
     @property
     def has_collector(self):
         return self.config['runtime'] in ('collector', 'combined')
+
+    def activation_service(self, action):
+        # Optional until the separately reviewed onboarding bootstrap is installed.
+        if self.has_collector and Path('/etc/systemd/system/cloud-billing-activation.service').exists():
+            # A rollback can restore a release from before the activation worker existed.
+            if action in ('start', 'is-active') and not (self.root / 'billing/management/commands/process_activations.py').is_file():
+                return
+            run(['systemctl', action, 'cloud-billing-activation'])
 
     def download(self, name, version, digest):
         require(re.fullmatch(r'[a-z0-9.-]+', name), 'Invalid artifact name')
@@ -189,6 +197,7 @@ class Agent:
 
     def health(self):
         if self.has_collector:
+            self.activation_service('is-active')
             run(['systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--uid=billing-collector',
                  '--working-directory=' + str(self.root), '--property=EnvironmentFile=/etc/cloud-billing/collector.env',
                  str(self.root / '.venv/bin/python'), 'manage.py', 'verify_runtime'])
@@ -251,6 +260,7 @@ class Agent:
         write_json(self.current, {'release_id': self.release_id, 'phase': 'activating'})
         try:
             if self.has_collector:
+                self.activation_service('stop')
                 run(['systemctl', 'stop', 'cloud-billing-collector'])
             for name in previous_files - set(files):
                 (self.root / name).unlink()
@@ -281,6 +291,7 @@ class Agent:
                     venv.rename(backup / 'venv')
                 venv.symlink_to(self.stage / 'venv', target_is_directory=True)
                 run(['systemctl', 'start', 'cloud-billing-collector'])
+                self.activation_service('start')
             for attempt in range(20):
                 try:
                     self.health()
@@ -321,6 +332,7 @@ class Agent:
         if self.has_web:
             self.require_database_rollback_compatible(backup)
         if self.has_collector:
+            self.activation_service('stop')
             run(['systemctl', 'stop', 'cloud-billing-collector'])
         for item in state['files']:
             target = self.root / item['name']
@@ -341,6 +353,7 @@ class Agent:
             elif state['previous_venv_link']:
                 venv.symlink_to(state['previous_venv_link'], target_is_directory=True)
             run(['systemctl', 'start', 'cloud-billing-collector'])
+            self.activation_service('start')
         if state['previous_current']:
             write_json(self.current, state['previous_current'])
         else:

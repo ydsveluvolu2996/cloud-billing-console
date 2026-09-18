@@ -91,7 +91,7 @@ class Customer(ScopedModel):
 class BillingSource(ScopedModel):
     """One IAM role connection. A payer source covers its whole organization."""
     PAYER, STANDALONE, MEMBER_BUDGETS = 'payer', 'standalone', 'member_budgets'
-    KINDS = [(PAYER, 'Management / payer account'), (STANDALONE, 'Standalone account'),
+    KINDS = [(PAYER, 'Management / payer account'), (STANDALONE, 'Single AWS account (including member)'),
              (MEMBER_BUDGETS, 'Member budget reader (no cost collection)')]
     ROLE_PATH = 'role/BillingConsole/CostReadOnly'
     STALE_AFTER = timedelta(hours=12)
@@ -682,6 +682,32 @@ class RoleApproval(ScopedModel):
     approved_at = models.DateTimeField(null=True, blank=True)
     class Meta:
         constraints = [models.UniqueConstraint(fields=['source','role_arn','connection_version'], name='unique_role_approval_version')]
+
+
+class ActivationRequest(ScopedModel):
+    """Immutable administrator intent, consumed only by the activation runtime."""
+    STATUS = [('queued','Waiting to connect'),('processing','Authorizing connection'),
+              ('verifying','Checking AWS access'),('importing','Importing billing history'),
+              ('completed','Connected'),('failed','Needs attention')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source = models.ForeignKey(BillingSource, on_delete=models.PROTECT, related_name='activation_requests')
+    requested_by = models.ForeignKey('auth.User', on_delete=models.PROTECT)
+    session_version = models.PositiveIntegerField()
+    connection_version = models.PositiveIntegerField()
+    snapshot = models.JSONField()
+    status = models.CharField(max_length=20, choices=STATUS, default='queued')
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(fields=['source'],
+            condition=models.Q(status__in=['queued','processing','verifying','importing']),
+            name='unique_active_activation_source')]
 
 
 class CustomerMembership(models.Model):

@@ -43,6 +43,35 @@ class JobQueueTests(TestCase):
         self.customer, self.source = make_customer('One', '111111111111')
         self.other, self.other_source = make_customer('Two', '222222222222')
 
+    def test_activation_verification_retries_iam_propagation_but_rejects_bad_trust(self):
+        from botocore.exceptions import ClientError
+        job, _ = jobs.enqueue('verify', key='activation:propagation', source=self.source, max_attempts=3,
+                              payload={'activation_id': 'test-activation'})
+        with patch('billing.scheduler.collector.verify_source', side_effect=ClientError({'Error': {'Code': 'AccessDenied'}}, 'AssumeRole')):
+            jobs.run_job(jobs.lease('propagation-test'))
+        job.refresh_from_db()
+        self.assertEqual(job.status, Job.QUEUED)
+        self.assertEqual(job.attempts, 1)
+        Job.objects.filter(pk=job.pk).update(run_after=timezone.now())
+        with patch('billing.scheduler.collector.verify_source', side_effect=ValueError('Unsafe customer trust')):
+            jobs.run_job(jobs.lease('trust-test'))
+        job.refresh_from_db()
+        self.assertEqual(job.status, Job.FAILED)
+        self.assertIn('Unsafe customer trust', job.last_error)
+
+    def test_activation_waits_for_selected_budget_permission_to_propagate(self):
+        self.source.approved_capabilities = ['budgets']
+        self.source.save(update_fields=['approved_capabilities'])
+        job, _ = jobs.enqueue('verify', key='activation:budget-propagation', source=self.source, max_attempts=3,
+                              payload={'activation_id': 'test-activation'})
+        with patch('billing.scheduler.collector.verify_source', return_value={'cost_explorer': True, 'budgets': False, 'budgets_error': 'AccessDeniedException'}):
+            jobs.run_job(jobs.lease('budget-propagation-test'))
+        job.refresh_from_db()
+        self.source.refresh_from_db()
+        self.assertEqual(job.status, Job.QUEUED)
+        self.assertIsNone(self.source.verified_at)
+        self.assertFalse(Job.objects.filter(kind='discover').exists())
+
     def test_enqueue_coalesces_duplicate_requests(self):
         first, created = jobs.enqueue('collect', key='collect:x', source=self.source)
         second, created_again = jobs.enqueue('collect', key='collect:x', source=self.source, run_after=timezone.now() - timedelta(minutes=5))
