@@ -51,6 +51,7 @@ class Command(Base):
             for j,kind in enumerate(kinds):
                 account_id=str(900000000000+index*10+j)
                 source=BillingSource.objects.create(customer=customer,account_id=account_id,kind=kind,role_arn=f'arn:aws:iam::{account_id}:role/SyntheticReader',verified_at=timezone.now(),discovered_at=timezone.now(),last_success=timezone.now(),initial_import_done=True)
+                self.approve_fixture_source(source, [account_id])
                 account=AwsAccount.objects.create(source=source,account_id=account_id,payer_account_id=account_id,discovery='manual')
                 AccountAssignment.objects.create(account=account,customer=customer)
                 Cost.objects.bulk_create([Cost(source=source,customer=customer,account_id=account_id,day=first+timedelta(days=d),service='Synthetic service',currency='USD',unblended=Decimal('1.23'),amortized=Decimal('1.23'),estimated=(first+timedelta(days=d)).month==today.month) for d in range((today-first).days+1)])

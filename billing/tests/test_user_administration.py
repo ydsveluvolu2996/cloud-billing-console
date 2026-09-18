@@ -52,8 +52,10 @@ class SignInTests(TestCase):
                 self.assertNotIn('_auth_user_id',self.client.session)
                 self.assertNotContains(response,'id="sidebar"')
     def test_replay_recovery_and_safe_redirect(self):
-        self.assertRedirects(self.primary(token=self.code(),next='https://example.invalid/'),'/',fetch_redirect_response=False)
-        self.client.logout();self.primary(token=self.code())
+        # Replay the exact accepted token, even if a new TOTP time step begins.
+        used_code = self.code()
+        self.assertRedirects(self.primary(token=used_code,next='https://example.invalid/'),'/',fetch_redirect_response=False)
+        self.client.logout();self.primary(token=used_code)
         self.assertNotIn('_auth_user_id',self.client.session)
         recovery='synthetic-recovery-code-123456789'
         self.profile.refresh_from_db();self.profile.recovery_hashes=[make_password(recovery)];self.profile.recovery_locked_until=None;self.profile.save()

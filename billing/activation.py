@@ -297,9 +297,11 @@ def _progress(request):
         source = _revalidate(request, after_activation=True)
         if request.status == 'verifying':
             verify = Job.objects.filter(key=f'activation:{request.pk}:verify').order_by('-created_at').first()
-            if verify and verify.status == Job.FAILED:
+            if verify is None:
+                raise ActivationInvalid('Account verification was interrupted. Choose Connect and import to retry.')
+            if verify.status == Job.FAILED:
                 raise ActivationInvalid(verify.last_error or 'AWS access verification failed. Check the customer role and try again.')
-            if not verify or verify.status != Job.DONE:
+            if verify.status != Job.DONE:
                 return
             checks = {'correct_external_id':'passed','missing_external_id':'denied','wrong_external_id':'denied',
                       'account_identity':'passed','exact_collector_principal':'passed','connection_version':source.connection_version}
@@ -309,10 +311,14 @@ def _progress(request):
                 raise ActivationInvalid('AWS budget access is unavailable. Add the displayed budget permission and retry.')
             if source.collects_costs:
                 if not source.discovered_at or source.discovered_at < request.activated_at:
+                    # Verification queues discovery before it completes. A job
+                    # coalesced with an earlier request may still be unstarted.
+                    if Job.objects.filter(source=source, kind='discover', status__in=[Job.QUEUED, Job.LEASED]).exists():
+                        return
                     discovery = Job.objects.filter(source=source, kind='discover', started_at__gte=request.activated_at).order_by('-created_at').first()
                     if discovery and discovery.status == Job.FAILED:
                         raise ActivationInvalid(discovery.last_error or 'Account discovery failed. Check customer permissions and try again.')
-                    return
+                    raise ActivationInvalid('Account discovery was interrupted. Choose Connect and import to retry.')
                 from .jobs import enqueue
                 enqueue('collect', key=f'activation:{request.pk}:initial', source=source, priority=4,
                     payload={'months_back': settings.HISTORY_MONTHS, 'initial': True, 'actor': request.requested_by.username,
@@ -331,7 +337,9 @@ def _progress(request):
             failed = next((job for job in imports if job and job.status == Job.FAILED), None)
             if failed:
                 raise ActivationInvalid(failed.last_error or 'Initial import failed. Check customer permissions and retry.')
-            if not imports or any(not job or job.status != Job.DONE for job in imports):
+            if any(job is None for job in imports):
+                raise ActivationInvalid('The initial import was interrupted. Choose Connect and import to retry.')
+            if not imports or any(job.status != Job.DONE for job in imports):
                 return
             request.status, request.finished_at = 'completed', timezone.now()
             security_event(request.requested_by.username, 'Account activation completed', customer=source.customer,

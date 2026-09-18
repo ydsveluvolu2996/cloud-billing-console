@@ -1,17 +1,18 @@
 """Collection, discovery, pagination, transfers, shared payers and AWS budget import."""
 from datetime import date, datetime, timedelta, timezone as dt_tz
 from decimal import Decimal
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from botocore.exceptions import ClientError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from billing.aws import Meter, RequestBudgetExceeded, paginate
-from billing.collector import collect_source, discover_accounts, ensure_assignment, import_budgets, months_back
-from billing.models import AccountAssignment, AwsAccount, CollectionPeriod, Cost, ImportedBudget
+from billing.collector import ConnectionChanged, collect_source, discover_accounts, ensure_assignment, import_budgets, months_back, verify_source
+from billing.models import AccountAssignment, AwsAccount, BillingSource, CollectionPeriod, Cost, Customer, CustomerApproval, ImportedBudget, Job, RoleApproval
 from billing.reporting import report
 from .helpers import FakeSession, assign, ce_client, ce_page, cost, make_customer
 
 
+@override_settings(REQUIRE_CONNECTION_APPROVAL=False)
 class CollectionTests(TestCase):
     def setUp(self):
         self.customer, self.source = make_customer('Payer Co', '111111111111', accounts=('222222222222', '333333333333'))
@@ -53,9 +54,14 @@ class CollectionTests(TestCase):
         # every account in the organization becomes inventory assigned to the customer
         self.assertEqual(AccountAssignment.objects.filter(customer=self.customer, end__isnull=True).count(), 3)
 
+    @override_settings(REQUIRE_CONNECTION_APPROVAL=True)
     def test_approved_new_account_in_billing_data_assigned_for_non_shared_payer(self):
-        from billing.models import CustomerApproval
-        CustomerApproval.objects.create(customer=self.customer,status='approved',expected_accounts=['444444444444'])
+        from django.conf import settings
+        CustomerApproval.objects.create(customer=self.customer, status='approved', expected_accounts=[self.source.account_id, '444444444444'],
+            contacts=['Finance'], billing_fields=['cost'], storage_region=settings.AWS_REGION, retention_days=365,
+            evidence='Approved inventory', approved_by='admin', approved_at=timezone.now())
+        RoleApproval.objects.create(source=self.source, role_arn=self.source.role_arn, connection_version=self.source.connection_version,
+            status='approved', requested_by='admin', evidence='Approved role', approved_at=timezone.now())
         pages = [ce_page([('444444444444', 'Amazon EC2', '7')], date(2026, 9, 1))]
         collect_source(self.source, months=[date(2026, 9, 1)], client=ce_client(pages), meter=Meter(limit=0), today=self.today)
         self.assertEqual(Cost.objects.get(account_id='444444444444').customer, self.customer)
@@ -219,3 +225,141 @@ class CollectionTests(TestCase):
         client.list_accounts.side_effect = [{'Accounts': [], 'NextToken': 't'}, {'Accounts': [], 'NextToken': 't'}]
         with self.assertRaises(ValueError):
             paginate(Meter(limit=0), client, 'list_accounts', 'Accounts')
+
+
+@override_settings(REQUIRE_CONNECTION_APPROVAL=True, AWS_REGION='ap-south-1')
+class CollectionAuthorizationTests(TestCase):
+    def setUp(self):
+        self.customer, self.source = make_customer('Approved account', '123456789012', kind='standalone')
+        self.source.approved_capabilities = ['budgets']
+        self.source.save(update_fields=['approved_capabilities'])
+        self.approval = CustomerApproval.objects.create(customer=self.customer, status='approved',
+            expected_accounts=[self.source.account_id], optional_capabilities=['budgets'],
+            contacts=['Finance'], billing_fields=['cost'], authorized_users=['admin'],
+            storage_region='ap-south-1', retention_days=365, evidence='Approved request',
+            approved_by='admin', approved_at=timezone.now())
+        self.role = RoleApproval.objects.create(source=self.source, role_arn=self.source.role_arn,
+            connection_version=self.source.connection_version, status='approved', requested_by='admin',
+            approved_by='admin', approved_at=timezone.now(), evidence='Approved role')
+        self.today = date(2026, 9, 8)
+
+    def test_approved_shared_payer_keeps_member_customer_ownership(self):
+        self.source.kind, self.source.shared = 'payer', True
+        self.source.save(update_fields=['kind', 'shared'])
+        member, _ = make_customer('Member customer', '222222222222', connected=False)
+        assign('333333333333', member, self.source)
+        self.approval.expected_accounts.append('333333333333')
+        self.approval.save(update_fields=['expected_accounts'])
+        client = ce_client([ce_page([('333333333333', 'Amazon EC2', '12')], date(2026, 9, 1))])
+        collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today)
+        self.assertEqual(Cost.objects.get(source=self.source).customer, member)
+
+    def test_revoked_or_reduced_consent_during_cost_fetch_keeps_previous_snapshot(self):
+        previous = cost(self.source, date(2026, 9, 1), '8')
+        changes = (
+            lambda: RoleApproval.objects.filter(pk=self.role.pk).update(status='revoked'),
+            lambda: CustomerApproval.objects.filter(pk=self.approval.pk).update(status='revoked'),
+            lambda: CustomerApproval.objects.filter(pk=self.approval.pk).update(expected_accounts=[]),
+            lambda: CustomerApproval.objects.filter(pk=self.approval.pk).update(optional_capabilities=[]),
+            lambda: Customer.objects.filter(pk=self.customer.pk).update(active=False),
+        )
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                RoleApproval.objects.filter(pk=self.role.pk).update(status='approved')
+                CustomerApproval.objects.filter(pk=self.approval.pk).update(status='approved',
+                    expected_accounts=[self.source.account_id], optional_capabilities=['budgets'])
+                Customer.objects.filter(pk=self.customer.pk).update(active=True)
+                def fetch(**kwargs):
+                    change()
+                    return ce_page([(self.source.account_id, 'Amazon EC2', '99')], date(2026, 9, 1))
+                client = Mock()
+                client.get_cost_and_usage.side_effect = fetch
+                with self.assertRaises(ConnectionChanged):
+                    collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today)
+                previous.refresh_from_db()
+                self.assertEqual(previous.unblended, Decimal('8'))
+                self.assertEqual(Cost.objects.filter(source=self.source).count(), 1)
+
+    def test_budget_response_after_revocation_keeps_previous_budgets(self):
+        previous = ImportedBudget.objects.create(source=self.source, owning_account_id=self.source.account_id,
+            name='Previous budget', budget_type='COST', time_unit='MONTHLY', limit_amount=100, limit_unit='USD')
+        def fetch(**kwargs):
+            RoleApproval.objects.filter(pk=self.role.pk).update(status='revoked')
+            return {'Budgets': [{'BudgetName': 'Replacement', 'BudgetLimit': {'Amount': '200', 'Unit': 'USD'}}]}
+        client = Mock()
+        client.describe_budgets.side_effect = fetch
+        with self.assertRaises(ConnectionChanged):
+            import_budgets(self.source, session=FakeSession(budgets=client))
+        previous.refresh_from_db()
+        self.assertEqual(ImportedBudget.objects.get(source=self.source).pk, previous.pk)
+        self.assertEqual(previous.limit_amount, Decimal('100'))
+
+    def test_replaced_budget_worker_cannot_overwrite_new_workers_snapshot(self):
+        from billing.jobs import enqueue, lease, recover_expired
+        previous = ImportedBudget.objects.create(source=self.source, owning_account_id=self.source.account_id,
+            name='Monthly', budget_type='COST', time_unit='MONTHLY', limit_amount=100, limit_unit='USD')
+        enqueue('import_budgets', key='lease-fenced-budget', source=self.source)
+        old_job = lease('old-budget-worker')
+        def fetch(**kwargs):
+            Job.objects.filter(pk=old_job.pk).update(lease_expires=timezone.now() - timedelta(seconds=1))
+            recover_expired()
+            Job.objects.filter(pk=old_job.pk).update(run_after=timezone.now())
+            self.assertEqual(lease('replacement-budget-worker').pk, old_job.pk)
+            ImportedBudget.objects.filter(pk=previous.pk).update(limit_amount=150)
+            return {'Budgets': [{'BudgetName': 'Monthly', 'BudgetLimit': {'Amount': '200', 'Unit': 'USD'}}]}
+        client = Mock()
+        client.describe_budgets.side_effect = fetch
+        with self.assertRaises(ConnectionChanged):
+            import_budgets(self.source, session=FakeSession(budgets=client), job=old_job)
+        previous.refresh_from_db()
+        self.assertEqual(previous.limit_amount, Decimal('150'))
+        current_job = Job.objects.get(pk=old_job.pk)
+        self.assertEqual(current_job.worker, 'replacement-budget-worker')
+        self.assertEqual(current_job.status, Job.LEASED)
+
+    def test_revoked_discovery_cannot_publish_inventory(self):
+        self.source.kind = 'payer'
+        self.source.save(update_fields=['kind'])
+        self.approval.expected_accounts.append('222222222222')
+        self.approval.save(update_fields=['expected_accounts'])
+        original_discovered_at = self.source.discovered_at
+        def fetch(**kwargs):
+            CustomerApproval.objects.filter(pk=self.approval.pk).update(status='revoked')
+            return {'DimensionValues': [{'Value': '222222222222'}]}
+        client = Mock()
+        client.get_dimension_values.side_effect = fetch
+        with self.assertRaises(ConnectionChanged):
+            discover_accounts(self.source, session=FakeSession(ce=client), today=self.today)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.discovered_at, original_discovered_at)
+        self.assertFalse(AwsAccount.objects.filter(account_id='222222222222').exists())
+
+    def test_stale_verification_cannot_overwrite_current_trust_evidence(self):
+        BillingSource.objects.filter(pk=self.source.pk).update(trust_checks={'current': 'preserved'})
+        def identity(**kwargs):
+            BillingSource.objects.filter(pk=self.source.pk).update(connection_version=2, verified_at=None)
+            return {'Account': self.source.account_id}
+        sts = Mock()
+        sts.get_caller_identity.side_effect = identity
+        session = FakeSession(sts=sts, ce=Mock(), budgets=Mock())
+        with patch('boto3.client'), \
+             patch('billing.iam.verify_trust', return_value={'connection_version': 1}), \
+             self.assertRaises(ConnectionChanged):
+            verify_source(self.source, session=session)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.trust_checks, {'current': 'preserved'})
+        self.assertIsNone(self.source.verified_at)
+
+    def test_configuration_change_after_last_month_cannot_mark_new_source_imported(self):
+        original_success = self.source.last_success
+        job = Mock(pk=None, progress={})
+        client = ce_client([ce_page([(self.source.account_id, 'Amazon EC2', '2')], date(2026, 9, 1))])
+        def change(*args):
+            BillingSource.objects.filter(pk=self.source.pk).update(connection_version=2,
+                initial_import_done=False, last_error='Current connection needs verification')
+        with patch('billing.jobs.heartbeat', side_effect=change), self.assertRaises(ConnectionChanged):
+            collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today, job=job)
+        self.source.refresh_from_db()
+        self.assertFalse(self.source.initial_import_done)
+        self.assertEqual(self.source.last_success, original_success)
+        self.assertEqual(self.source.last_error, 'Current connection needs verification')

@@ -5,6 +5,16 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      aws-sdk:
+        patterns:
+          - boto3
+          - botocore
+          - s3transfer
+      postgres-driver:
+        patterns:
+          - psycopg
+          - psycopg-binary
   - package-ecosystem: github-actions
     directory: /
     schedule:
