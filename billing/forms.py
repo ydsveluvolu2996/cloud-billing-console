@@ -95,7 +95,8 @@ class ConnectionActivationForm(forms.Form):
     evidence = forms.CharField(label='Approval reference or note', max_length=500,
         widget=forms.Textarea(attrs={'rows': 2}),
         help_text='Record the request, ticket or authorization for this connection.')
-    retention_days = forms.IntegerField(label='Keep imported billing data for (days)', min_value=1, max_value=3650, initial=365)
+    retention_days = forms.IntegerField(label='Approved retention after disconnect (days)', min_value=1, max_value=3650, initial=365,
+                                       help_text='Deletion is reviewed separately after this period; existing billing history is preserved.')
     confirmed = forms.BooleanField(label='I am authorized to connect this account and import its billing data.', required=True)
 
 
