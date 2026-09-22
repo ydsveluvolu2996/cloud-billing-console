@@ -300,9 +300,10 @@ class Coordination(unittest.TestCase):
         self.assertEqual(coordinator.receipt['status'], 'rollback_failed')
         self.assertEqual(len(coordinator.receipt['rollback_errors']), 1)
 
-    def test_wrong_sha_branch_repository_and_non_manual_run_rejected(self):
+    def test_wrong_sha_branch_repository_and_untrusted_event_rejected(self):
         valid = {'GITHUB_SHA': SHA, 'EXPECTED_SHA': SHA, 'GITHUB_REF': release.BRANCH,
-                 'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REPOSITORY_ID': release.REPOSITORY_ID}
+                 'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REPOSITORY_ID': release.REPOSITORY_ID,
+                 'GITHUB_REPOSITORY': release.REPOSITORY}
         self.assertEqual(release.check_context(valid), SHA)
         for key, value in [('EXPECTED_SHA', 'b'*40), ('GITHUB_REF', 'refs/heads/untrusted'),
                            ('GITHUB_EVENT_NAME', 'pull_request'), ('GITHUB_REPOSITORY_ID', 'other')]:

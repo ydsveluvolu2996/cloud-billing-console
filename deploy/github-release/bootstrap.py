@@ -97,8 +97,14 @@ def remote(ssm, instance, script):
 
 
 def host_script(config, install=False):
-    agent = base64.b64encode((HERE / 'agent.py').read_bytes()).decode()
-    return '''import base64,hashlib,json,os,shutil,subprocess
+    agent_bytes = (HERE / 'agent.py').read_bytes()
+    additive_bytes = (HERE / 'additive_migrations.py').read_bytes()
+    additive_hash = hashlib.sha256(additive_bytes).hexdigest()
+    if ("ADDITIVE_MODULE_SHA256 = '" + additive_hash + "'").encode() not in agent_bytes:
+        raise ValueError('The additive helper must match the executor checksum pin')
+    agent = base64.b64encode(agent_bytes).decode()
+    additive = base64.b64encode(additive_bytes).decode()
+    return '''import base64,fcntl,hashlib,json,os,shutil,subprocess
 from pathlib import Path
 os.umask(0o077)
 config = CONFIG
@@ -124,14 +130,52 @@ if config['runtime'] in ('collector','combined'):
 if config['runtime']=='combined':
  subprocess.run(['/usr/local/sbin/cloud-billing-metadata-guard','--check'],check=True,stdout=subprocess.DEVNULL)
 if INSTALL:
- target=Path('/usr/local/lib/cloud-billing-release');target.mkdir(parents=True,exist_ok=True);target.chmod(0o755)
- temporary=target/'agent.py.new';temporary.write_bytes(base64.b64decode(AGENT));temporary.chmod(0o755);temporary.replace(target/'agent.py')
- folder=Path('/etc/cloud-billing');folder.mkdir(parents=True,exist_ok=True)
- temporary=folder/'release.json.new';temporary.write_text(json.dumps(config,indent=2)+'\\n');temporary.chmod(0o600);temporary.replace(folder/'release.json')
- Path(config['releases']).mkdir(mode=0o755,exist_ok=True)
- (root/'.deployment').mkdir(mode=0o700,exist_ok=True)
+ lock=os.open('/run/lock/cloud-billing-release.lock',os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+ fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ try:
+  # Another release may have finished after the initial read-only preflight.
+  for name,expected in config['compatibility'].items():
+   assert hashlib.sha256((root/name).read_bytes()).hexdigest()==expected, 'Protected baseline changed before installation'
+  assert sorted(p.name for p in (root/'billing/migrations').glob('*.py'))==sorted(Path(n).name for n in config['compatibility'] if n.startswith('billing/migrations/'))
+  def sync_dir(path):
+   descriptor=os.open(path,os.O_RDONLY|os.O_DIRECTORY)
+   try:os.fsync(descriptor)
+   finally:os.close(descriptor)
+  def replace_file(path,data,mode):
+   temporary=path.with_suffix('.install-new');created=False
+   try:
+    with temporary.open('xb') as stream:
+     created=True;stream.write(data);stream.flush();os.fsync(stream.fileno())
+    temporary.chmod(mode);temporary.replace(path);sync_dir(path.parent)
+   finally:
+    if created:temporary.unlink(missing_ok=True)
+  target=Path('/usr/local/lib/cloud-billing-release');target.mkdir(parents=True,exist_ok=True)
+  folder=Path('/etc/cloud-billing');folder.mkdir(parents=True,exist_ok=True)
+  for parent in (target,folder):
+   for item in (parent,*parent.parents):
+    st=item.lstat();assert not item.is_symlink() and st.st_uid==0 and not st.st_mode&0o022, 'Unprotected installer path'
+  additions={target/'additive_migrations.py':(base64.b64decode(ADDITIVE),0o644),target/'agent.py':(base64.b64decode(AGENT),0o755),folder/'release.json':((json.dumps(config,indent=2)+'\\n').encode(),0o600)}
+  previous={}
+  for path,(data,mode) in additions.items():
+   assert not path.is_symlink(), 'Linked installer target'
+   if path.exists():
+    st=path.stat();assert st.st_uid==0 and not st.st_mode&0o022, 'Unprotected installer target'
+   previous[path]=(path.read_bytes(),path.stat().st_mode&0o777) if path.exists() else None
+   if path.suffix=='.py':compile(data,str(path),'exec')
+   assert not path.with_suffix('.install-new').exists() and not path.with_suffix('.install-new').is_symlink(), 'Inspect an interrupted installer first'
+  try:
+   for path,(data,mode) in additions.items():
+    replace_file(path,data,mode)
+   Path(config['releases']).mkdir(mode=0o755,exist_ok=True)
+   (root/'.deployment').mkdir(mode=0o700,exist_ok=True)
+  except BaseException:
+   for path,old in previous.items():
+    if old is None:path.unlink(missing_ok=True);sync_dir(path.parent)
+    else:replace_file(path,*old)
+   raise
+ finally:os.close(lock)
 print(json.dumps({'instance':config['instance_id'],'runtime':config['runtime'],'status':'installed' if INSTALL else 'preflight_ok','aws_cli':cli}))
-'''.replace('CONFIG', repr(config)).replace('INSTALL', repr(install)).replace('AGENT', repr(agent))
+'''.replace('CONFIG', repr(config)).replace('INSTALL', repr(install)).replace('ADDITIVE', repr(additive)).replace('AGENT', repr(agent))
 
 
 def apply(profile, subject):
