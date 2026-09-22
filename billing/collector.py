@@ -351,7 +351,11 @@ def owner_lookup(source, records):
         approved=not settings.REQUIRE_CONNECTION_APPROVAL or (approval and account_id in approval.expected_accounts)
         if approved and not source.shared and not account.assignments.filter(end__isnull=True).exists():
             ensure_assignment(account, source.customer, note='Auto-assigned from billing data')
-        assignments = list(account.assignments.all())
+            # Inventory accounts were prefetched before this assignment existed.
+            # Read the updated history before stamping the first published costs.
+            assignments = list(AccountAssignment.objects.filter(account=account))
+        else:
+            assignments = list(account.assignments.all())
         for record in (r for r in records if r['account_id'] == account_id):
             match = next((a for a in assignments if a.covers(record['day'])), None)
             owners[(account_id, record['day'])] = match.customer_id if match else None

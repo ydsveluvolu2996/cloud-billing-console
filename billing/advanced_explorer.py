@@ -8,7 +8,7 @@ from . import parameters as contract
 from . import scope as scoping
 from .models import Customer, SavedReport
 from .reporting import report
-from .explorer import explorer_report, CHART_COLORS, SERVICE_LABELS
+from .explorer import account_display_labels, explorer_report, CHART_COLORS, SERVICE_LABELS
 from .query_cache import get_query
 
 
@@ -57,11 +57,13 @@ def unpack(queries,p,periods):
                 bucket[label]=bucket.get(label,Decimal(0))+amount
     if len(units)>1:raise ValueError('This report contains different units. Narrow its usage type or customer; different units cannot be added together.')
     if p['measure']=='cost' and units and units!={'USD'}:raise ValueError('AWS returned an unexpected currency; this report cannot be combined.')
+    account_labels=account_display_labels(values,p['customer']) if p['group_by']=='account' else {}
     rows=[]
     for key,bucket in values.items():
         cells=[bucket.get(t) for t in periods]
         absent=p['group_by'] in ('tag','cost_category') and key==''
         label=SERVICE_LABELS.get(key,key) if p['group_by']=='service' else key or (f"No {contract.GROUPS[p['group_by']].lower()} key: {p['group_key']}" if absent else '(Not specified)')
+        if p['group_by']=='account':label=account_labels.get(key,label)
         rows.append({'key':key,'label':label,'source_label':key,'is_absent':absent,'cells':cells,'total':sum((v for v in cells if v is not None),Decimal(0))})
     rows.sort(key=lambda r:(-r['total'],r['label']))
     return rows,estimated,next(iter(units),'USD' if p['measure']=='cost' else 'units')
