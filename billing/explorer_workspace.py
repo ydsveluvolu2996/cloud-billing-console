@@ -36,12 +36,10 @@ def aws_handoff(params):
                        for left, right in zip(windows, windows[1:]))):
             raise ValueError('This report spans changing account ownership. Keep this report in the billing console or choose dates with one ownership scope.')
         accounts = windows[0][2]
-    else:
-        # A tenant-restricted source-only view may have several customer units.
-        # The caller's resolved report units, not source metadata, set its scope.
-        access = current_access.get()
-        if settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio and accounts is None:
-            raise ValueError('Choose a customer before opening this report in AWS.')
+    elif accounts is None:
+        # A local connection ID cannot constrain the separate AWS console session.
+        # Even portfolio users need an explicit, representable account boundary.
+        raise ValueError('Choose a customer before opening this report in AWS.')
     if accounts is not None:
         selected = set(p['account'])
         permitted = set(accounts)

@@ -45,6 +45,17 @@ class WorkspaceTests(TestCase):
         account = next(f for f in filters if f['dimension']['id'] == 'LinkedAccount')
         self.assertEqual([v['value'] for v in account['values']], ['222222222222'])
 
+    def test_source_only_handoff_requires_customer_for_portfolio_users(self):
+        params = self.params | {'customer': '', 'source': str(self.source.pk)}
+        access = Access(self.user.pk, self.user.username, True, (), (), {})
+        for enforce in (False, True):
+            with self.subTest(enforce=enforce), self.settings(ENFORCE_CUSTOMER_AUTHORIZATION=enforce), context(access):
+                with self.assertRaisesMessage(ValueError, 'Choose a customer before opening this report in AWS.'):
+                    aws_handoff(params)
+                filters = self.filters(aws_handoff(params | {'customer': str(self.customer.pk)}))
+                account = next(f for f in filters if f['dimension']['id'] == 'LinkedAccount')
+                self.assertEqual({v['value'] for v in account['values']}, {'111111111111', '222222222222'})
+
     def test_recent_reports_are_scoped_and_deduplicated(self):
         first = self.client.get('/', self.params | {'report_name': 'First report'})
         self.assertEqual(first.status_code, 200)
