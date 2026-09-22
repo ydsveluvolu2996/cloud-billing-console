@@ -47,7 +47,7 @@ class Command(BaseCommand):
             if not options['queued']:
                 scheduler.schedule_due()
                 from billing.advanced_explorer import build_report
-                for saved in SavedReport.objects.all():
+                for saved in SavedReport.objects.filter(archived_at__isnull=True):
                     try:
                         build_report(saved.parameters)
                     except ValueError:

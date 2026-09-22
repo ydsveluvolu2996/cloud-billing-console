@@ -576,6 +576,7 @@ class SavedReport(ScopedModel):
     parameters = models.JSONField(default=dict)
     created_by = models.CharField(max_length=150)
     created_at = models.DateTimeField(auto_now_add=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['name', 'pk']

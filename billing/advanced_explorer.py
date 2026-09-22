@@ -1,6 +1,7 @@
 """Cost Explorer reports backed by local imports or durable AWS request caches."""
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from dateutil.relativedelta import relativedelta
 from urllib.parse import urlencode
 from django.utils import timezone
 from . import parameters as contract
@@ -14,7 +15,9 @@ from .query_cache import get_query
 def is_local(p):
     return (p['metric'] in ('unblended','amortized') and p['measure']=='cost' and p['report_mode']=='standard'
         and p['granularity'] in ('daily','monthly') and p['group_by'] in ('service','account','customer')
-        and date.fromisoformat(p['end'])<=timezone.now().date() and p['untagged']=='0' and p['uncategorized']=='0'
+        and date.fromisoformat(p['end'])<=timezone.now().date()
+        and date.fromisoformat(p['start'])>=timezone.now().date().replace(day=1)-relativedelta(months=13) and p['untagged']=='0' and p['uncategorized']=='0'
+        and not any(item['values'] or item['absent'] for item in contract.keyed_filters(p))
         and all(not p[k] for k in contract.FILTERS if k not in ('service','account'))
         and all(len(p[k])<=1 and contract.EMPTY_VALUE not in p[k] and (not p[k] or p[k+'_mode']=='include') for k in ('service','account')))
 
@@ -45,8 +48,11 @@ def unpack(queries,p,periods):
                 m=group['Metrics'][metric];units.add(m['Unit']);amount=Decimal(m['Amount'])
                 if not amount.is_finite():raise ValueError('AWS returned a non-finite amount.')
                 key=group['Keys'][0]
-                if p['group_by'] in ('tag','cost_category'):
-                    key=key.split('$',1)[-1] or '(Unassigned)'
+                if p['group_by']=='tag':
+                    # AWS tags use Key$Value; leave category values opaque.
+                    # Keep raw empty keys distinct from a real '(Unassigned)' value.
+                    prefix=p['group_key']+'$'
+                    if key.startswith(prefix):key=key[len(prefix):]
                 bucket=values.setdefault(key,{})
                 bucket[label]=bucket.get(label,Decimal(0))+amount
     if len(units)>1:raise ValueError('This report contains different units. Narrow its usage type or customer; different units cannot be added together.')
@@ -54,8 +60,9 @@ def unpack(queries,p,periods):
     rows=[]
     for key,bucket in values.items():
         cells=[bucket.get(t) for t in periods]
-        label=SERVICE_LABELS.get(key,key) if p['group_by']=='service' else key or '(Not specified)'
-        rows.append({'key':key,'label':label,'source_label':key,'cells':cells,'total':sum((v for v in cells if v is not None),Decimal(0))})
+        absent=p['group_by'] in ('tag','cost_category') and key==''
+        label=SERVICE_LABELS.get(key,key) if p['group_by']=='service' else key or (f"No {contract.GROUPS[p['group_by']].lower()} key: {p['group_key']}" if absent else '(Not specified)')
+        rows.append({'key':key,'label':label,'source_label':key,'is_absent':absent,'cells':cells,'total':sum((v for v in cells if v is not None),Decimal(0))})
     rows.sort(key=lambda r:(-r['total'],r['label']))
     return rows,estimated,next(iter(units),'USD' if p['measure']=='cost' else 'units')
 
@@ -77,13 +84,37 @@ def unit_label(q):
 
 
 def build_report(params):
+    """Build either one measure or a bounded pair with independent units and totals."""
+    p = contract.normalize(params)
+    if p['measure'] != 'cost_usage':
+        return _build_report(p)
+    costs = _build_report(p | {'measure': 'cost', 'normalized': '0'}, display_params=p)
+    usage = _build_report(p | {'measure': 'usage'}, display_params=p)
+    costs['usage_report'] = usage
+    costs['dual_measure'] = True
+    costs['query_ids'] = list(dict.fromkeys(costs.get('query_ids', [])+usage.get('query_ids', [])))
+    costs['report_pending'] = costs.get('report_pending', False) or usage.get('report_pending', False)
+    costs['report_incomplete'] = costs.get('report_incomplete', False) or usage.get('report_incomplete', False)
+    costs['warnings'] = list(dict.fromkeys(costs.get('warnings', [])+usage.get('warnings', [])))
+    costs['capability_notes'] = list(dict.fromkeys(costs.get('capability_notes', [])+usage.get('capability_notes', [])))
+    snapshots = [costs.get('report_snapshot', ''), usage.get('report_snapshot', '')]
+    costs['report_snapshot'] = 'Costs: '+snapshots[0]+'; Usage: '+snapshots[1]
+    costs['last_sync'] = min(costs['last_sync'], usage['last_sync']) if costs.get('last_sync') and usage.get('last_sync') else None
+    return costs
+
+
+def _build_report(params, display_params=None):
     p=contract.normalize(params);today=timezone.now().date();start=date.fromisoformat(p['start']);end=date.fromisoformat(p['end'])
     local_params={'start':p['start'],'end':str(min(end,today)),'customer':p['customer'],'source':p['source'],'currency':p['currency'],
                   'granularity':p['granularity'] if p['granularity']!='hourly' else 'daily',
                   'metric':p['metric'] if p['metric'] in ('unblended','amortized') else 'unblended'}
     if is_local(p):
         local_params.update({k:next(iter(p[k]),'') for k in ('service','account')});local_params.update(group_by=p['group_by'],chart_style=p['chart_style'])
-    else:local_params.update(group_by='service',chart_style=p['chart_style'])
+    else:
+        # This local context supplies connection status; actual rows below come from
+        # AWS. Keep the legacy portfolio helper inside its two-year validation limit.
+        local_params.update(start=str(max(start,min(end,today)-timedelta(days=731))),
+                            group_by='service',chart_style=p['chart_style'])
     context=explorer_report(report(local_params),local_params)
     queries=[];actual=[];previous=[];forecast=[];warnings=[];blocked=[]
     def queue(target, source, operation, request, customer, accounts):
@@ -169,9 +200,11 @@ def build_report(params):
         for q in forecast:
             if q.data:
                 for period in q.data.get('ForecastResultsByTime',[]):
-                    frows.append({'customer':unit_label(q),'start':period['TimePeriod']['Start'],'end':period['TimePeriod']['End'],
+                    frows.append({'series_id':str(q.pk),'customer':unit_label(q),'start':period['TimePeriod']['Start'],'end':period['TimePeriod']['End'],
                                   'mean':Decimal(period['MeanValue']),'lower':Decimal(period.get('PredictionIntervalLowerBound','0')),'upper':Decimal(period.get('PredictionIntervalUpperBound','0'))})
         context.update(forecast_rows=frows,forecast_requested=end>today and p['forecast']=='1',actual_end=actual_end,aws_report=True)
+        payload.update(forecast_rows=[{**row, **{key:float(row[key]) for key in ('mean','lower','upper')}} for row in frows],
+                       forecast_requested=context['forecast_requested'], forecast_interval=80)
         for q in queries:
             if q.error:warnings.append(unit_label(q)+': '+q.error+(' Previous cached figures are displayed.' if q.data is not None else ''))
         context.update(report_pending=any(q.requested for q in queries),query_ids=[q.pk for q in queries],
@@ -186,22 +219,23 @@ def build_report(params):
             context.update(driver_rows=drivers['rows'],driver_notes=drivers['notes'])
             context['query_ids'] += [q.pk for q in drivers['queries']]
             context['report_pending'] = context['report_pending'] or any(q.requested for q in drivers['queries'])
-    q=contract.querydict(p)
+    display_params=display_params or p
+    q=contract.querydict(display_params)
     def url(**changes):
-        new=p|changes
+        new=display_params|changes
         return '/?'+contract.querydict(new).urlencode()
     for row in context['pivot_rows']+context.get('comparison_rows',[]):
         group=p['group_by']
         # Discard legacy portfolio links before constructing the complete Explorer URL.
         row.pop('url',None)
-        if group in contract.FILTERS and row['key']!='(Unassigned)':
+        if group in contract.FILTERS and not (group in ('tag','cost_category') and row['key']==''):
             value=contract.EMPTY_VALUE if row['key']=='' or (group=='region' and row['key']=='NoRegion') else row['key']
             changes={group:[value],group+'_mode':'include'}
             if group in ('tag','cost_category'):
-                changes[group+'_key']=p['group_key'];changes['untagged' if group=='tag' else 'uncategorized']='0'
+                changes=contract.keyed_drilldown(p,group,p['group_key'],value)
             row['url']=url(**changes)
-        elif group in ('tag','cost_category') and row['key']=='(Unassigned)':
-            row['url']=url(**{group:[],group+'_key':p['group_key'],'untagged' if group=='tag' else 'uncategorized':'1'})
+        elif group in ('tag','cost_category') and row['key']=='':
+            row['url']=url(**contract.keyed_drilldown(p,group,p['group_key'],absent=True))
         elif group=='customer':
             customer=Customer.objects.filter(pk=row['key']).first() if is_local(p) else Customer.objects.filter(name=row['key']).first()
             if customer:row['url']=url(customer=str(customer.pk))
@@ -213,23 +247,26 @@ def build_report(params):
     filters=[]
     for key,(label,_) in contract.FILTERS.items():
         filters.append({'key':key,'label':label,'values':p[key],'mode':p[key+'_mode'],'key_value':p.get(key+'_key',''),
-                        'expanded':bool(p[key]),'is_keyed':key in ('tag','cost_category'),'is_more':list(contract.FILTERS).index(key)>8})
+                        'expanded':bool(p[key]) or p.get({'tag':'untagged','cost_category':'uncategorized'}.get(key,''))=='1','is_keyed':key in ('tag','cost_category'),'is_more':list(contract.FILTERS).index(key)>8})
     from django.conf import settings
     capability_notes=[]
+    if start < today.replace(day=1)-relativedelta(months=13):
+        capability_notes.append('History beyond the default 13 prior months requires AWS multi-year data already enabled. Up to 38 months is available at Monthly granularity; this console does not change AWS billing preferences.')
     if settings.REQUIRE_CONNECTION_APPROVAL:
         sources={s.pk:s for s,_,_ in scoping.report_units(scoping.resolve(p).customer)}
         if p['source']:sources={k:s for k,s in sources.items() if str(k)==p['source']}
         for cap,label,requirement in [('forecasts','Forecasts','ce:GetCostForecast'),('tags','Tags and untagged reports','approved tag keys, ce:GetTags and ce:ListCostAllocationTags'),('cost_categories','Cost categories','approved category keys and ce:GetCostCategories'),('resources','Resource reports','ce:GetCostAndUsageWithResources and AWS resource-data opt-in')]:
             missing=[s.customer.name for s in sources.values() if not s.capabilities.get(cap)]
             if missing:capability_notes.append(f'{label}: requires {requirement}. Not enabled for: {", ".join(sorted(set(missing)))}.')
-    context.update(params=p,parameters_json=p,capability_notes=capability_notes,parameter_fields={k:v for k,v in p.items() if not isinstance(v,list)},
-                   parameter_pairs=list(q.lists()),filters=filters,applied_count=sum(bool(p[k]) for k in contract.FILTERS)+int(p['untagged']=='1')+int(p['uncategorized']=='1'),
+    context.update(params=display_params,parameters_json=display_params,capability_notes=capability_notes,parameter_fields={k:v for k,v in display_params.items() if not isinstance(v,list)},
+                   parameter_pairs=list(q.lists()),filters=filters,additional_keyed_filters=contract.keyed_filters(p),applied_count=sum(bool(p[k]) for k in contract.FILTERS)+int(p['untagged']=='1')+int(p['uncategorized']=='1')+sum(bool(item['values']) or item['absent'] for item in contract.keyed_filters(p)),
                    start=start,end=end,today=today,granularity=p['granularity'],group_by=p['group_by'],group_label=contract.GROUPS[p['group_by']],
                    metric=p['metric'],metric_label=contract.METRICS[p['metric']][0] if p['measure']=='cost' else 'Normalized usage' if p['normalized']=='1' else 'Usage quantity',
                    measure=p['measure'],measure_label='Cost' if p['measure']=='cost' else 'Usage',chart_style=p['chart_style'],
                    export_query=q.urlencode(),style_options=[{'label':s.title(),'value':s,'url':url(chart_style=s)} for s in ('bar','line','stacked')],
+                   date_range_options=list(contract.DATE_RANGES.items()),future_range_options=list(contract.FUTURE_RANGES.items()),
                    group_options=list(contract.GROUPS.items()),metric_options=[(k,v[0]) for k,v in contract.METRICS.items()],
-                   warnings=warnings,customers=Customer.objects.filter(active=True),saved_reports=SavedReport.objects.all(),
-                   filter_customer=p['customer'],active_page='explorer',clear_url=url(**{k:[] for k in contract.FILTERS},untagged='0',uncategorized='0'),
+                   warnings=warnings,customers=Customer.objects.filter(active=True),saved_reports=SavedReport.objects.filter(archived_at__isnull=True),
+                   filter_customer=p['customer'],active_page='explorer',clear_url=url(**{k:[] for k in contract.FILTERS},untagged='0',uncategorized='0',keyed_filters='[]'),
                    report_presets=[{'label':label,'url':url(date_range=v)} for label,v in [('This month','this_month'),('Last 3 months','last_3_months'),('Last 6 months','last_6_months')]])
     return context
