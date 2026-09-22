@@ -22,7 +22,8 @@ permissions:
   contents: read
 concurrency:
   group: checks-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  # A workflow cancellation also cancels its deployment job, despite that job's lock.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/codex/billing-security-portfolio' }}
 jobs:
   test:
     name: Application tests (Python ${{ matrix.python }}, PostgreSQL ${{ matrix.postgres }})
@@ -47,6 +48,8 @@ jobs:
       DB_HOST: localhost
       DB_PASSWORD: ci-isolated-database-only
       AWS_EC2_METADATA_DISABLED: 'true'
+      RUN_RELEASE_SQL_TESTS: '1'
+      RELEASE_SQL_POSTGRES_IMAGE: postgres:${{ matrix.postgres }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -185,7 +188,11 @@ jobs:
         env:
           IDENTITY_ONLY: 'true'
   deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    if: >-
+      github.repository == 'ydsveluvolu2996/cloud-billing-console' &&
+      github.repository_id == '1361643722' &&
+      github.ref == 'refs/heads/codex/billing-security-portfolio' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy))
     needs: [test, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 100
@@ -220,10 +227,19 @@ jobs:
         with:
           name: billing-release-${{ github.sha }}
           path: /tmp/billing-release
+      - name: Skip superseded pushes before requesting AWS credentials
+        id: release
+        run: python deploy/github-release/release.py --preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Obtain temporary AWS credentials through GitHub OIDC
+        if: steps.release.outputs.deploy == 'true'
         run: python deploy/github-release/oidc.py
       - name: Stage, activate and health-check both billing runtimes
+        if: steps.release.outputs.deploy == 'true'
         run: python deploy/github-release/release.py /tmp/billing-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

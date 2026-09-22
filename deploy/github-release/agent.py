@@ -3,11 +3,13 @@
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -17,6 +19,7 @@ DIGEST = re.compile(r'[a-f0-9]{64}')
 VERSION = re.compile(r'[A-Za-z0-9._+/=-]{1,1024}')
 ACTIONS = ('stage', 'activate', 'rollback', 'status')
 RUNTIME = ('billing/', 'config/', 'templates/', 'static/')
+ADDITIVE_MODULE_SHA256 = 'c51c3b282d83c9b8b1c8a7e44ef77b894c4f4a3543fcd5daf8c91b8156921a64'
 
 
 def require(ok, message):
@@ -39,9 +42,87 @@ def run(args, **kwargs):
 def write_json(path, value):
     path = Path(path)
     temporary = path.with_suffix('.new')
-    temporary.write_text(json.dumps(value, indent=2) + '\n')
+    with temporary.open('w') as stream:
+        stream.write(json.dumps(value, indent=2) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.chmod(0o600)
     temporary.replace(path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def load_additive_module():
+    path = Path(__file__).with_name('additive_migrations.py')
+    require(path.is_file() and not path.is_symlink(), 'Installed additive maintenance helper is missing or linked')
+    for item in (path, *path.parents):
+        info = item.lstat()
+        require(not item.is_symlink() and info.st_uid == 0 and not info.st_mode & 0o022,
+                'Installed additive maintenance helper must be protected and root-owned')
+    require(sha256(path) == ADDITIVE_MODULE_SHA256, 'Installed additive maintenance helper checksum differs')
+    spec = importlib.util.spec_from_file_location('installed_additive_migrations',path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def stop_builder_unit(unit):
+    """Do not freeze untrusted output until its entire build cgroup has exited."""
+    require(re.fullmatch(r'billing-build-[a-f0-9]{40}-[0-9]+-[0-9]+-[0-9]+\.service',unit), 'Invalid dependency build unit')
+    try:
+        run(['systemctl','stop',unit],timeout=30)
+    except (subprocess.SubprocessError,OSError):
+        pass  # An already-collected transient unit is absent; verify below.
+    args = ['systemctl','show','--property=LoadState,ActiveState,ControlGroup',unit]
+    try:
+        output = run(args,timeout=15)
+    except subprocess.CalledProcessError as error:
+        output = error.stdout or ''
+    state = dict(line.split('=',1) for line in output.splitlines() if '=' in line)
+    require(state.get('LoadState') in ('loaded','not-found') and state.get('ActiveState') in ('inactive','failed'),
+            'Dependency build cleanup is unconfirmed; inspect its transient unit')
+    group = state.get('ControlGroup')
+    require(group in ('','/system.slice/'+unit), 'Unexpected dependency build control group')
+    if group:
+        require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(), 'Dependency freeze requires cgroup v2 verification')
+        folder = Path('/sys/fs/cgroup') / group.lstrip('/')
+        # Descendant cgroups cannot be created by the sandbox, but include them
+        # defensively so an empty parent never hides a remaining worker.
+        if folder.exists():
+            require(all(not item.read_text().strip() for item in folder.rglob('cgroup.procs')),
+                    'Dependency build processes are still running')
+
+
+def freeze_venv(path):
+    """Validate every inode before publishing root-owned runtime dependencies."""
+    path = Path(path)
+    require(stat.S_ISDIR(path.lstat().st_mode) and not path.is_symlink(), 'Dependency output is not a regular directory')
+    entries, pending = [(path,path.lstat())], [path]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as iterator:
+            for item in iterator:
+                info = item.stat(follow_symlinks=False)
+                require(stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1),
+                        'Dependency output contains a link or special file')
+                child = Path(item.path)
+                entries.append((child,info))
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(child)
+    for item,info in entries:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if stat.S_ISDIR(info.st_mode) else 0)
+        descriptor = os.open(item,flags)
+        try:
+            actual = os.fstat(descriptor)
+            require((actual.st_dev,actual.st_ino,actual.st_mode,actual.st_nlink) ==
+                    (info.st_dev,info.st_ino,info.st_mode,info.st_nlink), 'Dependency output changed while being frozen')
+            os.fchown(descriptor,0,0)
+            os.fchmod(descriptor,0o755 if stat.S_ISDIR(info.st_mode) or info.st_mode & 0o111 else 0o644)
+        finally:
+            os.close(descriptor)
 
 
 def safe_extract(path, destination, limit=2_000_000_000):
@@ -74,7 +155,11 @@ def compatible(source, expected):
     paths = sorted(str(p.relative_to(source)) for p in (source / 'billing/migrations').glob('*.py'))
     paths += ['deploy/database-roles.sql', 'deploy/user-administration.sql', 'deploy/activation-requests.sql', 'deploy/onboarding-worker/activation.service', 'deploy/onboarding-worker/install.py', 'compose.yaml', 'deploy/collector.service'] + ['deploy/single-ec2/metadata_guard.py', 'deploy/single-ec2/metadata-guard.service', 'deploy/single-ec2/docker-metadata.conf', 'deploy/single-ec2/collector.conf']
     actual = {name: sha256(source / name) for name in paths}
-    require(actual == expected, 'Schema, database policy or service configuration changed; a separate maintenance deployment is required')
+    if actual == expected:
+        return None
+    # Only installed, hash-pinned code may interpret an artifact's migration.
+    # It parses the candidate AST and never imports its Python or Django apps.
+    return load_additive_module().plan_addition(source,expected,actual)
 
 
 class Agent:
@@ -174,26 +259,57 @@ class Agent:
             self.download(name, entry['version_id'], entry['sha256'])
         source = self.stage / 'source'
         safe_extract(self.stage / 'source.tar.gz', source)
-        compatible(source, self.config['compatibility'])
+        addition = compatible(source, self.config['compatibility'])
+        if addition:
+            require(self.config['runtime'] == 'combined', 'Automatic additive migrations require the combined runtime')
+            state['additive_migration'] = addition
         if self.has_web:
             run(['docker', 'image', 'load', '--input', str(self.stage / 'images.tar.gz')])
             state['image_id'] = self.verify_images(json.loads((self.stage / 'images.json').read_text()))
         if self.has_collector:
             safe_extract(self.stage / 'wheels.tar.gz', self.stage / 'wheels')
-            venv = self.stage / 'venv'
-            previous_umask = os.umask(0o022)
-            try:
-                run(['/usr/bin/python3', '-m', 'venv', str(venv)])
-                run([str(venv / 'bin/python'), '-m', 'pip', 'install', '--no-index', '--no-cache-dir',
-                     '--find-links', str(self.stage / 'wheels'), '-r', str(source / 'requirements.txt')])
-            finally:
-                os.umask(previous_umask)
-            run([str(venv / 'bin/python'), '-m', 'pip', 'check'])
-            # Service can traverse/read immutable root-owned release code and dependencies.
-            for folder in [self.stage.parent, self.stage, venv]:
-                folder.chmod(0o755)
+            self.build_collector_venv(source)
         self.save(state, 'staged')
         return state
+
+    def build_collector_venv(self, source):
+        venv = self.stage / 'venv'
+        require(not venv.exists() and not venv.is_symlink(), 'Inspect the previous dependency build before retrying')
+        venv.mkdir(mode=0o700)
+        os.chown(venv,65534,65534,follow_symlinks=False)
+        # Input directories become traversable, never writable by the builder.
+        for folder in (self.stage.parent,self.stage,source,self.stage/'wheels'):
+            folder.chmod(0o755)
+        environment = ['/usr/bin/env','-i','PATH=/usr/bin:/bin','HOME=/nonexistent',
+                       'PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1','PIP_CONFIG_FILE=/dev/null',
+                       'PIP_DISABLE_PIP_VERSION_CHECK=1','AWS_EC2_METADATA_DISABLED=true']
+        privilege_drop = ['/usr/bin/setpriv','--reuid=65534','--regid=65534','--clear-groups',
+                          '--inh-caps=-all','--ambient-caps=-all','--bounding-set=-all','--no-new-privs']
+        commands = [
+            ['/usr/bin/python3','-I','-m','venv','--copies',str(venv)],
+            # CPython creates this redundant alias even with --copies. Remove it
+            # unprivileged before pip; frozen dependency trees allow no symlinks.
+            ['/usr/bin/unlink',str(venv/'lib64')],
+            [str(venv/'bin/python'),'-I','-m','pip','install','--no-index','--no-cache-dir','--only-binary=:all:',
+             '--find-links',str(self.stage/'wheels'),'-r',str(source/'requirements.txt')],
+            [str(venv/'bin/python'),'-I','-m','pip','check'],
+        ]
+        properties = ['PrivateNetwork=yes','PrivateTmp=yes','PrivateDevices=yes','ProtectSystem=strict',
+                      'ProtectHome=yes','NoNewPrivileges=yes','ProtectKernelTunables=yes','ProtectKernelModules=yes',
+                      'ProtectControlGroups=yes','RestrictSUIDSGID=yes','RestrictAddressFamilies=AF_UNIX',
+                      'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP','AmbientCapabilities=',
+                      'ReadWritePaths='+str(venv),'KillMode=control-group','TimeoutStopSec=10s',
+                      'RuntimeMaxSec=300s','MemoryMax=1G','TasksMax=64','UMask=0077']
+        for index,command in enumerate(commands):
+            unit = 'billing-build-'+self.release_id+'-'+str(index)+'.service'
+            args = ['systemd-run','--quiet','--wait','--pipe','--collect','--unit='+unit,
+                    '--working-directory='+str(venv)]
+            args.extend('--property='+value for value in properties)
+            try:
+                run(args+privilege_drop+environment+command,timeout=360)
+            finally:
+                stop_builder_unit(unit)
+        freeze_venv(venv)
 
     def health(self):
         if self.has_collector:
@@ -230,6 +346,14 @@ class Agent:
             self.health()
             return state
         require(state['phase'] == 'staged', 'Release must pass staging before activation')
+        if state.get('additive_migration'):
+            receipt = load_additive_module().apply(self.root,self.stage,self.release_id,
+                        state['additive_migration'],self.config,run,write_json)
+            state['additive_receipt'] = {'phase':receipt['phase'],'backup_stamp':receipt['backup_stamp'],
+                                         'migration':receipt['plan']['name']}
+            self.save(state,'staged')
+            # The verified migration file is now part of the old runtime backup.
+            # A code rollback therefore retains both its file and its DB column.
         backup = self.stage / 'backup'
         require(not backup.exists(), 'Existing rollback data must be inspected')
         backup.mkdir(mode=0o700)
@@ -251,7 +375,8 @@ class Agent:
                 shutil.copy2(target, saved)
         if self.has_web:
             shutil.copy2(self.root / '.env', backup / 'environment')
-            run(['bash', str(self.root / 'deploy/backup.sh')], cwd=self.root)
+            if not state.get('additive_receipt'):
+                run(['bash', str(self.root / 'deploy/backup.sh')], cwd=self.root)
         if self.has_collector:
             venv = self.root / '.venv'
             state['previous_venv_link'] = str(venv.readlink()) if venv.is_symlink() else None
@@ -388,5 +513,8 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # Subprocess output can include runtime configuration; retain no raw stderr in SSM/GitHub logs.
-        print(json.dumps({'error': str(error) if isinstance(error, ValueError) else type(error).__name__}))
+        code = ('validation_failed' if isinstance(error,ValueError) else
+                'timeout' if isinstance(error,subprocess.TimeoutExpired) else
+                'command_failed' if isinstance(error,(subprocess.CalledProcessError,OSError)) else 'internal_error')
+        print(json.dumps({'error_code':code,'error': str(error) if isinstance(error, ValueError) else type(error).__name__}))
         raise SystemExit(1)

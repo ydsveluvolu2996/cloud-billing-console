@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import urllib.request
 
 import boto3
 from botocore.exceptions import ClientError
@@ -15,9 +16,12 @@ ACCOUNT = '582287676741'
 REGION = 'ap-south-1'
 BUCKET = 'cloud-billing-console-artifacts-1p8h79kjwyyw'
 REPOSITORY_ID = '1361643722'
+REPOSITORY = 'ydsveluvolu2996/cloud-billing-console'
 INSTANCES = {'combined': 'i-0cae3cd32c80de891'}
 DOCUMENT = 'CloudBilling-GitHubRelease'
 BRANCH = 'refs/heads/codex/billing-security-portfolio'
+BRANCH_API = 'https://api.github.com/repos/' + REPOSITORY + '/git/ref/' + BRANCH.removeprefix('refs/')
+HELPER_ERROR_CODES = frozenset({'validation_failed', 'command_failed', 'timeout', 'internal_error'})
 
 
 def digest(path):
@@ -29,14 +33,80 @@ def digest(path):
 
 
 def check_context(env):
-    if env.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or env.get('GITHUB_REF') != BRANCH:
-        raise ValueError('Release must be manually dispatched from the protected release branch')
-    sha = env['GITHUB_SHA']
-    if not re.fullmatch('[a-f0-9]{40}', sha) or env.get('EXPECTED_SHA') != sha:
-        raise ValueError('The requested SHA no longer matches this run; dispatch the intended exact release again')
-    if env.get('GITHUB_REPOSITORY_ID') != REPOSITORY_ID:
+    event = env.get('GITHUB_EVENT_NAME')
+    if event not in ('push', 'workflow_dispatch') or env.get('GITHUB_REF') != BRANCH:
+        raise ValueError('Release requires a push or manual dispatch on the protected release branch')
+    if env.get('GITHUB_REPOSITORY_ID') != REPOSITORY_ID or env.get('GITHUB_REPOSITORY') != REPOSITORY:
         raise ValueError('Wrong repository')
+    sha = env.get('GITHUB_SHA', '')
+    if not re.fullmatch('[a-f0-9]{40}', sha):
+        raise ValueError('Release requires a full commit SHA')
+    if event == 'workflow_dispatch' and env.get('EXPECTED_SHA') != sha:
+        raise ValueError('The requested SHA no longer matches this run; dispatch the intended exact release again')
     return sha
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The repository API is fixed; never forward its bearer token to a redirect.
+        return None
+
+
+def current_branch_sha(env):
+    token = env.get('GITHUB_TOKEN')
+    if not token:
+        raise ValueError('A GitHub token is required to verify the release branch')
+    request = urllib.request.Request(BRANCH_API, headers={
+        'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'billing-release-coordinator',
+    })
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+            result = json.load(response)
+        if result['ref'] != BRANCH or result['object']['type'] != 'commit':
+            raise ValueError('Unexpected reference')
+        sha = result['object']['sha']
+        if not isinstance(sha, str) or not re.fullmatch('[a-f0-9]{40}', sha):
+            raise ValueError('Invalid reference SHA')
+    except Exception:
+        # HTTP errors and response bodies may contain credentials or arbitrary text.
+        raise RuntimeError('Cannot verify the current release branch; deployment stopped') from None
+    return sha
+
+
+def write_receipt(receipt, env):
+    Path('release-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    if env.get('GITHUB_STEP_SUMMARY'):
+        with Path(env['GITHUB_STEP_SUMMARY']).open('a') as summary:
+            summary.write('Billing release `' + receipt['sha'] + '` — **' + receipt['status'] + '**\n')
+
+
+def preflight(env):
+    """Authorize this tested commit before requesting credentials or touching AWS."""
+    sha = check_context(env)
+    deploy = True
+    if env['GITHUB_EVENT_NAME'] == 'push':
+        head = current_branch_sha(env)
+        if head != sha:
+            deploy = False
+            write_receipt({'sha': sha, 'status': 'skipped_superseded', 'current_branch_sha': head}, env)
+            print('Skipping superseded release push; no AWS deployment requested.', flush=True)
+    if env.get('GITHUB_OUTPUT'):
+        with Path(env['GITHUB_OUTPUT']).open('a') as output:
+            output.write('deploy=' + str(deploy).lower() + '\n')
+    return deploy
+
+
+def helper_error_code(result):
+    """Expose only the fixed helper's known error codes, never subprocess output."""
+    try:
+        output = json.loads(result.get('StandardOutputContent', ''))
+        code = output.get('error_code') if isinstance(output, dict) else None
+        if isinstance(code, str) and code in HELPER_ERROR_CODES:
+            return code
+    except (ValueError, TypeError):
+        pass
+    return 'helper_failed'
 
 
 class Release:
@@ -51,8 +121,9 @@ class Release:
             Parameters={'action': [action], 'releaseId': [self.release_id],
                         'manifestVersion': [self.version], 'manifestSha256': [self.checksum]}, TimeoutSeconds=120)
         command_id = response['Command']['CommandId']
-        self.receipt.setdefault('commands', []).append({'runtime': runtime, 'action': action, 'command_id': command_id})
-        print(json.dumps(self.receipt['commands'][-1]), flush=True)
+        command_receipt = {'runtime': runtime, 'action': action, 'command_id': command_id}
+        self.receipt.setdefault('commands', []).append(command_receipt)
+        print(json.dumps(command_receipt), flush=True)
         deadline = time.monotonic() + 1200
         while time.monotonic() < deadline:
             try:
@@ -64,20 +135,32 @@ class Release:
                 continue
             status = result['Status']
             if status == 'Success':
-                output = json.loads(result['StandardOutputContent'].strip())
+                try:
+                    output = json.loads(result['StandardOutputContent'])
+                except (ValueError, TypeError, KeyError):
+                    output = None
                 expected_phase = {'stage': 'staged', 'activate': 'active'}.get(action)
-                if output.get('release_id') != self.release_id or (expected_phase and output.get('phase') != expected_phase):
+                if not isinstance(output, dict) or output.get('release_id') != self.release_id or (expected_phase and output.get('phase') != expected_phase):
+                    command_receipt.update(status='InvalidReceipt', error_code='invalid_helper_receipt')
                     raise RuntimeError('Unexpected release receipt')
+                command_receipt['status'] = 'Success'
                 return output
             if status not in ('Pending', 'InProgress', 'Delayed', 'Cancelling'):
-                # Only the fixed helper's sanitized JSON is exposed; no environment or raw stderr.
-                raise RuntimeError(runtime + ' ' + action + ' failed: ' + status + ' (SSM ' + command_id + ')')
+                safe_status = status if status in ('Failed', 'Cancelled', 'TimedOut') else 'Unknown'
+                command_receipt.update(status=safe_status, error_code=helper_error_code(result))
+                print(json.dumps(command_receipt), flush=True)
+                raise RuntimeError(runtime + ' ' + action + ' failed: ' + command_receipt['error_code'] + ' (SSM ' + command_id + ')')
             time.sleep(5)
+        command_receipt.update(status='TimedOut', error_code='command_timeout')
         raise TimeoutError('SSM release command did not complete; inspect command ' + command_id)
 
     def deploy(self):
-        for runtime in INSTANCES:
-            self.command(runtime, 'stage')
+        try:
+            for runtime in INSTANCES:
+                self.command(runtime, 'stage')
+        except Exception:
+            self.receipt['status'] = 'stage_failed'
+            raise
         attempted = []
         try:
             for runtime in INSTANCES:
@@ -89,14 +172,16 @@ class Release:
             for runtime in reversed(attempted):
                 try:
                     self.command(runtime, 'rollback')
-                except Exception as error:
-                    failures.append(runtime + ': ' + str(error))
+                except Exception:
+                    failures.append({'runtime': runtime, 'error_code': 'rollback_failed'})
             self.receipt['status'] = 'rollback_failed' if failures else 'rolled_back'
             self.receipt['rollback_errors'] = failures
             raise
 
 
 def main(directory):
+    if not preflight(os.environ):
+        return
     sha = check_context(os.environ)
     session = boto3.Session(region_name=REGION)
     if session.client('sts').get_caller_identity()['Account'] != ACCOUNT:
@@ -133,10 +218,11 @@ def main(directory):
     try:
         Release(session.client('ssm'), release_id, version, checksum, receipt).deploy()
     finally:
-        Path('release-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
-        with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
-            summary.write('Billing release `' + sha + '` — **' + receipt['status'] + '**\n')
+        write_receipt(receipt, os.environ)
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    if sys.argv[1:] == ['--preflight']:
+        preflight(os.environ)
+    else:
+        main(sys.argv[1])
