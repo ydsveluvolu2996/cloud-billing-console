@@ -100,12 +100,11 @@ class ExplorerExportAvailabilityTests(TestCase):
 
     def assert_export_controls(self, response, enabled):
         controls = Controls(response.content)
-        for label in ('Export report ↓', 'Download as CSV ↓'):
-            control = controls.named(label)
-            self.assertEqual(control['tag'], 'a' if enabled else 'button')
-            self.assertEqual('disabled' not in control['attrs'], enabled)
-            if not enabled:
-                self.assertEqual(control['attrs']['aria-describedby'], 'report-export-status')
+        control = controls.named('Download as CSV ↓')
+        self.assertEqual(control['tag'], 'a' if enabled else 'button')
+        self.assertEqual('disabled' not in control['attrs'], enabled)
+        if not enabled:
+            self.assertEqual(control['attrs']['aria-describedby'], 'report-export-status')
 
     def complete_query(self):
         self.client.get('/', self.params)

@@ -1,7 +1,6 @@
 'use strict';
 // Design tokens shared with app.css (blue monochrome). Patterns and dashes carry meaning alongside colour.
 const TOKENS = {primary:'#2563EB', hover:'#1D4ED8', deep:'#1E3A8A', soft:'#EFF6FF', selected:'#DBEAFE', border:'#E2E8F0', muted:'#64748B', text2:'#475569', text:'#0F172A', surface:'#FFFFFF'};
-const PATTERNS = ['solid', 'diagonal', 'dots', 'horizontal', 'solid', 'cross', 'diagonal-reverse', 'solid', 'dots', 'dense'];
 const DASHES = ['', '6 4', '2 4', '10 4 2 4', '', '4 4', '12 4', '', '2 4', '8 3'];
 const MARKERS = ['circle', 'square', 'diamond', 'triangle', 'circle', 'square', 'diamond', 'triangle', 'circle', 'square'];
 function definePattern(svg, ns, id, color, kind) {
@@ -335,14 +334,14 @@ const parameters = document.getElementById('report-parameters');
 if (parameters) {
   const toggles = [...document.querySelectorAll('[data-toggle-parameters]')];
   const opener = toggles.find(button => !parameters.contains(button));
-  const mobile = matchMedia('(max-width: 1100px)');
+  const mobile = matchMedia('(max-width: 1280px)');
   const resizer = parameters.querySelector('.parameter-resizer');
   const setWidth = width => {
     const value = Math.max(280, Math.min(560, innerWidth * .55, width));
     document.documentElement.style.setProperty('--params-w', `${value}px`);
     resizer.setAttribute('aria-valuenow', String(Math.round(value))); return value;
   };
-  setWidth(Number(readPreference('panel-width', 340)) || 340);
+  setWidth(Number(readPreference('panel-width', 350)) || 350);
   const sync = () => {
     const visible = getComputedStyle(parameters).display !== 'none';
     toggles.forEach(button => button.setAttribute('aria-expanded', String(visible)));
@@ -435,7 +434,7 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
       node('line',{x1:pad.l,x2:w-pad.r,y1:y(value),y2:y(value),stroke:value===0?TOKENS.muted:TOKENS.border,'stroke-width':value===0?1.5:1});
       node('text',{x:pad.l-9,y:y(value)+3,fill:TOKENS.muted,'text-anchor':'end','font-size':11},Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(value));
     }
-    const fills = payload.series.map((s,i) => PATTERNS[i % PATTERNS.length] === 'solid' ? s.color : definePattern(svg, ns, `${chartId}-series-${i}`, s.color, PATTERNS[i % PATTERNS.length]));
+    const fills = payload.series.map(s => s.color);
     const indexOf = s => payload.series.indexOf(s);
     const positive=Array(count).fill(0),negative=Array(count).fill(0);
     series.forEach((s,j)=>{
@@ -516,13 +515,11 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
     explorerHost.replaceChildren(svg);
   };
   chartPanel.querySelectorAll('[data-series]').forEach(button=>{
-    // Legend swatches show the same pattern/dash as the chart so series are distinguishable without colour.
+    // Solid swatches match bar fills; line and forecast swatches retain their dash cues.
     const index=Number(button.dataset.series), series=payload.series[index], swatch=button.querySelector('svg');
     if(series && swatch){
       swatch.setAttribute('viewBox','0 0 14 14'); swatch.replaceChildren();
-      const kind=PATTERNS[index % PATTERNS.length];
-      const fill=kind==='solid'?series.color:definePattern(swatch, ns, `${chartId}-legend-${index}`, series.color, kind);
-      const rect=document.createElementNS(ns,'rect'); rect.setAttribute('width','14'); rect.setAttribute('height','14'); rect.setAttribute('fill',fill); swatch.appendChild(rect);
+      const rect=document.createElementNS(ns,'rect'); rect.setAttribute('width','14'); rect.setAttribute('height','14'); rect.setAttribute('fill',series.color); swatch.appendChild(rect);
       if(payload.style==='line'||series.forecast){ const line=document.createElementNS(ns,'path'); line.setAttribute('d','M1 7H13'); line.setAttribute('stroke',TOKENS.surface); line.setAttribute('stroke-width','2'); if(series.forecast||DASHES[index % DASHES.length]) line.setAttribute('stroke-dasharray',series.forecast?'4 2':DASHES[index % DASHES.length]); swatch.appendChild(line); }
     }
   });
@@ -731,6 +728,10 @@ if (reportForm) {
       if (absentFlag(type)) checkbox(absentFlag(type)).checked = false;
       commit(state); resetDraft(state); box.open = false;
     });
+    box.querySelector('[data-clear-filter-summary]').addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      box.querySelector('[data-clear-filter]').click();
+    });
     box.querySelector('[data-load-keys]')?.addEventListener('click', () => metadata(type, '', status, values => {
       const datalist = box.querySelector('datalist');
       datalist.replaceChildren(...values.map(value => { const option = document.createElement('option'); option.value = value; return option; }));
@@ -756,6 +757,8 @@ if (reportForm) {
     box.querySelectorAll('[data-draft-mode]').forEach(input => { input.name = `draft-${id}-mode`; });
     box.querySelector('datalist').id = `keys-${id}`; box.querySelector('[data-draft-key]').setAttribute('list', `keys-${id}`);
     box.querySelector('[data-clear-filter]').textContent = 'Remove filter';
+    const clearSummary = box.querySelector('[data-clear-filter-summary]');
+    clearSummary.textContent = 'Remove'; clearSummary.setAttribute('aria-label', `Remove additional ${type === 'tag' ? 'tag' : 'cost category'} filter`);
     box.querySelector('.dimension-values').replaceChildren(); additional.append(box);
     setupFilter(box, true, value || {key: '', values: [], mode: 'include', absent: false});
     if (open) { box.open = true; box.scrollIntoView({block: 'nearest'}); box.querySelector('[data-draft-key]').focus(); }
@@ -875,7 +878,7 @@ if (reportForm) {
     field('granularity').disabled = compare; checkbox('forecast').disabled = compare;
     const resource = reportForm.querySelector('[data-filter="resource"]');
     resource.classList.toggle('filter-unavailable', compare);
-    resource.querySelectorAll('.dimension-body input, .dimension-body button').forEach(input => { input.disabled = compare; });
+    resource.querySelectorAll('.dimension-body input, .dimension-body button, [data-clear-filter-summary]').forEach(input => { input.disabled = compare; });
     resource.querySelector('[data-resource-note]').textContent = compare ? 'Resource selection is unavailable in Compare. Switch to Standard to edit this filter.' : 'Choose EC2-Instances in Service. AWS resource data must already be enabled.';
     document.querySelector('[data-granularity-note]').textContent = compare ? 'Comparison uses monthly granularity. Forecasts and resource selection are unavailable.' : 'Hourly and resource reports require enabled AWS granular data and dates within the last 14 days.';
     document.querySelector('[data-open-dialog="save-report-dialog"]')?.toggleAttribute('disabled', compare);
