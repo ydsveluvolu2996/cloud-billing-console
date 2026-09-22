@@ -97,6 +97,8 @@ def values(params, key):
         raw = [raw]
     if not isinstance(raw, list) or any(not isinstance(v, str) or len(v)>1024 for v in raw) or len(raw)>100:
         raise ValueError('Each filter supports up to 100 values of at most 1,024 characters.')
+    if key == 'account':
+        raw = [value.strip() for value in raw]
     return sorted(set(v for v in raw if v != ''))
 
 

@@ -2,7 +2,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
@@ -17,6 +17,36 @@ SERVICE_LABELS = {
 # neutral grey reserved for the aggregated "Others" series. Charts also vary pattern/dash so
 # meaning never depends on colour alone.
 CHART_COLORS = ['#1E3A8A', '#2563EB', '#60A5FA', '#1D4ED8', '#93C5FD', '#3B82F6', '#BFDBFE', '#172554', '#7DA2E8', '#94A3B8']
+
+
+def account_display_labels(account_ids, customer_id=None):
+    """Name only report accounts whose current inventory metadata is visible.
+
+    Keep IDs as the stable grouping/filter identity. Historical ownership of cost
+    facts does not grant access to a later owner's current account name.
+    """
+    from django.conf import settings
+    from .access import current_access
+    from .models import AccountAssignment, AwsAccount
+
+    labels = {account_id: account_id for account_id in account_ids}
+    accounts = AwsAccount.objects.filter(account_id__in=labels)
+    access = current_access.get()
+    visible_customers = None
+    if customer_id:
+        visible_customers = [customer_id]
+    elif settings.ENFORCE_CUSTOMER_AUTHORIZATION and access and not access.portfolio:
+        visible_customers = access.customers
+    if visible_customers is not None:
+        today = timezone.now().date()
+        current = AccountAssignment.objects.filter(customer_id__in=visible_customers,
+            account__account_id__in=labels, start__lte=today).filter(Q(end__isnull=True) | Q(end__gt=today))
+        accounts = accounts.filter(pk__in=current.values('account_id'))
+    for account_id, name in accounts.values_list('account_id', 'name'):
+        name = name.strip()
+        if name and name != account_id:
+            labels[account_id] = f'{name} ({account_id})'
+    return labels
 
 
 def defaults(params):
@@ -63,12 +93,14 @@ def explorer_report(context, params):
     def url(**changes):
         return '/?' + urlencode({k: v for k, v in (filters | changes).items() if v})
 
+    account_labels = account_display_labels(totals, context['filter_customer']) if group == 'account' else {}
+
     def display(key):
         if group == 'customer':
             return customer_names[key]
         if group == 'service':
             return SERVICE_LABELS.get(key, key.removeprefix('AWS ').removeprefix('Amazon '))
-        return key
+        return account_labels.get(key, key)
 
     rows = []
     for key in sorted(totals, key=lambda key: (-totals[key], str(key))):

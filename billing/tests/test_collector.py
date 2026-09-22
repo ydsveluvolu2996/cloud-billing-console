@@ -67,6 +67,33 @@ class CollectionTests(TestCase):
         self.assertEqual(Cost.objects.get(account_id='444444444444').customer, self.customer)
         self.assertEqual(AwsAccount.objects.get(account_id='444444444444').payer_account_id, '111111111111')
 
+    @override_settings(REQUIRE_CONNECTION_APPROVAL=True)
+    def test_first_publication_assigns_existing_inventory_costs_to_customer(self):
+        from django.conf import settings
+        account = AwsAccount.objects.create(account_id='444444444444', source=self.source,
+                                            payer_account_id=self.source.account_id, discovery='organizations')
+        self.assertFalse(account.assignments.exists())
+        CustomerApproval.objects.create(customer=self.customer, status='approved',
+            expected_accounts=[self.source.account_id, account.account_id], contacts=['Finance'], billing_fields=['cost'],
+            storage_region=settings.AWS_REGION, retention_days=365, evidence='Approved inventory',
+            approved_by='admin', approved_at=timezone.now())
+        RoleApproval.objects.create(source=self.source, role_arn=self.source.role_arn, connection_version=self.source.connection_version,
+            status='approved', requested_by='admin', evidence='Approved role', approved_at=timezone.now())
+        client = ce_client([ce_page([(account.account_id, 'Amazon EC2', '7')], date(2026, 9, 1))])
+
+        collect_source(self.source, months=[date(2026, 9, 1)], client=client, today=self.today)
+
+        assignment = account.assignments.get()
+        self.assertEqual(assignment.customer, self.customer)
+        self.assertIsNone(assignment.end)
+        published = Cost.objects.get(account_id=account.account_id)
+        self.assertEqual(published.customer, self.customer)
+        self.assertEqual(published.source, self.source)
+        self.assertEqual(CollectionPeriod.objects.get(source=self.source, month=date(2026, 9, 1)).status, 'complete')
+        result = report({'start': '2026-09-01', 'end': '2026-09-01',
+                         'customer': str(self.customer.pk), 'account': account.account_id})
+        self.assertEqual(result['total'], Decimal('7'))
+
     def test_shared_payer_new_accounts_land_in_review_queue(self):
         shared_customer, shared = make_customer('Shared payer owner', '555555555555', shared=True)
         other, _ = make_customer('Other tenant', '666666666666', connected=False)
