@@ -1,0 +1,18 @@
+<nav class="console-navigation" aria-label="Main navigation">
+<a href="{% url 'insights' %}">Executive insights</a>
+<h3>Cost and usage analysis</h3>
+<a href="{% url 'dashboard' %}" {% if request.resolver_match.url_name == 'dashboard' %}class="active" aria-current="page"{% endif %}>Cost Explorer</a>
+<a href="{% url 'report_library' %}" {% if request.resolver_match.url_name == 'report_library' %}class="active" aria-current="page"{% endif %}>Report library</a>
+<a href="{% url 'overview' %}">Portfolio overview</a>
+<a href="{% url 'portfolio' %}">Cost overview</a>
+<h3>Billing and payments</h3>
+<a href="{% url 'reconciliation' %}">Billing reconciliation</a>
+<a href="{% url 'alliance' %}">Monthly billing</a>
+<h3>Cost organization</h3>
+<a href="{% url 'customers' %}">Customers</a>
+{% if can_manage_workspace %}<a href="{% url 'onboarding' %}">Onboarding</a>{% endif %}
+<h3>Budgets and planning</h3>
+<a href="{% url 'budget_list' %}">Budgets</a>
+<a href="{% url 'optimization' %}">Budgets &amp; savings</a>
+{% if can_manage_workspace %}<h3>Preferences and activity</h3><a href="{% url 'activity' %}">Sync &amp; activity</a>{% endif %}
+</nav>

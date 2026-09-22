@@ -13,10 +13,9 @@ SERVICE_LABELS = {
     'Amazon Simple Notification Service': 'SNS', 'Amazon Simple Queue Service': 'SQS',
     'Amazon Relational Database Service': 'RDS', 'Amazon Elastic Load Balancing': 'Elastic Load Balancing',
 }
-# Blue monochrome series palette: distinct lightness steps from deep navy to pale sky, plus a
-# neutral grey reserved for the aggregated "Others" series. Charts also vary pattern/dash so
-# meaning never depends on colour alone.
-CHART_COLORS = ['#1E3A8A', '#2563EB', '#60A5FA', '#1D4ED8', '#93C5FD', '#3B82F6', '#BFDBFE', '#172554', '#7DA2E8', '#94A3B8']
+# Distinct Cost Explorer series colours, with a neutral grey for "Others".
+# Lines also use dashes and markers; every series remains labelled in the legend and table.
+CHART_COLORS = ['#688AE8', '#B34C72', '#56A592', '#8764BE', '#D68B57', '#3D718F', '#C65D55', '#8B9E42', '#4C9AC9', '#879596']
 
 
 def account_display_labels(account_ids, customer_id=None):
