@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}Report library · Cloud Billing{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><h1>Report library</h1><p>Saved reports available to your current customer access.</p></div>
+  <a class="button secondary" href="{% url 'new_report' %}">Create report</a>
+</header>
+<section class="panel form-panel">
+  <nav class="header-actions" aria-label="Report status">
+    <a class="button {% if archived %}secondary{% endif %}" href="{% url 'report_library' %}{% if query %}?q={{ query|urlencode }}{% endif %}"{% if not archived %} aria-current="page"{% endif %}>Active reports ({{ active_count }})</a>
+    <a class="button {% if not archived %}secondary{% endif %}" href="{% url 'report_library' %}?status=archived{% if query %}&amp;q={{ query|urlencode }}{% endif %}"{% if archived %} aria-current="page"{% endif %}>Archived reports ({{ archived_count }})</a>
+  </nav>
+  <form method="get" class="filter-form" role="search">
+    {% if archived %}<input type="hidden" name="status" value="archived">{% endif %}
+    <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ direction }}">
+    <label for="report-search">Find reports</label>
+    <input type="search" id="report-search" name="q" value="{{ query }}" maxlength="120" placeholder="Report name">
+    <button class="button secondary" type="submit">Search</button>
+  </form>
+  {% if archived %}<p>Archived reports keep their saved settings. Restore a report to open it again.</p>{% endif %}
+  {% if can_edit %}
+  <form method="post" action="{% url 'selected_reports' %}" id="report-library-actions" class="header-actions">
+    {% csrf_token %}
+    <button class="button secondary" type="submit" name="action" value="duplicate" data-library-action disabled>Duplicate selected</button>
+    {% if archived %}<button class="button secondary" type="submit" name="action" value="restore" data-library-action disabled>Restore selected</button>{% else %}<button class="button secondary" type="submit" name="action" value="archive" data-library-action disabled>Archive selected</button>{% endif %}
+    <span data-library-selection aria-live="polite">0 reports selected</span>
+  </form>
+  <noscript><p>Use the actions beside each report to duplicate, archive or restore it.</p></noscript>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">{% if can_edit %}<input type="checkbox" data-library-select-all aria-label="Select all editable reports on this page">{% else %}<span class="sr-only">Selection</span>{% endif %}</th>{% for header in headers %}<th scope="col"{% if header.direction %} aria-sort="{{ header.direction }}"{% endif %}><a href="{{ header.url }}">{{ header.label }} <span aria-hidden="true">{% if header.direction == 'ascending' %}↑{% elif header.direction == 'descending' %}↓{% else %}↕{% endif %}</span></a></th>{% endfor %}<th scope="col">Customer</th><th scope="col">Actions</th></tr></thead>
+      <tbody>
+      {% for report in reports %}
+        <tr>
+          <td>{% if report.can_edit %}<input type="checkbox" name="report_ids" value="{{ report.pk }}" form="report-library-actions" data-library-select aria-label="Select {{ report.name }}">{% endif %}</td>
+          <th scope="row">{% if archived %}{{ report.name }}{% else %}<a href="{% url 'open_report' report.pk %}">{{ report.name }}</a>{% endif %}</th>
+          <td>{{ report.summary.report_type }}</td>
+          <td>{{ report.summary.time_range }}</td>
+          <td>{{ report.summary.granularity }}</td>
+          <td>{{ report.summary.group_by }}</td>
+          <td>{% if report.summary.filter_count %}{{ report.summary.filter_count }} filter{{ report.summary.filter_count|pluralize }}<br><small>{{ report.summary.filter_labels }}</small>{% elif not report.summary.filter_warning %}None{% endif %}{% if report.summary.filter_warning %}<p>{{ report.summary.filter_warning }}</p>{% endif %}</td>
+          <td>{{ report.customer.name|default:'All authorized customers' }}</td>
+          <td>
+            {% if report.can_edit %}
+            <form method="post" action="{% url 'duplicate_report' report.pk %}">{% csrf_token %}<button class="button secondary" type="submit" aria-label="Duplicate {{ report.name }}">Duplicate</button></form>
+            <details>
+              <summary>Rename <span class="sr-only">{{ report.name }}</span></summary>
+              <form method="post" action="{% url 'rename_report' report.pk %}">
+                {% csrf_token %}
+                <label for="report-name-{{ report.pk }}">Report name</label>
+                <input id="report-name-{{ report.pk }}" name="name" value="{{ report.name }}" maxlength="120" required>
+                <button class="button secondary" type="submit">Save name</button>
+              </form>
+            </details>
+            {% if archived %}
+            <form method="post" action="{% url 'restore_report' report.pk %}">{% csrf_token %}<button class="button secondary" type="submit" aria-label="Restore {{ report.name }}">Restore</button></form>
+            {% else %}
+            <form method="post" action="{% url 'archive_report' report.pk %}">{% csrf_token %}<button class="button secondary" type="submit" aria-label="Archive {{ report.name }}">Archive</button></form>
+            {% endif %}
+            {% else %}<span class="muted">Read only</span>{% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="9">{% if query %}No reports match your search.{% elif archived %}No archived reports.{% else %}No saved reports. Create a report in Cost Explorer and save it to this library.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if page.paginator.num_pages > 1 %}
+  <nav class="pagination" aria-label="Report library pages">
+    <span>Page {{ page.number }} of {{ page.paginator.num_pages }} · {{ page.paginator.count }} reports</span>
+    {% if page.has_previous %}<a href="?{{ pagination_query }}&amp;page={{ page.previous_page_number }}">Previous</a>{% endif %}
+    {% if page.has_next %}<a href="?{{ pagination_query }}&amp;page={{ page.next_page_number }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+<script src="{% static 'report-library.js' %}" defer></script>
+{% endblock %}

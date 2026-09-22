@@ -30,6 +30,38 @@ function marker(ns, kind, cx, cy, r, color) {
   node.setAttribute('fill', color); node.setAttribute('stroke', TOKENS.surface); node.setAttribute('stroke-width', '1');
   return node;
 }
+// Pure date and forecast transformations are shared by the controls and regression checks.
+function relativeDateRange(range, today) {
+  const month = (offset, day=1) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth()+offset, day));
+  let start, end;
+  if (range === 'this_month') { start=month(0); end=today; }
+  else if (range === 'current_month') { start=month(0); end=month(1,0); }
+  else if (range === 'last_month') { start=month(-1); end=month(0,0); }
+  else if (range === 'year_to_date') { start=new Date(Date.UTC(today.getUTCFullYear(),0,1)); end=today; }
+  else if (/^last_(3|6|12|36)_months$/.test(range)) { start=month(-Number(range.split('_')[1])); end=month(0,0); }
+  else if (/^last_(1|7|14)_day(s)?$/.test(range)) { const days=Number(range.split('_')[1]); end=new Date(today); if(days===1)end.setUTCDate(end.getUTCDate()-1); start=new Date(end); start.setUTCDate(start.getUTCDate()-days+1); }
+  return start ? {start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10)} : null;
+}
+function prepareForecastSeries(payload) {
+  if (payload.comparison || !payload.forecast_rows?.length) return [];
+    const monthly = payload.granularity ? payload.granularity === 'monthly' : !payload.periods.length || !/^\d{4}-/.test(payload.periods[0]);
+    const labelFor = row => monthly ? new Date(`${row.start}T00:00:00Z`).toLocaleDateString('en', {month:'short', year:'numeric', timeZone:'UTC'}) : row.start;
+    const originalPeriods = [...payload.periods];
+    const periods = [...new Set([...originalPeriods, ...payload.forecast_rows.map(labelFor)])];
+    const periodDate = value => /^\d{4}-/.test(value) ? value : new Date(`${value} 1 UTC`).toISOString().slice(0,10);
+    periods.sort((a,b) => periodDate(a).localeCompare(periodDate(b)));
+    const remap = values => periods.map(period => { const index = originalPeriods.indexOf(period); return index < 0 ? null : values[index]; });
+    payload.series.forEach(series => { series.values = remap(series.values); }); payload.totals = remap(payload.totals); payload.periods = periods;
+    const forecasts = new Map();
+    payload.forecast_rows.forEach(row => {
+      const key = row.series_id || row.customer;
+      if (!forecasts.has(key)) forecasts.set(key, {label: `${row.customer} — forecast`, color: TOKENS.deep, forecast: true, values: periods.map(() => null), intervals: {}});
+      const series = forecasts.get(key), index = periods.indexOf(labelFor(row));
+      series.values[index] = row.mean; series.intervals[index] = row;
+    });
+  return [...forecasts.values()];
+}
+
 const navToggle = document.querySelector('[data-nav-toggle]');
 if (navToggle) {
   const sidebar = document.getElementById('sidebar');
@@ -69,12 +101,91 @@ document.querySelectorAll('[data-copy]').forEach(button => button.addEventListen
   catch { field.focus(); field.select(); button.textContent = 'Select and copy the link'; }
 }));
 
+// Preferences are scoped to the signed-in report workspace.
+const reportScope = document.getElementById('report-form')?.dataset.scope || 'default';
+const preferenceKey = kind => `billing.explorer.${reportScope}.${kind}`;
+const readPreference = (kind, fallback) => { try { return JSON.parse(localStorage.getItem(preferenceKey(kind))) ?? fallback; } catch { return fallback; } };
+const writePreference = (kind, value) => { try { localStorage.setItem(preferenceKey(kind), JSON.stringify(value)); } catch { /* Optional preference. */ } };
+const dialogOpeners = new WeakMap();
+function openReportDialog(dialog, opener) {
+  if (!dialog) return;
+  dialogOpeners.set(dialog, opener || document.activeElement);
+  dialog.dispatchEvent(new Event('dialogopen'));
+  dialog.showModal();
+}
+function closeReportDialog(dialog) { dialog.close(); dialogOpeners.get(dialog)?.focus(); }
+document.querySelectorAll('[data-open-dialog]').forEach(button => button.addEventListener('click', () => openReportDialog(document.getElementById(button.dataset.openDialog), button)));
+document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => closeReportDialog(button.closest('dialog'))));
+document.querySelectorAll('dialog.report-dialog').forEach(dialog => dialog.addEventListener('cancel', () => dialogOpeners.get(dialog)?.focus()));
+document.querySelectorAll('[data-scroll-prompts]').forEach(button => button.addEventListener('click', () => {
+  const list = document.querySelector('.quick-report-list');
+  list?.scrollBy({left: Number(button.dataset.scrollPrompts) * list.clientWidth * .8, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
+}));
+const paginatedTables = new Map();
+function renderPaginatedTable(table, query) {
+  const group = table.dataset.paginated;
+  let state = paginatedTables.get(group);
+  if (!state) {
+    const saved = readPreference(`table.${group}`, {});
+    state = {page: 1, size: [10,20,50,100,200].includes(saved.size) ? saved.size : 20, wrap: saved.wrap === true};
+    paginatedTables.set(group, state);
+  }
+  const rows = [...table.querySelectorAll('tbody [data-data-row]')];
+  const matches = rows.filter(row => row.textContent.toLocaleLowerCase().includes(query));
+  const pages = Math.max(1, Math.ceil(matches.length / state.size));
+  state.page = Math.min(pages, Math.max(1, state.page));
+  const from = (state.page - 1) * state.size;
+  const displayed = new Set(matches.slice(from, from + state.size));
+  rows.forEach(row => { row.hidden = !displayed.has(row); });
+  table.classList.toggle('wrap-lines', state.wrap);
+  const section = table.closest('[data-search-container]');
+  section.querySelector('.search-empty').hidden = matches.length > 0 || rows.length === 0;
+  section.querySelector('[data-search-count]').textContent = matches.length ? `${from + 1}–${Math.min(from + state.size, matches.length)} of ${matches.length} rows${query ? ` (${rows.length} total)` : ''}` : `0 of ${rows.length} rows`;
+  const pagination = section.querySelector('[data-pagination]');
+  pagination.replaceChildren();
+  const button = (label, page, disabled, current = false) => {
+    const node = document.createElement('button'); node.type = 'button'; node.className = 'pagination-button';
+    node.textContent = label; node.disabled = disabled;
+    node.setAttribute('aria-label', /^\d+$/.test(label) ? `Page ${label}` : `${label} page`);
+    if (current) node.setAttribute('aria-current', 'page');
+    node.addEventListener('click', () => { state.page = page; renderPaginatedTable(table, query); pagination.querySelector('[aria-current]')?.focus(); });
+    pagination.append(node);
+  };
+  button('Previous', state.page - 1, state.page === 1);
+  const start = Math.max(1, Math.min(state.page - 2, pages - 4));
+  const pageNumbers = [...new Set([1, ...Array.from({length: Math.min(5, pages)}, (_, i) => start + i), pages])];
+  let previous = 0;
+  pageNumbers.forEach(page => {
+    if (previous && page > previous + 1) { const gap = document.createElement('span'); gap.textContent = '…'; pagination.append(gap); }
+    button(String(page), page, false, page === state.page); previous = page;
+  });
+  button('Next', state.page + 1, state.page === pages);
+}
+let preferenceTable;
+document.querySelectorAll('[data-table-preferences]').forEach(button => button.addEventListener('click', () => {
+  preferenceTable = button.dataset.tablePreferences;
+  const state = paginatedTables.get(preferenceTable);
+  const dialog = document.getElementById('table-preferences-dialog');
+  dialog.querySelector(`[name="table-page-size"][value="${state.size}"]`).checked = true;
+  dialog.querySelector('[data-wrap-lines]').checked = state.wrap;
+  openReportDialog(dialog, button);
+}));
+document.querySelector('[data-confirm-table-preferences]')?.addEventListener('click', () => {
+  const dialog = document.getElementById('table-preferences-dialog'), state = paginatedTables.get(preferenceTable);
+  state.size = Number(dialog.querySelector('[name="table-page-size"]:checked').value);
+  state.wrap = dialog.querySelector('[data-wrap-lines]').checked; state.page = 1;
+  writePreference(`table.${preferenceTable}`, {size: state.size, wrap: state.wrap});
+  searchTables(preferenceTable); closeReportDialog(dialog);
+});
+
 // All tables remain available when JavaScript is disabled.
 const tabs = [...document.querySelectorAll('[data-tab]')];
 const panels = [...document.querySelectorAll('[data-table-panel]')];
 function searchTables(group) {
   const input = document.querySelector(`[data-search-group="${group}"]`);
   const query = (input?.value || '').toLocaleLowerCase().trim();
+  const paginated = document.querySelector(`table[data-paginated="${group}"]`);
+  if (paginated) { renderPaginatedTable(paginated, query); return; }
   let total = 0, visible = 0;
   document.querySelectorAll(`table[data-searchable="${group}"]`).forEach(table => {
     if (table.closest('[data-table-panel]')?.hidden) return;
@@ -125,7 +236,7 @@ if (tabs.length) {
   window.addEventListener('hashchange', () => selectTab(location.hash.slice(1)));
 }
 document.querySelectorAll('[data-search-group]').forEach(input => {
-  input.addEventListener('input', () => searchTables(input.dataset.searchGroup));
+  input.addEventListener('input', () => { const state = paginatedTables.get(input.dataset.searchGroup); if (state) state.page = 1; searchTables(input.dataset.searchGroup); });
   searchTables(input.dataset.searchGroup);
 });
 document.querySelectorAll('[data-sort]').forEach(button => button.addEventListener('click', () => {
@@ -148,6 +259,7 @@ document.querySelectorAll('[data-sort]').forEach(button => button.addEventListen
   th.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
   button.querySelector('span').textContent = ascending ? '↑' : '↓';
   rows.forEach(row => body.appendChild(row));
+  if (table.dataset.paginated) { paginatedTables.get(table.dataset.paginated).page = 1; searchTables(table.dataset.paginated); }
 }));
 
 const host = document.getElementById('cost-chart');
@@ -218,31 +330,78 @@ if (host) {
   new ResizeObserver(draw).observe(host); draw();
 }
 
-// Explorer parameters stay docked on desktop and open as a drawer on smaller screens.
+// The dock can resize with a pointer or keyboard and becomes a dismissible mobile drawer.
 const parameters = document.getElementById('report-parameters');
 if (parameters) {
-  const toggles = document.querySelectorAll('[data-toggle-parameters]');
-  const updateExpanded = () => toggles.forEach(button => button.setAttribute('aria-expanded', String(getComputedStyle(parameters).display !== 'none')));
+  const toggles = [...document.querySelectorAll('[data-toggle-parameters]')];
+  const opener = toggles.find(button => !parameters.contains(button));
+  const mobile = matchMedia('(max-width: 1100px)');
+  const resizer = parameters.querySelector('.parameter-resizer');
+  const setWidth = width => {
+    const value = Math.max(280, Math.min(560, innerWidth * .55, width));
+    document.documentElement.style.setProperty('--params-w', `${value}px`);
+    resizer.setAttribute('aria-valuenow', String(Math.round(value))); return value;
+  };
+  setWidth(Number(readPreference('panel-width', 340)) || 340);
+  const sync = () => {
+    const visible = getComputedStyle(parameters).display !== 'none';
+    toggles.forEach(button => button.setAttribute('aria-expanded', String(visible)));
+    parameters.inert = !visible;
+    if (mobile.matches && visible) { parameters.setAttribute('role', 'dialog'); parameters.setAttribute('aria-modal', 'true'); }
+    else { parameters.removeAttribute('role'); parameters.removeAttribute('aria-modal'); }
+    window.dispatchEvent(new Event('resize'));
+  };
+  const close = () => { document.body.classList.add('parameters-hidden'); document.body.classList.remove('parameters-open'); sync(); opener?.focus(); };
   toggles.forEach(button => button.addEventListener('click', () => {
-    const open = getComputedStyle(parameters).display !== 'none';
-    document.body.classList.toggle('parameters-hidden', open);
-    document.body.classList.toggle('parameters-open', !open);
-    updateExpanded();
-    if (!open) parameters.querySelector('input:not([type="hidden"])').focus();
+    if (getComputedStyle(parameters).display !== 'none') close();
+    else { document.body.classList.remove('parameters-hidden'); document.body.classList.add('parameters-open'); sync(); parameters.querySelector('[data-toggle-parameters]').focus(); }
   }));
-  window.addEventListener('resize', updateExpanded); updateExpanded();
+  document.addEventListener('keydown', event => {
+    if (!mobile.matches || getComputedStyle(parameters).display === 'none' || document.querySelector('dialog[open]')) return;
+    if (event.key === 'Escape') { event.preventDefault(); close(); }
+    if (event.key === 'Tab') {
+      const focusable = [...parameters.querySelectorAll('button, input, select, a, summary, [tabindex="0"]')].filter(node => !node.disabled && node.offsetParent !== null && node.type !== 'hidden');
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+  document.addEventListener('click', event => {
+    if (mobile.matches && document.body.classList.contains('parameters-open') && !event.target.closest('#report-parameters, [data-toggle-parameters], dialog')) close();
+  });
+  mobile.addEventListener('change', () => { document.body.classList.remove('parameters-open'); sync(); });
+  let resizing = false;
+  resizer.addEventListener('pointerdown', event => { if (mobile.matches) return; resizing = true; resizer.setPointerCapture(event.pointerId); document.body.classList.add('resizing-parameters'); event.preventDefault(); });
+  resizer.addEventListener('pointermove', event => { if (resizing) setWidth(innerWidth - event.clientX); });
+  const finishResize = () => { if (resizing) { resizing = false; document.body.classList.remove('resizing-parameters'); writePreference('panel-width', Number(resizer.getAttribute('aria-valuenow'))); } };
+  resizer.addEventListener('pointerup', finishResize); resizer.addEventListener('pointercancel', finishResize);
+  resizer.addEventListener('keydown', event => {
+    const change = {ArrowLeft: 20, ArrowRight: -20}[event.key]; if (!change) return;
+    event.preventDefault(); writePreference('panel-width', setWidth(Number(resizer.getAttribute('aria-valuenow')) + change));
+  });
+  sync();
 }
-for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparison-chart')) {
-  const chartId=explorerHost.id==='comparison-chart'?'comparison':'explorer';
+
+for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparison-chart, #usage-chart, #usage-comparison-chart')) {
+  const chartId=explorerHost.dataset.chartId || (explorerHost.id==='comparison-chart'?'comparison':'explorer');
   const chartPanel=explorerHost.closest('.panel');
   const payload = JSON.parse(document.getElementById(chartId+'-data').textContent);
   const tooltip = document.getElementById(chartId+'-tooltip');
+  // Each AWS customer/query keeps its own expected value and prediction interval.
+  // Forecast series are overlays, never members of the actual-cost stack or total.
+  if (explorerHost.dataset.granularity) payload.granularity = explorerHost.dataset.granularity;
+  prepareForecastSeries(payload).forEach(series => {
+    const index = payload.series.length; payload.series.push(series);
+    const button = document.createElement('button'); button.type = 'button'; button.dataset.series = String(index); button.setAttribute('aria-pressed', 'true'); button.className = 'forecast-legend';
+    const swatch = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); swatch.setAttribute('width','14'); swatch.setAttribute('height','14'); swatch.setAttribute('aria-hidden','true');
+    button.append(swatch, document.createTextNode(series.label)); chartPanel.querySelector('.chart-legend').append(button);
+  });
   const hidden = new Set();
   const ns = 'http://www.w3.org/2000/svg';
   const amount = value => {
-    if (value === null) return '—';
+    if (value === null || value === undefined) return '—';
     return new Intl.NumberFormat('en', {style:payload.measure==='usage'?'decimal':'currency', currency:payload.measure==='usage'?undefined:payload.currency, minimumFractionDigits:2,
-      maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 10 : 2}).format(value);
+      maximumFractionDigits:Math.abs(value) > 0 && Math.abs(value) < .01 ? 10 : 2}).format(value) + (payload.measure === 'usage' ? ` ${payload.currency}` : '');
   };
   const periodLabel = text => /^\d{4}-\d{2}-\d{2} \d{2}:/.test(text) ? text + ' UTC' : /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T00:00:00Z`).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}) : text;
   const drawExplorer = () => {
@@ -251,11 +410,12 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
     const series = payload.series.filter((_,i) => !hidden.has(i));
     const count = payload.periods.length, step = pw / Math.max(1,count);
     const totals = payload.periods.map((_,i) => ({
-      positive:series.reduce((sum,s) => sum+Math.max(0,s.values[i]||0),0),
-      negative:series.reduce((sum,s) => sum+Math.min(0,s.values[i]||0),0)
+      positive:series.filter(s=>!s.forecast).reduce((sum,s) => sum+Math.max(0,s.values[i]||0),0),
+      negative:series.filter(s=>!s.forecast).reduce((sum,s) => sum+Math.min(0,s.values[i]||0),0)
     }));
-    const rawMax = payload.style === 'stacked' ? Math.max(0,...totals.map(t=>t.positive)) : Math.max(0,...series.flatMap(s=>s.values.map(v=>v||0)));
-    const rawMin = payload.style === 'stacked' ? Math.min(0,...totals.map(t=>t.negative)) : Math.min(0,...series.flatMap(s=>s.values.map(v=>v||0)));
+    const bounds = series.filter(s=>s.forecast).flatMap(s=>Object.values(s.intervals).flatMap(row=>[row.lower,row.upper,row.mean]));
+    const rawMax = Math.max(0,...bounds,...(payload.style === 'stacked' ? totals.map(t=>t.positive) : series.flatMap(s=>s.values.map(v=>v||0))));
+    const rawMin = Math.min(0,...bounds,...(payload.style === 'stacked' ? totals.map(t=>t.negative) : series.flatMap(s=>s.values.map(v=>v||0))));
     const roughStep = (rawMax-rawMin || 1)/4, magnitude = 10 ** Math.floor(Math.log10(roughStep));
     const tick = [1,2,2.5,5,10].find(n=>n*magnitude>=roughStep)*magnitude;
     const max = Math.ceil(rawMax/tick)*tick || (rawMin < 0 ? 0 : tick*4);
@@ -279,7 +439,7 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
     const indexOf = s => payload.series.indexOf(s);
     const positive=Array(count).fill(0),negative=Array(count).fill(0);
     series.forEach((s,j)=>{
-      if(payload.style === 'line') {
+      if(payload.style === 'line' || s.forecast) {
         let path='',connected=false;
         const k=indexOf(s);
         s.values.forEach((v,i)=>{
@@ -287,7 +447,8 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
           path+=`${connected?' L':' M'}${x(i)} ${y(v)}`; connected=true;
         });
         const line=node('path',{d:path,stroke:s.color,'stroke-width':2,fill:'none','stroke-linejoin':'round'});
-        if(DASHES[k % DASHES.length]) line.setAttribute('stroke-dasharray', DASHES[k % DASHES.length]);
+        if(s.forecast || DASHES[k % DASHES.length]) line.setAttribute('stroke-dasharray', s.forecast ? '7 4' : DASHES[k % DASHES.length]);
+        if(s.forecast) Object.entries(s.intervals).forEach(([index,row])=>{ const cx=x(Number(index)); node('line',{x1:cx,x2:cx,y1:y(row.lower),y2:y(row.upper),stroke:s.color,'stroke-width':2,opacity:.4}); [row.lower,row.upper].forEach(value=>node('line',{x1:cx-4,x2:cx+4,y1:y(value),y2:y(value),stroke:s.color,'stroke-width':2,opacity:.4})); });
         if(count<=80) s.values.forEach((v,i)=>{ if(v!==null) svg.appendChild(marker(ns, MARKERS[k % MARKERS.length], x(i), y(v), 3, s.color)); });
       } else {
         s.values.forEach((v,i)=>{
@@ -298,9 +459,9 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
             if(v>=0)positive[i]=to;else negative[i]=to;
             bw=Math.max(.5,Math.min(75,step*.57));left=x(i)-bw/2;
           } else {
-            const groupWidth=Math.min(step*.78,115);
-            bw=Math.max(.4,groupWidth/Math.max(1,series.length)*.87);
-            left=x(i)-groupWidth/2+j*groupWidth/Math.max(1,series.length);
+            const groupWidth=Math.min(step*.78,115), actualCount=series.filter(item=>!item.forecast).length;
+            bw=Math.max(.4,groupWidth/Math.max(1,actualCount)*.87);
+            left=x(i)-groupWidth/2+j*groupWidth/Math.max(1,actualCount);
           }
           const bar=node('rect',{x:left,y:Math.min(y(from),y(to)),width:bw,height:Math.max(.2,Math.abs(y(from)-y(to))),fill:fills[indexOf(s)]});
           if(v<0) bar.setAttribute('stroke', TOKENS.deep), bar.setAttribute('stroke-dasharray', '2 2'), bar.setAttribute('stroke-width', '1');
@@ -318,9 +479,9 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
       guide.setAttribute('x1',x(i)); guide.setAttribute('x2',x(i)); guide.setAttribute('visibility','visible');
       tooltip.replaceChildren();
       const available=series.filter(s=>s.values[i]!==null);
-      const displayedTotal=payload.comparison?payload.totals[i]:payload.totals[i]===null?null:available.reduce((sum,s)=>sum+s.values[i],0);
-      const title=document.createElement('strong'); title.textContent=`${periodLabel(payload.periods[i])} · ${payload.comparison?'Change':hidden.size ? 'Visible total' : 'Total'} ${amount(displayedTotal)}`;tooltip.appendChild(title);
-      available.forEach(s=>{const span=document.createElement('span');span.textContent=`${s.label}: ${amount(s.values[i])}`;tooltip.appendChild(span);});
+      const displayedTotal=payload.comparison?payload.totals[i]:payload.totals[i]===null?null:available.filter(s=>!s.forecast).reduce((sum,s)=>sum+s.values[i],0);
+      const title=document.createElement('strong'); title.textContent=`${periodLabel(payload.periods[i])} · ${payload.comparison?'Change':hidden.size ? 'Visible actual total' : 'Actual total'} ${amount(displayedTotal)}`;tooltip.appendChild(title);
+      available.forEach(s=>{const span=document.createElement('span');span.textContent=`${s.label}: ${amount(s.values[i])}${s.forecast ? ` · ${payload.forecast_interval || 80}% customer interval ${amount(s.intervals[i].lower)}–${amount(s.intervals[i].upper)} · ${s.intervals[i].start} to ${s.intervals[i].end} (exclusive)` : ''}`;tooltip.appendChild(span);});
       if(overlay)overlay.remove();
       const ow=Math.min(310,pw),oh=Math.min(h-pad.t-pad.b,32+available.length*20);
       const ox=Math.max(pad.l,Math.min(w-pad.r-ow,x(i)+(i<count/2?14:-ow-14)));
@@ -337,7 +498,7 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
     };
     payload.periods.forEach((period,i)=>{
       const hit=node('rect',{x:pad.l+i*step,y:pad.t,width:step,height:ph,fill:'transparent',tabindex:i===0?0:-1,role:'img',
-        'aria-label':`${periodLabel(period)}. ${payload.comparison?'Change':'Total'} ${amount(payload.totals[i])}. Focus to inspect groups.`});
+        'aria-label':`${periodLabel(period)}. ${payload.comparison?'Change':'Actual total'} ${amount(payload.totals[i])}. ${series.filter(s=>s.forecast&&s.values[i]!==null).map(s=>`${s.label}: ${amount(s.values[i])}, ${payload.forecast_interval || 80}% customer interval ${amount(s.intervals[i].lower)} to ${amount(s.intervals[i].upper)}.`).join(' ')} Focus to inspect groups.`});
       hit.addEventListener('pointerenter',()=>showPeriod(i));hit.addEventListener('focus',()=>showPeriod(i));
       hit.addEventListener('click',()=>showPeriod(i));
       hit.addEventListener('keydown',event=>{
@@ -362,7 +523,7 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
       const kind=PATTERNS[index % PATTERNS.length];
       const fill=kind==='solid'?series.color:definePattern(swatch, ns, `${chartId}-legend-${index}`, series.color, kind);
       const rect=document.createElementNS(ns,'rect'); rect.setAttribute('width','14'); rect.setAttribute('height','14'); rect.setAttribute('fill',fill); swatch.appendChild(rect);
-      if(payload.style==='line'){ const line=document.createElementNS(ns,'path'); line.setAttribute('d','M1 7H13'); line.setAttribute('stroke',TOKENS.surface); line.setAttribute('stroke-width','2'); if(DASHES[index % DASHES.length]) line.setAttribute('stroke-dasharray',DASHES[index % DASHES.length]); swatch.appendChild(line); }
+      if(payload.style==='line'||series.forecast){ const line=document.createElementNS(ns,'path'); line.setAttribute('d','M1 7H13'); line.setAttribute('stroke',TOKENS.surface); line.setAttribute('stroke-width','2'); if(series.forecast||DASHES[index % DASHES.length]) line.setAttribute('stroke-dasharray',series.forecast?'4 2':DASHES[index % DASHES.length]); swatch.appendChild(line); }
     }
   });
   chartPanel.querySelectorAll('[data-series]').forEach(button=>button.addEventListener('click',()=>{
@@ -373,119 +534,432 @@ for (const explorerHost of document.querySelectorAll('#explorer-chart, #comparis
   new ResizeObserver(drawExplorer).observe(explorerHost);drawExplorer();
 }
 
-// Metadata is fetched on demand and cached by the same background worker as reports.
-const reportForm=document.getElementById('report-form');
-if(reportForm){
-  const field=name=>reportForm.elements.namedItem(name);
-  let changed=false;
-  const reportToday=new Date(reportForm.dataset.today+'T00:00:00Z');
-  const iso=date=>date.toISOString().slice(0,10);
-  const monthDate=(offset,day=1)=>new Date(Date.UTC(reportToday.getUTCFullYear(),reportToday.getUTCMonth()+offset,day));
-  field('date_range').addEventListener('change',()=>{
-    const range=field('date_range').value;let start,end;
-    if(range!=='last_month'&&field('compare_range').value==='month_over_month'){field('compare_range').value='previous_period';field('compare_start').value='';field('compare_end').value='';}
-    if(range==='this_month'){start=monthDate(0);end=reportToday;}
-    else if(range==='last_month'){start=monthDate(-1);end=monthDate(0,0);}
-    else if(/^last_(3|6|12)_months$/.test(range)){start=monthDate(-Number(range.split('_')[1]));end=monthDate(0,0);}
-    else if(/^last_(7|14)_days$/.test(range)){end=reportToday;start=new Date(reportToday);start.setUTCDate(start.getUTCDate()-Number(range.split('_')[1])+1);}
-    if(start){field('start').value=iso(start);field('end').value=iso(end);}
-  });
-  const monthComparison=()=>{
-    field('date_range').value='last_month';field('start').value=iso(monthDate(-1));field('end').value=iso(monthDate(0,0));
-    field('compare_start').value=iso(monthDate(-2));field('compare_end').value=iso(monthDate(-1,0));field('granularity').value='monthly';
-    field('compare_range').value='month_over_month';field('date_range').dispatchEvent(new Event('change',{bubbles:true}));
-  };
-  document.querySelector('[data-month-comparison]').addEventListener('click',monthComparison);
-  field('compare_range').addEventListener('change',()=>{
-    if(field('compare_range').value==='month_over_month')monthComparison();
-    else if(field('compare_range').value==='previous_period'){field('compare_start').value='';field('compare_end').value='';}
-  });
-  reportForm.addEventListener('change',()=>{changed=true;});
-  reportForm.addEventListener('input',()=>{changed=true;});
-  ['start','end'].forEach(name=>field(name).addEventListener('change',()=>{field('date_range').value='custom';if(field('compare_range').value==='month_over_month')field('compare_range').value='custom';}));
-  ['compare_start','compare_end'].forEach(name=>field(name).addEventListener('change',()=>{field('compare_range').value='custom';}));
-  field('report_mode').addEventListener('change',()=>{document.querySelector('[data-compare-fields]').hidden=field('report_mode').value!=='compare';if(field('report_mode').value==='compare')monthComparison();});
-  field('group_by').addEventListener('change',()=>{document.querySelector('[data-group-key]').hidden=!['tag','cost_category'].includes(field('group_by').value);});
-  const makeOption=(key,value,checked=false,display='')=>{
-    const label=document.createElement('label');label.className='checkbox-label';
-    const input=document.createElement('input');input.type='checkbox';input.name=key;input.value=value===''?'__billing_empty_value__':value;input.checked=checked;
-    const span=document.createElement('span');span.textContent=display||value||'(Empty value)';label.append(input,span);return label;
-  };
-  const metadataRequests=new WeakMap();
-  async function metadata(kind,key,status,render){
-    const generation=(metadataRequests.get(status)||0)+1;metadataRequests.set(status,generation);
-    const query=new URLSearchParams(new FormData(reportForm));query.set('dimension',kind);query.set('key',key);
-    let attempts=0;
-    const read=async()=>{
-      try{
-        const response=await fetch(`/explorer/metadata/?${query}`,{credentials:'same-origin'});
-        if(response.redirected)throw new Error('Your session expired. Sign in again to load billing values.');
-        if(!response.ok){let error={};try{error=await response.json();}catch{}throw new Error(error.error||'Could not load billing values.');}
-        const result=await response.json();if(metadataRequests.get(status)!==generation)return;render(result.values,result.labels||{});
-        status.textContent=result.errors.length?result.errors.join(' '):result.pending?'Loading from AWS; the worker checks within a minute.':result.values.length?`${result.values.length} available values`:'No values returned for these dates and customers.';
-        if(result.pending&&attempts++<24)setTimeout(read,5000);
-        else if(result.pending)status.textContent='Still queued. Use Load available values to check again, or review Sync & activity.';
-      }catch(error){if(metadataRequests.get(status)===generation)status.textContent=error.message;}
-    };await read();
+// Draft selectors commit only on Apply; the outer form always contains the applied values.
+const reportForm = document.getElementById('report-form');
+if (reportForm) {
+  const initial = JSON.parse(document.getElementById('report-parameters-data').textContent);
+  const field = name => reportForm.elements.namedItem(name);
+  const checkbox = name => reportForm.querySelector(`input[type="checkbox"][name="${name}"]`);
+  const dateNames = ['start', 'end', 'historical_end', 'date_range', 'future_range'];
+  const iso = date => date.toISOString().slice(0, 10);
+  const today = new Date(`${reportForm.dataset.today}T00:00:00Z`);
+  const monthDate = (offset, day = 1) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + offset, day));
+  const markChanged = () => { changed = true; };
+  let changed = false, moreFilters = false, extraId = 0;
+  let visibility = readPreference('filters', {});
+  const states = new Map(), requests = new WeakMap();
+  const additional = document.querySelector('[data-additional-filters]');
+  const originalTemplates = new Map(['tag', 'cost_category'].map(key => [key, reportForm.querySelector(`[data-filter="${key}"]`).cloneNode(true)]));
+  function formData() {
+    const data = new FormData(reportForm);
+    for (const key of [...data.keys()]) if (key.startsWith('draft-')) data.delete(key);
+    if (field('granularity').disabled) data.set('granularity', field('granularity').value);
+    if (field('metric').disabled) data.set('metric', field('metric').value);
+    return data;
   }
-  reportForm.querySelectorAll('[data-filter]').forEach(box=>{
-    const key=box.dataset.filter, list=box.querySelector('.dimension-values'), status=box.querySelector('[data-filter-status]');
-    const count=()=>{const n=list.querySelectorAll('input:checked').length;box.querySelector('[data-filter-count]').textContent=n?`${n} selected`:'All';};
-    const search=()=>{const term=box.querySelector('[data-value-search]').value.toLowerCase();list.querySelectorAll('label').forEach(label=>{label.hidden=!label.textContent.toLowerCase().includes(term);});};
-    list.addEventListener('change',count);
-    box.querySelector('[data-value-search]').addEventListener('input',search);
-    box.querySelector('[data-load-values]').addEventListener('click',()=>{
-      const keyValue=field(`${key}_key`)?.value||'';
-      if(['tag','cost_category'].includes(key)&&!keyValue){status.textContent='Choose a key first.';return;}
-      metadata(key,keyValue,status,(values,labels)=>{list.querySelectorAll('input:not(:checked)').forEach(input=>input.closest('label').remove());const existing=new Map([...list.querySelectorAll('input')].map(i=>[i.value,i]));values.forEach(value=>{const input=existing.get(value===''?'__billing_empty_value__':value);if(!input)list.append(makeOption(key,value,false,labels[value]));else if(labels[value])input.nextElementSibling.textContent=labels[value];});search();});
+  reportForm.addEventListener('formdata', event => {
+    for (const key of [...event.formData.keys()]) if (key.startsWith('draft-')) event.formData.delete(key);
+    if (field('granularity').disabled) event.formData.set('granularity', field('granularity').value);
+    if (field('metric').disabled) event.formData.set('metric', field('metric').value);
+  });
+  const absentFlag = type => type === 'tag' ? 'untagged' : type === 'cost_category' ? 'uncategorized' : '';
+  const hasAbsence = state => state.extra ? state.committed.absent : Boolean(absentFlag(state.type) && checkbox(absentFlag(state.type)).checked);
+  const applied = state => state.committed.values.length > 0 || hasAbsence(state);
+  function syncAdditional() {
+    field('keyed_filters').value = JSON.stringify([...states.values()].filter(state => state.extra && applied(state)).map(state => ({type: state.type, ...state.committed})));
+  }
+  function updateVisibility() {
+    let count = 0;
+    states.forEach(state => {
+      if (applied(state)) count++;
+      state.box.hidden = !state.extra && !applied(state) && (visibility[state.type] === false || (state.box.dataset.more === 'true' && !moreFilters));
     });
-    box.addEventListener('toggle',()=>{if(box.open&&!box.dataset.loaded){box.dataset.loaded='1';(box.querySelector('[data-load-keys]')||box.querySelector('[data-load-values]')).click();}});
-    box.querySelector('[data-add-value]').addEventListener('click',()=>{
-      const input=box.querySelector('[data-manual-value]'), value=input.value;
-      if(!value)return;
-      const existing=[...list.querySelectorAll('input')].find(i=>i.value===value);
-      if(existing)existing.checked=true;else list.append(makeOption(key,value,true));input.value='';count();changed=true;list.dispatchEvent(new Event('change',{bubbles:true}));
+    document.querySelector('[data-applied-count]').textContent = String(count);
+  }
+  function invalidateMetadata() {
+    reportForm.querySelectorAll('[data-filter-status], [data-key-status]').forEach(status => {
+      requests.set(status, (requests.get(status) || 0) + 1);
+      status.textContent = 'Parameters changed. Reload available values.';
     });
-    box.querySelector('[data-clear-values]').addEventListener('click',()=>{list.querySelectorAll('input').forEach(i=>{i.checked=false;});count();changed=true;list.dispatchEvent(new Event('change',{bubbles:true}));});
-    box.querySelector('[data-load-keys]')?.addEventListener('click',()=>metadata(key,'',status,values=>{
-      const datalist=document.getElementById(`keys-${key}`);datalist.replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
+    states.forEach(state => { state.loaded = false; });
+  }
+  const setHidden = (parent, name, value) => { const input = document.createElement('input'); input.type = 'hidden'; input.name = name; input.value = value; parent.append(input); };
+  function renderCommitted(state) {
+    const {box, committed, type} = state;
+    if (!state.extra) {
+      const container = box.querySelector('.filter-committed'); container.replaceChildren();
+      setHidden(container, `${type}_mode`, committed.mode);
+      if (box.querySelector('[data-draft-key]')) setHidden(container, `${type}_key`, committed.key);
+      committed.values.forEach(value => setHidden(container, type, value));
+    }
+    const absent = hasAbsence(state);
+    box.querySelector('[data-filter-count]').textContent = absent ? `${committed.mode === 'exclude' ? 'Excludes ' : ''}missing key` : committed.values.length ? `${committed.mode === 'exclude' ? 'Excludes ' : ''}${committed.values.length} selected` : 'All';
+    const chips = box.querySelector('[data-selected-chips]'); chips.replaceChildren();
+    const chip = (label, remove) => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'filter-chip';
+      button.textContent = `${label} ×`; button.setAttribute('aria-label', `Remove ${label}`); button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); remove(); }); chips.append(button);
+    };
+    committed.values.forEach(value => chip(state.labels[value] || (value === '__billing_empty_value__' ? `(Empty value) ${committed.key}` : value), () => {
+      committed.values = committed.values.filter(v => v !== value); commit(state); resetDraft(state);
     }));
-    box.querySelector(`[name="${key}_key"]`)?.addEventListener('change',()=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);list.replaceChildren();count();status.textContent='Key changed. Load values for this key.';});
-  });
-  document.querySelector('[data-load-group-keys]').addEventListener('click',()=>metadata(field('group_by').value,'',document.querySelector('[data-key-status]'),values=>{
-    document.getElementById('group-key-options').replaceChildren(...values.map(value=>{const option=document.createElement('option');option.value=value;return option;}));
+    if (absent) chip(`No ${type === 'tag' ? 'tag' : 'cost category'} key: ${committed.key}`, () => {
+      if (state.extra) committed.absent = false; else checkbox(absentFlag(type)).checked = false;
+      commit(state); resetDraft(state);
+    });
+    syncAdditional(); updateVisibility();
+  }
+  function commit(state) { renderCommitted(state); markChanged(); invalidateMetadata(); syncAdvanced(); }
+  function makeOption(value, selected, label) {
+    const node = document.createElement('label'); node.className = 'checkbox-label';
+    const input = document.createElement('input'); input.type = 'checkbox'; input.value = value === '' ? '__billing_empty_value__' : value; input.checked = selected;
+    const span = document.createElement('span'); span.textContent = label || value || '(Empty value)'; node.append(input, span); return node;
+  }
+  function updateMatching(state) {
+    const term = state.box.querySelector('[data-value-search]').value.toLocaleLowerCase().trim();
+    const options = [...state.list.querySelectorAll('label')];
+    options.forEach(label => { label.hidden = !label.textContent.toLocaleLowerCase().includes(term); });
+    const matches = options.filter(label => !label.hidden), selected = matches.filter(label => label.querySelector('input').checked).length;
+    const select = state.box.querySelector('[data-select-matching]');
+    select.checked = matches.length > 0 && selected === matches.length;
+    select.indeterminate = selected > 0 && selected < matches.length; select.disabled = matches.length === 0;
+    state.box.querySelector('[data-matching-count]').textContent = `(${matches.length})`;
+  }
+  function ensureMissingOption(state, key) {
+    if (!['tag','cost_category'].includes(state.type) || !key) return;
+    const label = `No ${state.type === 'tag' ? 'tag' : 'cost category'} key: ${key}`;
+    const input = state.list.querySelector('input[value="__billing_absent_key__"]');
+    if (input) input.nextElementSibling.textContent = label;
+    else state.list.prepend(makeOption('__billing_absent_key__', hasAbsence(state), label));
+  }
+  function resetDraft(state) {
+    const {box, committed, list} = state;
+    const key = box.querySelector('[data-draft-key]'); if (key) key.value = committed.key;
+    box.querySelectorAll('[data-draft-mode]').forEach(input => { input.checked = input.dataset.draftMode === committed.mode; });
+    const known = new Set([...list.querySelectorAll('input')].map(input => input.value));
+    committed.values.forEach(value => { if (!known.has(value)) list.append(makeOption(value, true, state.labels[value])); });
+    ensureMissingOption(state, committed.key);
+    list.querySelectorAll('input').forEach(input => { input.checked = input.value === '__billing_absent_key__' ? hasAbsence(state) : committed.values.includes(input.value); });
+    box.querySelector('[data-value-search]').value = ''; updateMatching(state);
+  }
+  async function metadata(type, key, status, render, editedState = null) {
+    const generation = (requests.get(status) || 0) + 1; requests.set(status, generation);
+    const query = new URLSearchParams(formData()); query.set('dimension', type); query.set('key', key);
+    if (editedState) {
+      if (editedState.extra) query.set('keyed_filters', JSON.stringify([...states.values()].filter(state=>state.extra && state !== editedState && applied(state)).map(state=>({type:state.type,...state.committed}))));
+      else { query.delete(type); if (absentFlag(type)) query.set(absentFlag(type),'0'); }
+    }
+    let attempts = 0;
+    const read = async () => {
+      if (requests.get(status) !== generation) return;
+      try {
+        const response = await fetch(`/explorer/metadata/?${query}`, {credentials: 'same-origin'});
+        if (response.redirected) throw new Error('Your session expired. Sign in again to load billing values.');
+        let result; try { result = await response.json(); } catch { throw new Error('Could not read billing values. Reload to retry.'); }
+        if (!response.ok) throw new Error(result.error || 'Could not load billing values.');
+        if (requests.get(status) !== generation) return;
+        render(result.values || [], result.labels || {});
+        status.textContent = result.errors?.length ? result.errors.join(' ') : result.pending ? 'Loading from AWS; the worker checks within a minute.' : result.values.length ? `${result.values.length} available values. Select all applies to the matching values.` : 'No values returned for these dates and customers.';
+        if (result.pending && attempts++ < 24) setTimeout(read, 5000);
+        else if (result.pending) status.textContent = 'Still queued. Load all values to check again, or review Sync & activity.';
+      } catch (error) { if (requests.get(status) === generation) status.textContent = error.message; }
+    };
+    status.textContent = 'Loading available values…'; await read();
+  }
+  function setupFilter(box, extra = false, value) {
+    const type = box.dataset.filter, list = box.querySelector('.dimension-values'), status = box.querySelector('[data-filter-status]');
+    const container = box.querySelector('.filter-committed');
+    const state = {box, type, list, status, extra, loaded: false, labels: {}, committed: value || {
+      key: container.querySelector(`[name="${type}_key"]`)?.value || '', mode: container.querySelector(`[name="${type}_mode"]`).value,
+      values: [...container.querySelectorAll(`[name="${type}"]`)].map(input => input.value), absent: false
+    }};
+    if (extra) container.replaceChildren();
+    states.set(box, state); resetDraft(state); renderCommitted(state);
+    const loadValues = () => {
+      const key = box.querySelector('[data-draft-key]')?.value.trim() || '';
+      if (['tag', 'cost_category'].includes(type) && !key) { status.textContent = 'Choose a key first.'; return; }
+      metadata(type, key, status, (values, labels) => {
+        const selected = new Set([...list.querySelectorAll('input:checked')].map(input => input.value));
+        list.replaceChildren();
+        const all = [...new Set([...selected, ...values.map(value => value === '' ? '__billing_empty_value__' : value)])];
+        all.forEach(value => { const display = labels[value] || labels[value === '__billing_empty_value__' ? '' : value]; if (display) state.labels[value] = display; list.append(makeOption(value, selected.has(value), display)); });
+        state.loaded = true; ensureMissingOption(state, key); updateMatching(state);
+      }, state);
+    };
+    box.querySelector('[data-load-values]').addEventListener('click', loadValues);
+    box.querySelector('[data-value-search]').addEventListener('input', () => updateMatching(state));
+    list.addEventListener('change', event => {
+      if (event.target.checked) {
+        if (event.target.value === '__billing_absent_key__') list.querySelectorAll('input').forEach(input=>{if(input!==event.target)input.checked=false;});
+        else { const missing=list.querySelector('input[value="__billing_absent_key__"]'); if(missing)missing.checked=false; }
+      }
+      updateMatching(state);
+    });
+    box.querySelector('[data-select-matching]').addEventListener('change', event => {
+      const matching = [...list.querySelectorAll('label:not([hidden]) input')], checked = event.target.checked;
+      matching.forEach(input => {
+        input.checked = checked && (matching.length === 1 || input.value !== '__billing_absent_key__');
+        if (input.checked) input.dispatchEvent(new Event('change', {bubbles: true}));
+      });
+      updateMatching(state);
+    });
+    box.querySelector('[data-clear-values]').addEventListener('click', () => { list.querySelectorAll('input').forEach(input => { input.checked = false; }); updateMatching(state); });
+    box.querySelector('[data-add-value]').addEventListener('click', () => {
+      const input = box.querySelector('[data-manual-value]'), value = input.value;
+      if (!value) return;
+      let selected = [...list.querySelectorAll('input')].find(item => item.value === value);
+      if (selected) selected.checked = true;
+      else { const option = makeOption(value, true); list.append(option); selected = option.querySelector('input'); }
+      selected.dispatchEvent(new Event('change', {bubbles: true}));
+      input.value = '';
+    });
+    box.querySelector('[data-cancel-filter]').addEventListener('click', () => { resetDraft(state); box.open = false; box.querySelector('summary').focus(); });
+    box.querySelector('[data-apply-filter]').addEventListener('click', () => {
+      const chosen = [...list.querySelectorAll('input:checked')].map(input => input.value);
+      const missing = chosen.includes('__billing_absent_key__');
+      const values = chosen.filter(value=>value!=='__billing_absent_key__');
+      const key = box.querySelector('[data-draft-key]')?.value.trim() || '';
+      if (values.length > 100) { status.textContent = 'Choose at most 100 values. Narrow your search or selection.'; return; }
+      if (box.querySelector('[data-draft-key]') && !key && (values.length || missing || hasAbsence(state))) { status.textContent = 'Choose a key before applying this filter.'; return; }
+      state.committed = {key, values, mode: box.querySelector('[data-draft-mode]:checked').dataset.draftMode, absent: extra && missing};
+      if (!extra && absentFlag(type)) checkbox(absentFlag(type)).checked = missing;
+      if (values.length && !extra && absentFlag(type)) checkbox(absentFlag(type)).checked = false;
+      commit(state); box.open = false; box.querySelector('summary').focus();
+    });
+    box.querySelector('[data-clear-filter]').addEventListener('click', () => {
+      if (extra) { states.delete(box); box.remove(); syncAdditional(); updateVisibility(); markChanged(); invalidateMetadata(); return; }
+      state.committed.values = []; state.committed.mode = 'include';
+      if (absentFlag(type)) checkbox(absentFlag(type)).checked = false;
+      commit(state); resetDraft(state); box.open = false;
+    });
+    box.querySelector('[data-load-keys]')?.addEventListener('click', () => metadata(type, '', status, values => {
+      const datalist = box.querySelector('datalist');
+      datalist.replaceChildren(...values.map(value => { const option = document.createElement('option'); option.value = value; return option; }));
+    }));
+    box.querySelector('[data-draft-key]')?.addEventListener('change', () => {
+      requests.set(status, (requests.get(status) || 0) + 1); list.replaceChildren(); updateMatching(state); state.loaded = false;
+      status.textContent = 'Key changed. Loading values for this key.'; loadValues();
+    });
+    box.addEventListener('toggle', () => {
+      if (box.open) {
+        resetDraft(state);
+        if (!state.loaded) (box.querySelector('[data-draft-key]') && !state.committed.key ? box.querySelector('[data-load-keys]') : box.querySelector('[data-load-values]')).click();
+      } else resetDraft(state);
+    });
+    box.addEventListener('keydown', event => { if (event.key === 'Escape' && box.open) { event.stopPropagation(); resetDraft(state); box.open = false; box.querySelector('summary').focus(); } });
+    return state;
+  }
+  reportForm.querySelectorAll('[data-filter]').forEach(box => setupFilter(box));
+  function addKeyed(type, value, open = true) {
+    const box = originalTemplates.get(type).cloneNode(true); box.hidden = false; box.dataset.extra = 'true'; box.open = false;
+    const id = `extra-filter-${++extraId}`;
+    box.querySelector('.dimension-name').textContent = `Additional ${type === 'tag' ? 'tag' : 'cost category'}`;
+    box.querySelectorAll('[data-draft-mode]').forEach(input => { input.name = `draft-${id}-mode`; });
+    box.querySelector('datalist').id = `keys-${id}`; box.querySelector('[data-draft-key]').setAttribute('list', `keys-${id}`);
+    box.querySelector('[data-clear-filter]').textContent = 'Remove filter';
+    box.querySelector('.dimension-values').replaceChildren(); additional.append(box);
+    setupFilter(box, true, value || {key: '', values: [], mode: 'include', absent: false});
+    if (open) { box.open = true; box.scrollIntoView({block: 'nearest'}); box.querySelector('[data-draft-key]').focus(); }
+  }
+  let extraFilters = []; try { extraFilters = typeof initial.keyed_filters === 'string' ? JSON.parse(initial.keyed_filters) : initial.keyed_filters || []; } catch { /* Invalid server data is rejected by the contract. */ }
+  extraFilters.forEach(value => addKeyed(value.type, {key: value.key, values: value.values, mode: value.mode, absent: value.absent}, false));
+  document.querySelectorAll('[data-add-keyed]').forEach(button => button.addEventListener('click', () => {
+    if ([...states.values()].filter(state => state.extra).length >= 20) return;
+    addKeyed(button.dataset.addKeyed);
   }));
-  reportForm.addEventListener('change',event=>{
-    if(!['customer','source','start','end','date_range'].includes(event.target.name)&&!event.target.closest('[data-filter]'))return;
-    reportForm.querySelectorAll('[data-filter-status], [data-key-status]').forEach(status=>{metadataRequests.set(status,(metadataRequests.get(status)||0)+1);status.textContent='Filters changed. Reload available values.';});
-    reportForm.querySelectorAll('[data-filter]').forEach(box=>{delete box.dataset.loaded;});
+  document.querySelector('[data-more-filters]').addEventListener('click', event => {
+    moreFilters = !moreFilters; event.currentTarget.textContent = moreFilters ? 'Show less' : 'More filters'; event.currentTarget.setAttribute('aria-expanded', String(moreFilters)); updateVisibility();
   });
-  let preferences={};try{preferences=JSON.parse(localStorage.getItem('billing-filter-visibility')||'{}');}catch{}
-  reportForm.querySelectorAll('[data-visible-filter]').forEach(toggle=>{
-    const box=reportForm.querySelector(`[data-filter="${toggle.dataset.visibleFilter}"]`);
-    const apply=()=>{box.hidden=!toggle.checked&&!box.querySelector('input:checked');};
-    toggle.checked=preferences[toggle.dataset.visibleFilter]!==false;apply();
-    toggle.addEventListener('change',()=>{preferences[toggle.dataset.visibleFilter]=toggle.checked;try{localStorage.setItem('billing-filter-visibility',JSON.stringify(preferences));}catch{}apply();});
+  document.querySelector('[data-clear-filters]').addEventListener('click', () => {
+    states.forEach(state => {
+      if (state.extra) { state.box.remove(); states.delete(state.box); return; }
+      state.committed.values = []; state.committed.mode = 'include'; state.committed.key = '';
+      if (absentFlag(state.type)) checkbox(absentFlag(state.type)).checked = false;
+      state.list.replaceChildren(); renderCommitted(state); resetDraft(state);
+    });
+    syncAdditional(); updateVisibility(); invalidateMetadata(); markChanged(); syncAdvanced();
   });
-  document.getElementById('save-current-report')?.addEventListener('submit',event=>{
-    if(!reportForm.reportValidity()){event.preventDefault();return;}
-    const saveForm=event.currentTarget;
-    saveForm.querySelectorAll('input:not([name="csrfmiddlewaretoken"])').forEach(input=>input.remove());
-    for(const [name,value] of new FormData(reportForm)){const input=document.createElement('input');input.type='hidden';input.name=name;input.value=value;saveForm.append(input);}
+  const preferenceDialog = document.getElementById('filter-preferences-dialog');
+  preferenceDialog.addEventListener('dialogopen', () => preferenceDialog.querySelectorAll('[data-visible-filter]').forEach(input => { input.checked = visibility[input.dataset.visibleFilter] !== false; }));
+  document.querySelector('[data-save-filter-preferences]').addEventListener('click', () => {
+    preferenceDialog.querySelectorAll('[data-visible-filter]').forEach(input => { visibility[input.dataset.visibleFilter] = input.checked; });
+    writePreference('filters', visibility); updateVisibility(); closeReportDialog(preferenceDialog);
   });
-  const pending=document.getElementById('pending-query-ids');
-  if(pending){
-    const ids=JSON.parse(pending.textContent);let checks=0;
-    const poll=async()=>{
-      try{const response=await fetch(`/explorer/status/?ids=${ids.join(',')}`,{credentials:'same-origin'});if(!response.ok)return;
-        const state=await response.json();
-        if(!state.pending){
-          if(!changed)location.reload();else document.querySelector('[data-query-progress]').textContent='Collection completed. Apply parameters or reload to view it.';
-        }else if(checks++<36)setTimeout(poll,5000);else document.querySelector('[data-query-progress]').textContent='Still queued. Reload after collection completes; check Activity if it remains pending.';
-      }catch{document.querySelector('[data-query-progress]').textContent='Unable to check progress. Reload to retry.';}
-    };setTimeout(poll,5000);
+  // Date selection has its own draft, including historical and forecast presets.
+  const dateDialog = document.getElementById('date-range-dialog');
+  const draftField = name => dateDialog.querySelector(`[data-date-draft="${name}"]`);
+  let dateDraft = {}, calendarMonth = monthDate(0), choosingEnd = false;
+  const futureEnd = () => dateDraft.future_range === 'none' ? dateDraft.historical_end : [dateDraft.historical_end, iso(monthDate(Number(dateDraft.future_range.split('_')[1]) + 1, 0))].sort().at(-1);
+  function renderCalendar() {
+    const host = dateDialog.querySelector('[data-date-calendars]'); host.replaceChildren();
+    for (let offset = 0; offset < 2; offset++) {
+      const month = new Date(Date.UTC(calendarMonth.getUTCFullYear(), calendarMonth.getUTCMonth() + offset, 1));
+      const panel = document.createElement('section'), title = document.createElement('h3');
+      title.textContent = month.toLocaleDateString('en', {month: 'long', year: 'numeric', timeZone: 'UTC'}); panel.append(title);
+      const grid = document.createElement('div'); grid.className = 'calendar-grid';
+      ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(day => { const name = document.createElement('span'); name.textContent = day; name.className = 'calendar-day-name'; grid.append(name); });
+      for (let i = 0; i < month.getUTCDay(); i++) { const blank = document.createElement('span'); blank.setAttribute('aria-hidden', 'true'); grid.append(blank); }
+      const last = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 0)).getUTCDate();
+      for (let day = 1; day <= last; day++) {
+        const value = iso(new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), day))), button = document.createElement('button');
+        button.type = 'button'; button.textContent = String(day); button.dataset.calendarDate = value;
+        button.setAttribute('aria-label', `${value}${value === dateDraft.start ? ', start date' : value === dateDraft.historical_end ? ', end date' : ''}`);
+        button.setAttribute('aria-pressed', String(value === dateDraft.start || value === dateDraft.historical_end));
+        if (value > dateDraft.start && value < dateDraft.historical_end) button.classList.add('in-range');
+        button.addEventListener('click', () => {
+          if (!choosingEnd || value < dateDraft.start) { dateDraft.start = value; dateDraft.historical_end = value; choosingEnd = true; }
+          else { dateDraft.historical_end = value; choosingEnd = false; }
+          dateDraft.date_range = 'custom'; renderDates(); dateDialog.querySelector(`[data-calendar-date="${value}"]`)?.focus();
+        });
+        button.addEventListener('keydown', event => {
+          const shift = {ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7}[event.key];
+          if (!shift) return; event.preventDefault();
+          const next = new Date(`${value}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + shift); const target = iso(next);
+          if (!host.querySelector(`[data-calendar-date="${target}"]`)) { calendarMonth = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth(), 1)); renderCalendar(); }
+          host.querySelector(`[data-calendar-date="${target}"]`)?.focus();
+        });
+        grid.append(button);
+      }
+      panel.append(grid); host.append(panel);
+    }
+    dateDialog.querySelector('[data-calendar-instruction]').textContent = choosingEnd ? 'Select end date' : 'Select start date';
+  }
+  function renderDates() {
+    draftField('start').value = dateDraft.start; draftField('end').value = dateDraft.historical_end;
+    dateDialog.querySelectorAll('[data-date-preset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.datePreset === dateDraft.date_range)));
+    dateDialog.querySelectorAll('[data-future-preset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.futurePreset === dateDraft.future_range)));
+    dateDialog.querySelector('[data-date-preview]').textContent = `Report range: ${dateDraft.start} – ${futureEnd()}${dateDraft.future_range === 'none' ? '' : ' (includes forecast dates)'}`;
+    dateDialog.querySelector('[data-date-error]').textContent = ''; renderCalendar();
+  }
+  dateDialog.addEventListener('dialogopen', () => {
+    dateDraft = Object.fromEntries(dateNames.map(name => [name, field(name).value]));
+    calendarMonth = new Date(`${dateDraft.start.slice(0,7)}-01T00:00:00Z`); choosingEnd = false; renderDates();
+  });
+  dateDialog.querySelectorAll('[data-date-preset]').forEach(button => button.addEventListener('click', () => {
+    const range = button.dataset.datePreset; dateDraft.date_range = range;
+    const resolved = relativeDateRange(range, today);
+    if (resolved) { dateDraft.start=resolved.start; dateDraft.historical_end=resolved.end; calendarMonth=new Date(`${resolved.start.slice(0,7)}-01T00:00:00Z`); }
+    choosingEnd = false; renderDates();
+  }));
+  dateDialog.querySelectorAll('[data-future-preset]').forEach(button => button.addEventListener('click', () => { dateDraft.future_range = button.dataset.futurePreset; renderDates(); }));
+  dateDialog.querySelector('[data-more-presets]').addEventListener('click', event => {
+    const expand = event.currentTarget.getAttribute('aria-expanded') !== 'true';
+    dateDialog.querySelectorAll('[data-extra-preset]').forEach(button => { button.hidden = !expand; });
+    event.currentTarget.setAttribute('aria-expanded', String(expand)); event.currentTarget.textContent = expand ? 'Hide' : 'More';
+  });
+  dateDialog.querySelectorAll('[data-calendar-move]').forEach(button => button.addEventListener('click', () => { calendarMonth.setUTCMonth(calendarMonth.getUTCMonth()+Number(button.dataset.calendarMove)); renderCalendar(); }));
+  ['start','end'].forEach(name => draftField(name).addEventListener('change', () => {
+    dateDraft[name === 'end' ? 'historical_end' : 'start'] = draftField(name).value; dateDraft.date_range = 'custom'; renderDates();
+  }));
+  const updateDateSummary = () => { document.querySelector('[data-date-summary]').textContent = `${field('start').value} – ${field('end').value}`; };
+  dateDialog.querySelector('[data-apply-dates]').addEventListener('click', () => {
+    if (!draftField('start').reportValidity() || !draftField('end').reportValidity()) return;
+    if (dateDraft.start > dateDraft.historical_end) { dateDialog.querySelector('[data-date-error]').textContent = 'Start date must be on or before end date.'; return; }
+    dateDraft.end = futureEnd(); dateNames.forEach(name => { field(name).value = dateDraft[name]; });
+    if (dateDraft.future_range !== 'none') checkbox('forecast').checked = true;
+    markChanged(); invalidateMetadata(); updateDateSummary(); closeReportDialog(dateDialog);
+  });
+  const syncComparisonDates = () => {
+    document.querySelector('[data-selected-start]').value = field('start').value; document.querySelector('[data-selected-end]').value = field('end').value;
+    document.querySelector('[data-compare-month="selected"]').value = field('start').value.slice(0,7);
+    document.querySelector('[data-compare-month="baseline"]').value = field('compare_start').value.slice(0,7); updateDateSummary();
+  };
+  function monthComparison() {
+    field('date_range').value = 'last_month'; field('future_range').value = 'none';
+    field('start').value = iso(monthDate(-1)); field('end').value = iso(monthDate(0,0)); field('historical_end').value = field('end').value;
+    field('compare_start').value = iso(monthDate(-2)); field('compare_end').value = iso(monthDate(-1,0)); field('granularity').value = 'monthly';
+    field('compare_range').value = 'month_over_month'; syncComparisonDates();
+  }
+  function syncMode() {
+    const compare = field('report_mode').value === 'compare';
+    document.querySelector('[data-compare-fields]').hidden = !compare; document.querySelector('[data-standard-fields]').hidden = compare;
+    field('granularity').disabled = compare; checkbox('forecast').disabled = compare;
+    const resource = reportForm.querySelector('[data-filter="resource"]');
+    resource.classList.toggle('filter-unavailable', compare);
+    resource.querySelectorAll('.dimension-body input, .dimension-body button').forEach(input => { input.disabled = compare; });
+    resource.querySelector('[data-resource-note]').textContent = compare ? 'Resource selection is unavailable in Compare. Switch to Standard to edit this filter.' : 'Choose EC2-Instances in Service. AWS resource data must already be enabled.';
+    document.querySelector('[data-granularity-note]').textContent = compare ? 'Comparison uses monthly granularity. Forecasts and resource selection are unavailable.' : 'Hourly and resource reports require enabled AWS granular data and dates within the last 14 days.';
+    document.querySelector('[data-open-dialog="save-report-dialog"]')?.toggleAttribute('disabled', compare);
+  }
+  field('report_mode').forEach(input => input.addEventListener('change', () => { if (field('report_mode').value === 'compare') monthComparison(); syncMode(); invalidateMetadata(); }));
+  field('compare_range').addEventListener('change', () => {
+    if (field('compare_range').value === 'month_over_month') monthComparison();
+    else if (field('compare_range').value === 'previous_period') { field('compare_start').value = ''; field('compare_end').value = ''; }
+    document.querySelector('[data-compare-months]').hidden = field('compare_range').value === 'previous_period';
+  });
+  document.querySelectorAll('[data-compare-month]').forEach(input => input.addEventListener('change', () => {
+    if (!input.value) return;
+    const date = new Date(`${input.value}-01T00:00:00Z`), end = iso(new Date(Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+1,0)));
+    if (input.dataset.compareMonth === 'selected') { field('start').value = iso(date); field('end').value = end; field('historical_end').value = end; }
+    else { field('compare_start').value = iso(date); field('compare_end').value = end; }
+    field('date_range').value = 'custom'; field('compare_range').value = 'custom'; field('future_range').value = 'none'; syncComparisonDates(); invalidateMetadata();
+  }));
+  ['start','end'].forEach(name => document.querySelector(`[data-selected-${name}]`).addEventListener('change', event => {
+    field(name).value = event.target.value; field('historical_end').value = field('end').value; field('date_range').value = 'custom'; field('compare_range').value = 'custom'; syncComparisonDates(); invalidateMetadata();
+  }));
+  ['compare_start','compare_end'].forEach(name => field(name).addEventListener('change', () => { field('compare_range').value = 'custom'; syncComparisonDates(); }));
+  function syncGroup(clearKey = false) {
+    const keyed = ['tag','cost_category'].includes(field('group_by').value);
+    document.querySelector('[data-group-key]').hidden = !keyed; document.querySelector('[data-group-resource]').hidden = field('group_by').value !== 'resource';
+    if (clearKey) { field('group_key').value = ''; document.getElementById('group-key-options').replaceChildren(); requests.set(document.querySelector('[data-key-status]'), (requests.get(document.querySelector('[data-key-status]')) || 0) + 1); }
+    if (keyed && clearKey) queueMicrotask(() => document.querySelector('[data-load-group-keys]').click());
+  }
+  field('group_by').addEventListener('change', () => syncGroup(true));
+  document.querySelector('[data-clear-group]').addEventListener('click', () => { field('group_by').value = 'none'; syncGroup(true); markChanged(); });
+  document.querySelector('[data-group-search]').addEventListener('input', event => { const search = event.target.value.toLocaleLowerCase(); [...field('group_by').options].forEach(option => { option.hidden = !option.textContent.toLocaleLowerCase().includes(search); }); });
+  document.querySelector('[data-load-group-keys]').addEventListener('click', () => metadata(field('group_by').value, '', document.querySelector('[data-key-status]'), values => {
+    document.getElementById('group-key-options').replaceChildren(...values.map(value => { const option = document.createElement('option'); option.value = value; return option; }));
+  }));
+  function syncAdvanced() {
+    const usage = ['usage','cost_usage'].includes(field('measure').value);
+    checkbox('normalized').disabled = !usage; field('metric').disabled = field('measure').value === 'usage';
+    if (!usage) checkbox('normalized').checked = false;
+  }
+  ['untagged','uncategorized'].forEach(name => checkbox(name).addEventListener('change', () => {
+    const state = [...states.values()].find(state => !state.extra && absentFlag(state.type) === name);
+    if (checkbox(name).checked) {
+      state.committed.values = []; state.committed.mode = 'include'; state.committed.key = state.box.querySelector('[data-draft-key]').value.trim() || state.committed.key;
+      state.box.open = true;
+      if (!state.committed.key) { state.status.textContent = 'Choose a key and Apply this filter to use this absence option.'; state.box.querySelector('[data-draft-key]').focus(); }
+    }
+    renderCommitted(state); resetDraft(state); invalidateMetadata();
+  }));
+  field('measure').addEventListener('change', syncAdvanced);
+  reportForm.addEventListener('change', event => {
+    markChanged();
+    if (['customer','source','granularity','measure','group_key','group_by','forecast','normalized'].includes(event.target.name)) invalidateMetadata();
+  });
+  reportForm.addEventListener('input', event => { markChanged(); });
+  document.querySelectorAll('[data-chart-style]').forEach(link => link.addEventListener('click', event => {
+    event.preventDefault(); field('chart_style').value = link.dataset.chartStyle; reportForm.requestSubmit();
+  }));
+  const saveForm = document.getElementById('save-current-report');
+  if (saveForm) {
+    const name = saveForm.elements.namedItem('saved_report_name'), save = saveForm.querySelector('[data-save-report]');
+    const validateName = () => { save.disabled = !name.value.trim(); };
+    name.addEventListener('input', validateName); validateName();
+    saveForm.addEventListener('submit', event => {
+      if (!reportForm.reportValidity() || !name.value.trim()) { event.preventDefault(); return; }
+      saveForm.querySelectorAll('[data-copied-parameter]').forEach(input => input.remove());
+      const data = formData(); data.set('report_name', name.value.trim());
+      for (const [key,value] of data) { const input = document.createElement('input'); input.type = 'hidden'; input.name = key; input.value = value; input.dataset.copiedParameter = ''; saveForm.append(input); }
+    });
+  }
+  syncAdditional(); updateVisibility(); syncMode(); syncGroup(); syncAdvanced();
+  const pending = document.getElementById('pending-query-ids');
+  if (pending) {
+    const ids = JSON.parse(pending.textContent); let checks = 0;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/explorer/status/?ids=${ids.join(',')}`, {credentials: 'same-origin'}); if (!response.ok || response.redirected) return;
+        const state = await response.json();
+        if (!state.pending) { if (!changed && !document.querySelector('dialog[open]')) location.reload(); else document.querySelector('[data-query-progress]').textContent = 'Collection completed. Apply parameters or reload to view it.'; }
+        else if (checks++ < 36) setTimeout(poll,5000); else document.querySelector('[data-query-progress]').textContent = 'Still queued. Reload after collection completes; check Activity if it remains pending.';
+      } catch { document.querySelector('[data-query-progress]').textContent = 'Unable to check progress. Reload to retry.'; }
+    };
+    setTimeout(poll,5000);
   }
 }
+
 document.querySelectorAll('[data-customer-tree]').forEach(details => {
   details.addEventListener('toggle', async () => {
     if (!details.open || details.dataset.loaded) return;

@@ -50,7 +50,10 @@ def audit(request, action, customer=None, source=None, **details):
 @login_required
 def dashboard(request):
     try:
-        return render(request, 'billing/explorer.html', build_report(request.GET))
+        from .explorer_workspace import workspace_context
+        context = build_report(request.GET)
+        context.update(workspace_context(request, context))
+        return render(request, 'billing/explorer.html', context)
     except ValueError as exc:
         return render(request, 'billing/filter_error.html', {'error': str(exc), 'active_page': 'explorer'}, status=400)
 
@@ -164,7 +167,7 @@ def export_report(request):
     response['Content-Disposition'] = 'attachment; filename="cost-explorer-report.csv"'
     writer = csv.writer(response)
     writer.writerow([data['group_label'], 'Total (' + data['currency'] + ')', *data['periods']])
-    writer.writerow(['Total costs', str(data['total']), *[str(v) if v is not None else '' for v in data['period_totals']]])
+    writer.writerow(['Total costs' if data.get('measure', 'cost') in ('cost', 'cost_usage') else 'Total usage', str(data['total']), *[str(v) if v is not None else '' for v in data['period_totals']]])
     for row in data['pivot_rows']:
         writer.writerow([safe_csv(row['label']), str(row['total']), *[str(v) if v is not None else '' for v in row['cells']]])
     if data.get('comparison_rows'):
@@ -172,6 +175,20 @@ def export_report(request):
         writer.writerow(['Total',data['comparison_total'],data['total'],data['comparison_delta'],data['comparison_percent']])
         for row in data['comparison_rows']:
             writer.writerow([safe_csv(row['label']), row['before'], row['after'], row['delta'], row['percent']])
+    if data.get('usage_report'):
+        usage = data['usage_report']
+        writer.writerow([])
+        writer.writerow([usage['metric_label'], 'Unit', usage['currency']])
+        writer.writerow([usage['group_label'], 'Total (' + usage['currency'] + ')', *usage['periods']])
+        writer.writerow(['Total usage', str(usage['total']), *[str(v) if v is not None else '' for v in usage['period_totals']]])
+        for row in usage['pivot_rows']:
+            writer.writerow([safe_csv(row['label']), str(row['total']), *[str(v) if v is not None else '' for v in row['cells']]])
+        if usage.get('comparison_rows'):
+            writer.writerow([])
+            writer.writerow(['Usage comparison', 'Previous', 'Selected', 'Change', 'Change %'])
+            writer.writerow(['Total usage', usage['comparison_total'], usage['total'], usage['comparison_delta'], usage['comparison_percent']])
+            for row in usage['comparison_rows']:
+                writer.writerow([safe_csv(row['label']), row['before'], row['after'], row['delta'], row['percent']])
     if data.get('driver_rows'):
         writer.writerow([]);writer.writerow(['AWS comparison drivers','Customer','Group','Driver','Metric','Unit','Previous','Selected','Change'])
         for row in data['driver_rows']:
@@ -255,6 +272,7 @@ def health(request):
 @login_required
 def explorer_metadata(request):
     from datetime import date, timedelta
+    import json
     from django.utils import timezone
     kind = request.GET.get('dimension', '')
     if kind not in contract.FILTERS:
@@ -267,10 +285,20 @@ def explorer_metadata(request):
         params=request.GET.copy()
         # Choices follow the other filters, never their own current selection. Metadata
         # is independent of incomplete comparison/group/usage controls in the form.
-        params.update(group_by='none',group_key='',report_mode='standard',measure='cost',normalized='0',forecast='1',granularity='daily')
-        params.setlist(kind,[])
+        # Metadata only concerns actual dates. Resolve rolling selections before
+        # clamping, so a valid long monthly forecast never becomes a daily forecast.
+        dates = contract.date_parameters(params, today)
+        params.update(start=dates['start'], end=str(min(date.fromisoformat(dates['end']), today)),
+                      date_range='custom', future_range='none', historical_end='')
+        params.update(group_by='none',group_key='',report_mode='standard',measure='cost',normalized='0',forecast='0',granularity='monthly')
+        if kind not in ('tag','cost_category') or not key or params.get(kind+'_key')==key:
+            params.setlist(kind,[])
+            if kind in ('tag','cost_category'):
+                params['untagged' if kind=='tag' else 'uncategorized']='0'
+        additional = contract.keyed_filters(params)
         if kind in ('tag','cost_category'):
-            params['untagged' if kind=='tag' else 'uncategorized']='0'
+            additional = [item for item in additional if item['type']!=kind or (key and item['key']!=key)]
+        params['keyed_filters'] = json.dumps(additional, separators=(',', ':'))
         p=contract.normalize(params)
         start=date.fromisoformat(p['start']);end=min(date.fromisoformat(p['end']),today)
         scope = scoping.resolve(p)
@@ -349,7 +377,7 @@ def save_report(request):
 
 @login_required
 def open_report(request, pk):
-    saved = get_object_or_404(SavedReport, pk=pk)
+    saved = get_object_or_404(SavedReport, pk=pk, archived_at__isnull=True)
     return redirect('/?' + contract.querydict(saved.parameters).urlencode())
 
 

@@ -160,7 +160,7 @@ def customer_detail(request, pk):
         context['alerts'] = Alert.objects.filter(budget__customer=customer, acknowledged_at__isnull=True).select_related('budget')
     elif tab == 'reports':
         from .models import SavedReport
-        context['saved_reports'] = [r for r in SavedReport.objects.all() if r.parameters.get('customer') == str(customer.pk)]
+        context['saved_reports'] = [r for r in SavedReport.objects.filter(archived_at__isnull=True) if r.parameters.get('customer') == str(customer.pk)]
         context['monthly'] = list(Cost.objects.filter(customer=customer, currency=currency).annotate(period=TruncMonth('day')).values('period').annotate(u=Sum('unblended'), a=Sum('amortized')).order_by('-period')[:13])
     elif tab == 'sync':
         context['periods'] = CollectionPeriod.objects.filter(source__customer=customer).select_related('source').order_by('source__account_id', '-month')[:60]

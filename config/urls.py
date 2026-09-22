@@ -5,6 +5,7 @@ from django.views.generic import RedirectView
 from billing import web, authentication, views_security, user_administration, views_access, views_insights, views_optimization, views_reconciliation
 from billing import views_management as manage
 from billing import views_alliance as alliance
+from billing import report_library
 
 urlpatterns = [
     path('insights/', views_insights.insights, name='insights'),
@@ -32,6 +33,13 @@ urlpatterns = [
     path('explorer/status/', web.explorer_status, name='explorer_status'),
     path('reports/save/', web.save_report, name='save_report'),
     path('reports/import/', web.import_report, name='import_report'),
+    path('reports/', report_library.library, name='report_library'),
+    path('reports/new/', report_library.new_report, name='new_report'),
+    path('reports/actions/', report_library.selected_reports, name='selected_reports'),
+    path('reports/<int:pk>/duplicate/', report_library.duplicate_report, name='duplicate_report'),
+    path('reports/<int:pk>/rename/', report_library.rename_report, name='rename_report'),
+    path('reports/<int:pk>/archive/', report_library.archive_report, name='archive_report'),
+    path('reports/<int:pk>/restore/', report_library.restore_report, name='restore_report'),
     path('reports/<int:pk>/', web.open_report, name='open_report'),
     path('portfolio/', web.portfolio, name='portfolio'),
     path('overview/', manage.overview, name='overview'),

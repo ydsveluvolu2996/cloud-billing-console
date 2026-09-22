@@ -1,0 +1,7 @@
+{% extends 'base.html' %}
+{% block title %}Create report · Cloud Billing{% endblock %}
+{% block content %}
+<header class="page-header"><div><h1>Create report</h1><p>Choose a report type.</p></div><a class="button secondary" href="{% url 'report_library' %}">Report library</a></header>
+<section class="panel"><div class="panel-head"><div><h2>Cost and usage</h2><p>Explore costs, usage, forecasts and comparisons using the customers available to this workspace.</p></div><a class="button" href="{% url 'dashboard' %}">Create cost and usage report</a></div></section>
+<section class="panel"><div class="panel-head"><div><h2>Commitment reports in AWS</h2><p>These report types open in your separately signed-in AWS account and use its permissions. Cloud Billing customer filters are not transferred. Choose the appropriate AWS account there to inspect utilization, coverage and targets.</p></div></div><div class="table-wrap"><table><caption class="sr-only">AWS commitment report types</caption><thead><tr><th>Report type</th><th>Open report</th></tr></thead><tbody>{% for report in aws_report_types %}<tr><td>{{ report.label }}</td><td><a href="{{ report.url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ report.label }} in AWS">Open in AWS ↗</a></td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}
