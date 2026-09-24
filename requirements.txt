@@ -21,7 +21,7 @@ mozilla-django-oidc==5.0.2
 cryptography==50.0.1
 cffi==2.1.1
 pycparser==3.0
-pyjwt==2.13.0
+pyjwt==2.14.0
 requests==2.34.2
 charset-normalizer==3.5.1
 idna==3.19
