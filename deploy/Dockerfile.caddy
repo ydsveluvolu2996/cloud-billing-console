@@ -9,6 +9,6 @@ RUN go mod init billing-caddy-runtime \
         golang.org/x/text@v0.41.0 google.golang.org/grpc@v1.83.2 \
     && CGO_ENABLED=0 go build -trimpath -o /out/caddy github.com/caddyserver/caddy/v2/cmd/caddy
 
-FROM caddy:2.11.4-alpine
+FROM caddy:2.11.6-alpine
 RUN apk upgrade --no-cache
 COPY --from=builder /out/caddy /usr/bin/caddy
