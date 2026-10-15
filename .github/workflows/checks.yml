@@ -86,7 +86,7 @@ jobs:
         env:
           DEBUG: 'false'
           SECRET_KEY: ci-validation-only-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: synthetic-capacity-python-${{ matrix.python }}-postgres-${{ matrix.postgres }}-${{ github.sha }}
           path: /tmp/security-load.json
@@ -155,12 +155,12 @@ jobs:
           sha256sum images.tar.gz > images.tar.gz.sha256
       - name: Package tracked source and offline native dependencies
         run: python deploy/github-release/package.py /tmp/billing-release
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: billing-release-${{ github.sha }}
           path: /tmp/billing-release
           retention-days: 3
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: security-scans-${{ github.sha }}
@@ -240,7 +240,7 @@ jobs:
         run: python deploy/github-release/release.py /tmp/billing-release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: billing-deployment-${{ github.sha }}-${{ github.run_attempt }}
