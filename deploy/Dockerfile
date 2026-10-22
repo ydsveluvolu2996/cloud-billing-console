@@ -1,4 +1,4 @@
-FROM python:3.14.7-alpine3.24
+FROM python:3.15.0-alpine3.24
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
