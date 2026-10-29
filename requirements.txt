@@ -1,6 +1,6 @@
 asgiref==3.12.1
-boto3==1.43.89
-botocore==1.43.89
+boto3==1.43.118
+botocore==1.43.118
 django==6.1.1
 django-axes==8.3.1
 gunicorn==26.2.0
@@ -10,7 +10,7 @@ psycopg==3.3.5
 psycopg-binary==3.3.5
 python-dateutil==2.9.0.post0
 pyyaml==6.0.3
-s3transfer==0.19.2
+s3transfer==0.19.3
 six==1.17.0
 sqlparse==0.6.0
 typing-extensions==4.16.0
